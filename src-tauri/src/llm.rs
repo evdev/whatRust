@@ -4,8 +4,10 @@
 //! webview never sees it, and the transcript is wrapped as data so the model
 //! is told not to follow instructions that appear inside it.
 
+use crate::i18n::{tr, trf};
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::time::Duration;
 
 pub const OPENROUTER: &str = "openrouter";
@@ -116,19 +118,14 @@ pub async fn complete(job: Completion<'_>) -> Result<String, &'static str> {
 }
 
 fn post(outbound: Outbound) -> Result<String, &'static str> {
-    let mut request = client(Duration::from_secs(60)).post(&outbound.url);
-    for (name, value) in &outbound.headers {
-        request = request.set(name, value);
-    }
-    match request.send_string(&outbound.body) {
-        Ok(response) => response.into_string().map_err(|_| "llm"),
-        Err(ureq::Error::Status(code, response)) => {
-            let _ = response.into_string();
-            crate::dlog::log(&format!("voice: llm status={code}"));
+    match exchange("POST", &outbound, Duration::from_secs(60)) {
+        Ok((status, body)) if (200..300).contains(&status) => Ok(body),
+        Ok((status, _)) => {
+            crate::dlog::log(&format!("voice: llm status={status}"));
             Err("llm")
         }
-        Err(_) => {
-            crate::dlog::log("voice: llm unreachable");
+        Err(error) => {
+            crate::dlog::log(&format!("voice: llm status={}", error.status));
             Err("llm")
         }
     }
@@ -156,9 +153,13 @@ pub struct ModelChoice {
 /// newer one of the same family is available to this key. OpenRouter is not
 /// listed: its catalog is too large for a picker, and the settings fields stay
 /// free text.
-pub fn list_main_models(provider: &str, key: &str) -> Result<Vec<ModelChoice>, &'static str> {
+pub fn list_main_models(provider: &str, key: &str) -> Result<Vec<ModelChoice>, ApiError> {
     if key.is_empty() {
-        return Err("llm");
+        return Err(ApiError::plain(
+            0,
+            FailKind::Auth,
+            tr("Nenhuma chave guardada."),
+        ));
     }
     match provider {
         GEMINI => {
@@ -166,26 +167,160 @@ pub fn list_main_models(provider: &str, key: &str) -> Result<Vec<ModelChoice>, &
             Ok(main_gemini_models(&models))
         }
         ANTHROPIC => {
-            let models = fetch_pages(key, anthropic_page)?;
+            // An older API rejects the lifecycle filter or the newer version
+            // header. The fallback asks for the same list without those.
+            let models = match fetch_pages(key, anthropic_page) {
+                Err(error) if error.status == 400 => fetch_pages(key, anthropic_page_fallback)?,
+                other => other?,
+            };
             Ok(main_anthropic_models(&models))
         }
         _ => Ok(Vec::new()),
     }
 }
 
-fn gemini_page(key: &str, cursor: &str) -> Result<Page, &'static str> {
+/// Check a key before it is stored. `Err` means the new key must not be saved.
+/// `Ok` with `warning` means the key is real, but the account cannot use it yet.
+pub fn inspect_key(provider: &str, key: &str, probe_model: &str) -> Result<Inspection, ApiError> {
+    if provider == OPENROUTER {
+        let model = if probe_model.is_empty() {
+            "google/gemini-2.5-flash"
+        } else {
+            probe_model
+        };
+        return match probe_completion(provider, key, model) {
+            Ok(()) => Ok(Inspection {
+                models: Vec::new(),
+                warning: None,
+                detail: tr("Chave guardada. O provedor aceitou a chave.").into_owned(),
+            }),
+            Err(error) if error.blocks_save() => Err(error),
+            Err(error) => Ok(Inspection {
+                models: Vec::new(),
+                warning: Some(error.detail.clone()),
+                detail: format!("{} {}", tr("Chave guardada."), error.detail),
+            }),
+        };
+    }
+    let (models, list_warning) = match list_main_models(provider, key) {
+        Ok(models) => (models, None),
+        Err(error) if error.blocks_save() => return Err(error),
+        Err(error) => (Vec::new(), Some(error.detail)),
+    };
+    // The first listed model can be a flagship that accepts the connection and
+    // never answers a short request. A flash or haiku model answers quickly,
+    // which is enough to tell a real key from a rejected one.
+    let probe_id = health_model(&models, probe_model);
+    let warning = if probe_id.is_empty() {
+        list_warning
+    } else {
+        match probe_completion(provider, key, &probe_id) {
+            Ok(()) => list_warning.filter(|_| models.is_empty()),
+            Err(error) if error.kind == FailKind::Auth => return Err(error),
+            // The model list already proved the key. A usage check that never
+            // got an answer is a warning, not a reason to throw the key away.
+            Err(error) if error.kind == FailKind::Unreachable && models.is_empty() => {
+                return Err(error)
+            }
+            Err(error)
+                if matches!(
+                    error.kind,
+                    FailKind::Billing | FailKind::Quota | FailKind::Unreachable
+                ) =>
+            {
+                Some(error.detail)
+            }
+            Err(error) if models.is_empty() => Some(error.detail),
+            Err(_) => None,
+        }
+    };
+    let detail = match &warning {
+        Some(warning) => format!("{} {warning}", tr("Chave guardada.")),
+        None if models.is_empty() => {
+            tr("Chave guardada. Nenhum modelo principal está disponível para esta chave.")
+                .into_owned()
+        }
+        None => trf(
+            "Chave guardada. {0} modelos principais disponíveis.",
+            &[&models.len()],
+        ),
+    };
+    Ok(Inspection {
+        models,
+        warning,
+        detail,
+    })
+}
+
+#[derive(Debug)]
+pub struct Inspection {
+    pub models: Vec<ModelChoice>,
+    pub warning: Option<String>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailKind {
+    Auth,
+    Billing,
+    Quota,
+    Unavailable,
+    Rejected,
+    Unreachable,
+}
+
+#[derive(Debug)]
+pub struct ApiError {
+    pub status: u16,
+    pub kind: FailKind,
+    pub detail: String,
+}
+
+impl ApiError {
+    fn plain(status: u16, kind: FailKind, detail: Cow<'_, str>) -> Self {
+        Self {
+            status,
+            kind,
+            detail: detail.into_owned(),
+        }
+    }
+
+    /// A billing or quota problem still belongs to a real key. An authentication
+    /// failure, or a provider that never answered, does not.
+    pub fn blocks_save(&self) -> bool {
+        matches!(self.kind, FailKind::Auth | FailKind::Unreachable)
+    }
+
+    pub fn tone(&self) -> &'static str {
+        match self.kind {
+            FailKind::Billing | FailKind::Quota | FailKind::Unavailable => "warn",
+            _ => "bad",
+        }
+    }
+}
+
+fn gemini_page(key: &str, cursor: &str) -> Result<Page, ApiError> {
     let mut url =
         "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000".to_string();
     if !cursor.is_empty() {
         url.push_str("&pageToken=");
         url.push_str(&path_encode(cursor));
     }
-    let body = get(&Outbound {
-        url,
-        headers: vec![("x-goog-api-key".into(), key.into())],
-        body: String::new(),
+    let body = get_ok(
+        &Outbound {
+            url,
+            headers: vec![("x-goog-api-key".into(), key.into())],
+            body: String::new(),
+        },
+        key,
+    )?;
+    let value: Value = serde_json::from_str(&body).map_err(|_| {
+        ApiError::plain(
+            400,
+            FailKind::Rejected,
+            tr("O provedor não aceitou o pedido."),
+        )
     })?;
-    let value: Value = serde_json::from_str(&body).map_err(|_| "llm")?;
     let models = value
         .get("models")
         .and_then(Value::as_array)
@@ -199,21 +334,49 @@ fn gemini_page(key: &str, cursor: &str) -> Result<Page, &'static str> {
     Ok(Page { models, next })
 }
 
-fn anthropic_page(key: &str, cursor: &str) -> Result<Page, &'static str> {
-    let mut url = "https://api.anthropic.com/v1/models?limit=1000&lifecycle=active".to_string();
+fn anthropic_page(key: &str, cursor: &str) -> Result<Page, ApiError> {
+    anthropic_page_with(key, cursor, true)
+}
+
+fn anthropic_page_fallback(key: &str, cursor: &str) -> Result<Page, ApiError> {
+    anthropic_page_with(key, cursor, false)
+}
+
+fn anthropic_page_with(key: &str, cursor: &str, current: bool) -> Result<Page, ApiError> {
+    let mut url = if current {
+        "https://api.anthropic.com/v1/models?limit=1000&lifecycle=active".to_string()
+    } else {
+        "https://api.anthropic.com/v1/models?limit=1000".to_string()
+    };
     if !cursor.is_empty() {
         url.push_str("&after_id=");
         url.push_str(&path_encode(cursor));
     }
-    let body = get(&Outbound {
-        url,
-        headers: vec![
-            ("x-api-key".into(), key.into()),
-            ("anthropic-version".into(), "2026-10-21".into()),
-        ],
-        body: String::new(),
+    let body = get_ok(
+        &Outbound {
+            url,
+            headers: vec![
+                ("x-api-key".into(), key.into()),
+                (
+                    "anthropic-version".into(),
+                    if current {
+                        "2026-10-21".into()
+                    } else {
+                        "2023-06-01".into()
+                    },
+                ),
+            ],
+            body: String::new(),
+        },
+        key,
+    )?;
+    let value: Value = serde_json::from_str(&body).map_err(|_| {
+        ApiError::plain(
+            400,
+            FailKind::Rejected,
+            tr("O provedor não aceitou o pedido."),
+        )
     })?;
-    let value: Value = serde_json::from_str(&body).map_err(|_| "llm")?;
     let models = value
         .get("data")
         .and_then(Value::as_array)
@@ -242,8 +405,8 @@ struct Page {
 
 fn fetch_pages(
     key: &str,
-    page: fn(&str, &str) -> Result<Page, &'static str>,
-) -> Result<Vec<Value>, &'static str> {
+    page: fn(&str, &str) -> Result<Page, ApiError>,
+) -> Result<Vec<Value>, ApiError> {
     let mut cursor = String::new();
     let mut seen = Vec::new();
     let mut models = Vec::new();
@@ -259,21 +422,270 @@ fn fetch_pages(
     Ok(models)
 }
 
-fn get(outbound: &Outbound) -> Result<String, &'static str> {
-    let mut request = client(Duration::from_secs(20)).get(&outbound.url);
+fn get_ok(outbound: &Outbound, secret: &str) -> Result<String, ApiError> {
+    let (status, body) = exchange("GET", outbound, Duration::from_secs(20))?;
+    if (200..300).contains(&status) {
+        Ok(body)
+    } else {
+        let error = explain_http(status, &body, secret);
+        crate::dlog::log(&format!(
+            "voice: models status={status} kind={}",
+            error.kind_name()
+        ));
+        Err(error)
+    }
+}
+
+fn health_model(models: &[ModelChoice], fallback: &str) -> String {
+    let pick = |pred: fn(&str) -> bool| {
+        models
+            .iter()
+            .find(|model| !model.id.is_empty() && pred(&model.id))
+            .map(|model| model.id.clone())
+    };
+    pick(|id| id.contains("flash-lite") || id.contains("haiku"))
+        .or_else(|| pick(|id| id.contains("flash")))
+        .or_else(|| {
+            let fallback = fallback.trim();
+            if fallback.is_empty() {
+                None
+            } else {
+                Some(fallback.to_string())
+            }
+        })
+        .or_else(|| models.first().map(|model| model.id.clone()))
+        .unwrap_or_default()
+}
+
+fn probe_completion(provider: &str, key: &str, model: &str) -> Result<(), ApiError> {
+    let outbound = build(&Completion {
+        provider,
+        model,
+        key,
+        system: "Reply with ok.",
+        user: "hi",
+        max_tokens: 32,
+    })
+    .map_err(|_| {
+        ApiError::plain(
+            400,
+            FailKind::Rejected,
+            tr("O provedor não aceitou o pedido."),
+        )
+    })?;
+    let (status, body) = exchange("POST", &outbound, Duration::from_secs(25))?;
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        let error = explain_http(status, &body, key);
+        crate::dlog::log(&format!(
+            "voice: keycheck status={status} kind={}",
+            error.kind_name()
+        ));
+        Err(error)
+    }
+}
+
+fn exchange(
+    method: &str,
+    outbound: &Outbound,
+    timeout: Duration,
+) -> Result<(u16, String), ApiError> {
+    let agent = client(timeout);
+    let mut request = if method == "GET" {
+        agent.get(&outbound.url)
+    } else {
+        agent.post(&outbound.url)
+    };
     for (name, value) in &outbound.headers {
         request = request.set(name, value);
     }
-    match request.call() {
-        Ok(response) => response.into_string().map_err(|_| "llm"),
-        Err(ureq::Error::Status(code, response)) => {
-            let _ = response.into_string();
-            crate::dlog::log(&format!("voice: models status={code}"));
-            Err("llm")
+    let sent = if method == "GET" {
+        request.call()
+    } else {
+        request.send_string(&outbound.body)
+    };
+    match sent {
+        Ok(response) => {
+            let status = response.status();
+            Ok((status, response.into_string().unwrap_or_default()))
         }
-        Err(_) => {
-            crate::dlog::log("voice: models unreachable");
-            Err("llm")
+        Err(ureq::Error::Status(code, response)) => {
+            Ok((code, response.into_string().unwrap_or_default()))
+        }
+        Err(ureq::Error::Transport(transport)) => {
+            let timed_out = transport_timed_out(&transport);
+            crate::dlog::log(&format!(
+                "voice: transport kind={:?} timeout={timed_out}",
+                transport.kind()
+            ));
+            let detail = if timed_out {
+                tr("O pedido ao provedor expirou.")
+            } else {
+                tr("Não foi possível contactar o provedor.")
+            };
+            Err(ApiError::plain(0, FailKind::Unreachable, detail))
+        }
+    }
+}
+
+fn transport_timed_out(transport: &ureq::Transport) -> bool {
+    use std::error::Error;
+    transport.kind() == ureq::ErrorKind::Io
+        && transport
+            .source()
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
+}
+
+fn explain_http(status: u16, body: &str, secret: &str) -> ApiError {
+    let message = provider_message(body);
+    let kind = fail_kind(status, &format!("{} {}", message, provider_codes(body)));
+    let message = sanitize_provider_message(&message, secret);
+    let lead = fail_lead(kind);
+    let detail = if message.is_empty() {
+        lead.into_owned()
+    } else {
+        format!("{lead} {message}")
+    };
+    ApiError {
+        status,
+        kind,
+        detail,
+    }
+}
+
+fn provider_message(body: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return String::new();
+    };
+    value
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/message").and_then(Value::as_str))
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn provider_codes(body: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return String::new();
+    };
+    ["/error/status", "/error/type"]
+        .into_iter()
+        .filter_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn fail_kind(status: u16, message: &str) -> FailKind {
+    let text = message.to_ascii_lowercase();
+    if contains_any(
+        &text,
+        &[
+            "credit",
+            "credits",
+            "prepay",
+            "billing",
+            "payment required",
+            "depleted",
+            "funds",
+        ],
+    ) {
+        return FailKind::Billing;
+    }
+    if contains_any(
+        &text,
+        &[
+            "api key not valid",
+            "invalid api key",
+            "invalid x-api-key",
+            "incorrect api key",
+            "authentication",
+            "unauthorized",
+            "unauthenticated",
+            "permission denied",
+            "permission_denied",
+            "api_key_invalid",
+        ],
+    ) {
+        return FailKind::Auth;
+    }
+    if contains_any(
+        &text,
+        &[
+            "quota",
+            "rate limit",
+            "rate_limit",
+            "too many requests",
+            "resource exhausted",
+            "resource_exhausted",
+        ],
+    ) {
+        return FailKind::Quota;
+    }
+    if contains_any(
+        &text,
+        &[
+            "not found",
+            "not available",
+            "no access",
+            "does not exist",
+            "unavailable",
+        ],
+    ) {
+        return FailKind::Unavailable;
+    }
+    match status {
+        401 | 403 => FailKind::Auth,
+        402 => FailKind::Billing,
+        404 => FailKind::Unavailable,
+        429 => FailKind::Quota,
+        0 | 500..=599 => FailKind::Unreachable,
+        _ => FailKind::Rejected,
+    }
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+fn fail_lead(kind: FailKind) -> Cow<'static, str> {
+    match kind {
+        FailKind::Auth => tr("A chave foi recusada pelo provedor."),
+        FailKind::Billing => tr("A conta está sem créditos ou o pagamento é exigido."),
+        FailKind::Quota => tr("A cota ou o limite de uso desta chave se esgotou."),
+        FailKind::Unavailable => tr("O modelo ou o recurso não está disponível para esta chave."),
+        FailKind::Rejected => tr("O provedor não aceitou o pedido."),
+        FailKind::Unreachable => tr("Não foi possível contactar o provedor."),
+    }
+}
+
+fn sanitize_provider_message(message: &str, secret: &str) -> String {
+    let mut text = if secret.is_empty() {
+        message.to_string()
+    } else {
+        message.replace(secret, "…")
+    };
+    text.retain(|ch| !ch.is_control());
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut end = text.len().min(240);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].trim().to_string()
+}
+
+impl ApiError {
+    fn kind_name(&self) -> &'static str {
+        match self.kind {
+            FailKind::Auth => "auth",
+            FailKind::Billing => "billing",
+            FailKind::Quota => "quota",
+            FailKind::Unavailable => "unavailable",
+            FailKind::Rejected => "rejected",
+            FailKind::Unreachable => "unreachable",
         }
     }
 }
@@ -307,13 +719,7 @@ fn gemini_candidate(model: &Value) -> Option<GeminiCandidate> {
     if id.is_empty() || id.contains('/') || !id.starts_with("gemini-") || gemini_blocked(id) {
         return None;
     }
-    let methods = model
-        .get("supportedGenerationMethods")
-        .and_then(Value::as_array)?;
-    if !methods
-        .iter()
-        .any(|method| method.as_str() == Some("generateContent"))
-    {
+    if !allows_text_generation(model) {
         return None;
     }
     let (tier, major, minor) = gemini_tier(id)?;
@@ -331,6 +737,27 @@ fn gemini_candidate(model: &Value) -> Option<GeminiCandidate> {
         major,
         minor,
     })
+}
+
+fn allows_text_generation(model: &Value) -> bool {
+    let methods = model
+        .get("supportedGenerationMethods")
+        .and_then(Value::as_array)
+        .or_else(|| model.get("supportedActions").and_then(Value::as_array));
+    match methods {
+        Some(methods) => methods.iter().any(is_text_method),
+        // A list that omits the method field still names the models this key can
+        // call. Name filtering below drops embeddings and specialty models.
+        None => true,
+    }
+}
+
+fn is_text_method(method: &Value) -> bool {
+    let Some(name) = method.as_str() else {
+        return false;
+    };
+    let name = name.replace(['_', '-'], "").to_ascii_lowercase();
+    matches!(name.as_str(), "generatecontent" | "interactions")
 }
 
 fn gemini_blocked(id: &str) -> bool {
@@ -838,6 +1265,82 @@ mod tests {
         let choices = main_anthropic_models(&models);
         assert_eq!(choices.len(), 1);
         assert_eq!(choices[0].id, "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn health_check_asks_a_fast_model() {
+        let named = |id: &str| ModelChoice {
+            id: id.into(),
+            label: id.into(),
+        };
+        let gemini = vec![
+            named("gemini-4-argon"),
+            named("gemini-3.8-flash"),
+            named("gemini-3.5-flash-lite"),
+        ];
+        assert_eq!(
+            health_model(&gemini, "gemini-2.5-flash"),
+            "gemini-3.5-flash-lite"
+        );
+        let anthropic = vec![named("claude-opus-5-5"), named("claude-haiku-4-5")];
+        assert_eq!(health_model(&anthropic, ""), "claude-haiku-4-5");
+        assert_eq!(health_model(&[], "gemini-2.5-flash"), "gemini-2.5-flash");
+        assert_eq!(
+            health_model(&[named("gemini-4-argon")], ""),
+            "gemini-4-argon"
+        );
+    }
+
+    #[test]
+    fn provider_errors_name_the_reason_and_hide_the_key() {
+        let secret = "AIzaSecretKey";
+        let billing = explain_http(
+            429,
+            r#"{"error":{"status":"RESOURCE_EXHAUSTED","message":"Your prepayment credits are depleted."}}"#,
+            secret,
+        );
+        assert_eq!(billing.kind, FailKind::Billing);
+        assert!(billing.detail.contains("prepayment credits are depleted"));
+        assert!(!billing.detail.contains(secret));
+
+        let auth = explain_http(
+            400,
+            &format!(
+                r#"{{"error":{{"message":"API key not valid. Please pass a valid API key. {secret}"}}}}"#
+            ),
+            secret,
+        );
+        assert_eq!(auth.kind, FailKind::Auth);
+        assert!(auth.detail.contains("API key not valid"));
+        assert!(!auth.detail.contains(secret));
+
+        let low = explain_http(
+            400,
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}"#,
+            "",
+        );
+        assert_eq!(low.kind, FailKind::Billing);
+        assert!(low.detail.contains("credit balance is too low"));
+
+        let missing = explain_http(
+            404,
+            r#"{"error":{"message":"models/gemini-x is not found"}}"#,
+            "",
+        );
+        assert_eq!(missing.kind, FailKind::Unavailable);
+
+        let quota = explain_http(429, r#"{"error":{"message":"Quota exceeded"}}"#, "");
+        assert_eq!(quota.kind, FailKind::Quota);
+        assert!(quota.blocks_save() == false);
+        assert!(auth.blocks_save());
+    }
+
+    #[test]
+    fn gemini_picker_accepts_a_text_model_without_a_method_list() {
+        let models = vec![model(
+            r#"{"name":"models/gemini-3.8-flash","displayName":"Gemini 3.8 Flash"}"#,
+        )];
+        assert_eq!(main_gemini_models(&models)[0].id, "gemini-3.8-flash");
     }
 
     #[test]

@@ -23,6 +23,7 @@ mod sessions;
 mod settings;
 #[cfg(all(windows, debug_assertions))]
 mod smoke;
+mod todo;
 mod tray;
 #[cfg(windows)]
 mod ui_health;
@@ -175,6 +176,7 @@ pub fn run() {
         .manage(integration::Integration::default())
         .manage(accounts::ActiveAccount::new("wa-default".into()))
         .manage(voice::VoiceState::default())
+        .manage(todo::TodoState::default())
         .invoke_handler(tauri::generate_handler![
             integration::integration_state,
             integration::report_integration,
@@ -220,6 +222,14 @@ pub fn run() {
             voice::fluidvoice_status,
             voice::set_ai_key,
             voice::list_ai_models,
+            todo::todo_list,
+            todo::todo_add,
+            todo::todo_update,
+            todo::todo_toggle_done,
+            todo::todo_delete,
+            todo::todo_snooze,
+            todo::todo_dismiss_alarm,
+            todo::todo_clear_done,
         ])
         .setup(move |app| {
             // Menu-bar-only on macOS: load settings early (the rest of setup needs them
@@ -371,6 +381,8 @@ pub fn run() {
             if smoke_mode {
                 smoke::start(handle);
             }
+            let todo_app = handle.clone();
+            std::thread::spawn(move || todo::scheduler(todo_app));
             Ok(())
         })
         .build(context)

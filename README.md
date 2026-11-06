@@ -56,6 +56,7 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 - **Optional app lock** — password (Argon2id) or biometric (Windows Hello / Touch ID / Linux polkit); locks on launch, on demand, on hide-to-tray, or after idle
 - **System tray** icon with **close-to-tray** and an **unread message badge**
 - **Native OS notifications** for new messages
+- **To-do list** — open it from the button under the account switcher (it sits on the left rail only when that switcher is not on screen). In a message's own menu, choose **Add to To-Do**, set a reminder, and jump back to the chat. The list is stored on this computer, separately for each account. Reminders only fire while whatRust is running; ones that come due while it is closed are shown the next time it opens.
 - **Display size** — a Smaller / Small / Default / Big page zoom in Settings, so the chat list stops crowding out the conversation on a high-DPI screen
 - **Persistent login** — scan the QR code once, stay signed in across restarts
 - **Voice messages** everywhere, plus **voice & video calls** on macOS (WhatsApp Web doesn't offer calls on Windows, and whatRust's Linux builds can't place calls — see the FAQ)
@@ -229,7 +230,7 @@ Yes. It adds a system tray icon with an unread-message badge, can close to the t
 No. Login is persistent — scan the QR code once via Linked Devices and you stay signed in across restarts.
 
 ### Is whatRust safe? Does it read my messages?
-whatRust only loads the official `web.whatsapp.com` in a native webview and adds no message-handling layer of its own. It requests only the webview, microphone, and camera access that WhatsApp Web itself needs, and it is open source, so the code can be audited.
+whatRust loads the official `web.whatsapp.com` in a native webview. It requests only the webview, microphone, and camera access that WhatsApp Web itself needs, and it is open source, so the code can be audited. The optional to-do list stores, on this computer only, the text of messages you explicitly add to it and the reminders you set. That list is not sent anywhere.
 
 ### My WhatsApp account went "under review" after linking whatRust — why?
 whatRust doesn't talk to WhatsApp's servers itself: it shows the official `web.whatsapp.com` page, exactly as a browser tab would, and linking it is the same Linked Devices flow as WhatsApp Web. Account reviews are decided by WhatsApp's own automated systems, which whatRust can't see or influence. If your account is flagged, appeal through the WhatsApp app on your phone.
@@ -242,6 +243,7 @@ whatRust doesn't talk to WhatsApp's servers itself: it shows the official `web.w
 - **macOS and Windows file drops** go directly to WhatsApp through the native webview. Drag files from Finder/File Explorer onto the open conversation; use the attach (+) button if a drag source does not provide a file the webview can read.
 - **Linux drag-and-drop limits**: up to 200 files per drop, 500 MB per file, and 500 MB per drop total. Base64 transport is decoded incrementally while files stream in, but the page must still hold the final `File` data in memory. Larger batches can always be sent via WhatsApp's attach (+) → Document picker, which is not routed through these limits. Skipped files are reported in a notification. Native drops on macOS and Windows follow WhatsApp's own attachment limits.
 - **Multiple accounts on macOS** require macOS 14+ (older macOS runs a single account); Linux and Windows are unrestricted.
+- **To-do reminders** fire only while whatRust is running (including in the tray). A reminder that comes due while the app is closed is shown the next time it opens, together with the others, instead of one notification per missed item.
 - **Flatpak file access**: native drag-and-drop needs read-only access to your home
   files because Tauri does not yet route OS drops through the File Transfer portal.
   whatRust writes only to Downloads, its sandbox data, and its optional autostart entry.

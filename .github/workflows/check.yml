@@ -67,6 +67,9 @@ jobs:
       - name: device.js tests — source-device icon
         run: node src-tauri/resources/device.test.mjs
 
+      - name: todo.js tests — message capture, rail, filters
+        run: node src-tauri/resources/todo.test.mjs
+
       - name: settings-ui hotkey tests
         run: node settings-ui/comboToAccelerator.test.mjs
 

@@ -127,6 +127,10 @@ macro_rules! account_webview {
                 crate::settings::load($app).show_message_device
             ))
             .initialization_script(include_str!("../resources/device.js"))
+            // To-do list: a button under the account switcher, message capture,
+            // and reminders. todo.js reads the account from this webview's label
+            // via the todo_* commands.
+            .initialization_script(include_str!("../resources/todo.js"))
             // Drag-and-drop is done by capturing the OS drop in Rust and streaming the file
             // into the page (see `register_drop_handler` + bridge.js `__whatrustDropFeed`).
             // We deliberately KEEP Tauri's drag-drop handler enabled (except on Windows, see

@@ -101,6 +101,14 @@ assert(box.children.some((child) => child.textContent === "hello"), "translation
 api.renderBox(row, view, { translate: false });
 assert(!box.children.some((child) => child.textContent === "hello"), "translation hides when the setting is off");
 assert(row.querySelectorAll("[data-wr-voice]").length === 1, "updating the box does not duplicate it");
+assert(box.style.cssText.includes("rgba(255,255,255,0.62)"), "a received note uses a translucent white panel");
+const sent = "true_123@c.us_ABC";
+assert(api.panelStyle(sent, null).includes("rgba(217,253,211,0.62)"), "a sent note falls back to translucent green");
+assert(
+  api.panelStyle(id, { background: { r: 0, g: 92, b: 75, a: 1 }, color: "rgb(233,237,239)" }).includes("rgba(0,92,75,0.62)"),
+  "a sampled bubble color replaces the fallback"
+);
+assert(api.parseColor("rgba(255, 255, 255, 0)").a === 0, "a transparent bubble color is recognized");
 
 let active = 0;
 let peak = 0;

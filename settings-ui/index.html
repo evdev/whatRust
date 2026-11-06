@@ -110,14 +110,15 @@
             <select class="model-choice" id="summary_model_select" aria-label="Modelo do resumo" hidden></select>
           </div>
           <label class="row entry-row">
-            <span class="row-text"><span class="row-title">Chave da API</span>
-              <span class="row-subtitle" id="ai_key_state">Nenhuma chave guardada.</span></span>
+            <span class="row-title">Chave da API</span>
             <input type="password" id="ai_key" autocomplete="off" aria-label="Chave da API" />
           </label>
         </div>
         <div class="group-actions">
-          <button type="button" id="save_ai_key" class="secondary">Guardar chave</button>
+          <button type="button" id="save_ai_key">Guardar chave</button>
+          <button type="button" id="remove_ai_key" class="secondary">Remover chave</button>
         </div>
+        <p id="ai_key_state" class="key-status" role="status">Nenhuma chave guardada.</p>
         <p class="group-note">A chave fica neste computador e nunca entra na página do WhatsApp. A tradução e o botão Resumir usam o modelo escolhido para cada um.</p>
       </section>
 

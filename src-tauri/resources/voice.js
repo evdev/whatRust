@@ -186,8 +186,72 @@
     };
   }
 
-  var BOX_STYLE = "margin-top:6px;padding:8px 10px;border-radius:8px;background:color-mix(in srgb, currentColor 8%, transparent);color:inherit;font:13px/1.4 system-ui,sans-serif;white-space:pre-wrap;user-select:text";
+  var BOX_STYLE = "margin-top:6px;padding:8px 10px;border-radius:8px;font:13px/1.4 system-ui,sans-serif;white-space:pre-wrap;user-select:text;";
   var BUTTON_STYLE = "margin-top:6px;margin-right:8px;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-decoration:underline;cursor:pointer";
+  var PANEL_ALPHA = 0.62;
+
+  function parseColor(value) {
+    var text = String(value || "").trim();
+    var rgb = text.match(/^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+%?))?\s*\)$/);
+    if (rgb) {
+      var alpha = 1;
+      if (rgb[4] !== undefined) alpha = rgb[4].indexOf("%") === -1 ? parseFloat(rgb[4]) : parseFloat(rgb[4]) / 100;
+      return { r: Math.round(parseFloat(rgb[1])), g: Math.round(parseFloat(rgb[2])), b: Math.round(parseFloat(rgb[3])), a: alpha };
+    }
+    var srgb = text.match(/^color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*(?:\/\s*([\d.]+))?\)$/);
+    if (!srgb) return null;
+    return {
+      r: Math.round(parseFloat(srgb[1]) * 255),
+      g: Math.round(parseFloat(srgb[2]) * 255),
+      b: Math.round(parseFloat(srgb[3]) * 255),
+      a: srgb[4] === undefined ? 1 : parseFloat(srgb[4]),
+    };
+  }
+
+  function fallbackPaint(id) {
+    if (String(id || "").indexOf("true_") === 0) return { background: { r: 217, g: 253, b: 211, a: 1 }, color: "#111b21" };
+    return { background: { r: 255, g: 255, b: 255, a: 1 }, color: "#111b21" };
+  }
+
+  function bubbleAnchor(row) {
+    if (!row || !row.querySelectorAll) return row;
+    var buttons = row.querySelectorAll("button,[role='button']");
+    for (var b = 0; b < buttons.length; b++) {
+      if (isVoiceControl(buttons[b].getAttribute("aria-label") || "")) return buttons[b];
+    }
+    return row.querySelector("[data-testid='audio-player'],canvas,[data-icon='audio-play']") || row;
+  }
+
+  function wideEnough(node) {
+    if (!node || typeof node.getBoundingClientRect !== "function") return true;
+    var rect = node.getBoundingClientRect();
+    return rect.width >= 100;
+  }
+
+  function bubblePaint(row) {
+    if (!row || typeof root.getComputedStyle !== "function") return null;
+    var anchor = bubbleAnchor(row);
+    var node = anchor && anchor !== row ? anchor.parentElement : anchor;
+    for (var i = 0; node && i < 12; i++) {
+      if (node !== anchor && wideEnough(node)) {
+        try {
+          var style = root.getComputedStyle(node);
+          var bg = parseColor(style.backgroundColor);
+          if (bg && bg.a > 0.45) return { background: bg, color: style.color || "" };
+        } catch (e) {}
+      }
+      if (node === row) break;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function panelStyle(id, paint) {
+    var chosen = paint && paint.background ? paint : fallbackPaint(id);
+    var bg = chosen.background;
+    var color = chosen.color || "#111b21";
+    return BOX_STYLE + "background:rgba(" + bg.r + "," + bg.g + "," + bg.b + "," + PANEL_ALPHA + ");color:" + color;
+  }
 
   function explain(code) {
     var text = code && code.message ? code.message : code;
@@ -217,11 +281,11 @@
     if (!box) {
       box = doc.createElement("div");
       box.setAttribute("data-wr-voice", view.id);
-      box.style.cssText = BOX_STYLE;
       box.addEventListener("pointerdown", stopEvent);
       box.addEventListener("click", stopEvent);
       row.appendChild(box);
     }
+    box.style.cssText = panelStyle(view.id, bubblePaint(row));
     var signature = [
       view.status || "",
       view.text || "",
@@ -286,6 +350,8 @@
       pack: pack,
       createQueue: createQueue,
       renderBox: renderBox,
+      panelStyle: panelStyle,
+      parseColor: parseColor,
     };
     return;
   }

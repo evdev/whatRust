@@ -29,6 +29,14 @@ const PAGE_COMMANDS: &[&str] = &[
     "voice_lookup",
     "transcribe_voice",
     "summarize_voice",
+    "todo_list",
+    "todo_add",
+    "todo_update",
+    "todo_toggle_done",
+    "todo_delete",
+    "todo_snooze",
+    "todo_dismiss_alarm",
+    "todo_clear_done",
 ];
 /// Commands only the local settings window may use.
 const SETTINGS_COMMANDS: &[&str] = &[
@@ -226,7 +234,14 @@ fn local_windows_keep_exactly_their_own_commands() {
             "lock must be allowed {cmd}"
         );
     }
-    for cmd in ["unlock_password", "reset_app_lock", "notify"] {
+    for cmd in [
+        "unlock_password",
+        "reset_app_lock",
+        "notify",
+        "todo_list",
+        "todo_add",
+        "todo_delete",
+    ] {
         assert!(
             !allowed(&app, "settings", local, cmd),
             "settings must not reach {cmd}"
@@ -240,6 +255,8 @@ fn local_windows_keep_exactly_their_own_commands() {
         "set_ai_key",
         "list_ai_models",
         "fluidvoice_status",
+        "todo_list",
+        "todo_delete",
     ] {
         assert!(
             !allowed(&app, "lock", local, cmd),

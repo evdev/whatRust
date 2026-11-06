@@ -86,7 +86,96 @@
   }
 
   function isLeaf(el) {
-    return !el.children || el.children.length === 0;
+    if (!el || !el.children) return true;
+    for (var i = 0; i < el.children.length; i++) {
+      var child = el.children[i];
+      if (attr(child, "data-wr-device") || attr(child, "data-wr-device-spacer")) continue;
+      return false;
+    }
+    return true;
+  }
+
+  function computed(el) {
+    try {
+      if (typeof root.getComputedStyle !== "function") return null;
+      return root.getComputedStyle(el);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function positionOf(el) {
+    var style = computed(el);
+    return style ? String(style.position || "").toLowerCase() : "";
+  }
+
+  function floatOf(el) {
+    var style = computed(el);
+    if (!style) return "";
+    return String(style.cssFloat || style.float || "").toLowerCase();
+  }
+
+  // The visible time is usually taken out of the text flow and anchored to the
+  // corner of the bubble, on top of the last line. The icon has to live in that
+  // same box; a sibling in the flow lands on the words.
+  function outOfFlow(el, stop) {
+    var node = el;
+    for (var i = 0; node && node !== stop && i < 8; i++) {
+      var pos = positionOf(node);
+      if (pos === "absolute" || pos === "fixed") return node;
+      var floated = floatOf(node);
+      if (floated === "left" || floated === "right") return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function classText(el) {
+    if (!el) return "";
+    var raw = el.getAttribute ? el.getAttribute("class") : "";
+    if (!raw && typeof el.className === "string") raw = el.className;
+    return raw ? " " + raw + " " : "";
+  }
+
+  function findBody(row, layer) {
+    if (!row || !row.querySelectorAll) return null;
+    var nodes = row.querySelectorAll("span, div");
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (layer && (el === layer || (layer.contains && layer.contains(el)))) continue;
+      if (classText(el).indexOf(" selectable-text ") !== -1) return el;
+    }
+    return null;
+  }
+
+  function removeSpacers(node) {
+    if (!node || !node.querySelectorAll) return;
+    var spacers = node.querySelectorAll("[data-wr-device-spacer]");
+    for (var i = 0; i < spacers.length; i++) {
+      if (spacers[i].parentNode) spacers[i].parentNode.removeChild(spacers[i]);
+    }
+  }
+
+  function clearMarks(node) {
+    if (!node || !node.querySelector) return;
+    var existing = node.querySelector("[data-wr-device]");
+    if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+    removeSpacers(node);
+  }
+
+  // The corner time is only as wide as the clock. Growing it with an icon covers
+  // the last words unless the message text reserves the same extra width.
+  function reserve(row, layer) {
+    var body = findBody(row, layer);
+    if (!body) return;
+    if (body.querySelector && body.querySelector("[data-wr-device-spacer]")) return;
+    var doc = root.document;
+    if (!doc) return;
+    var spacer = doc.createElement("span");
+    spacer.setAttribute("data-wr-device-spacer", "1");
+    spacer.setAttribute("aria-hidden", "true");
+    spacer.style.cssText = "display:inline-block;width:18px;height:1px;overflow:hidden;vertical-align:bottom;user-select:none;pointer-events:none";
+    body.appendChild(spacer);
   }
 
   function clockSpan(row) {
@@ -169,7 +258,7 @@
     span.setAttribute("data-wr-device", kind);
     span.setAttribute("title", label(kind));
     span.setAttribute("aria-hidden", "true");
-    span.style.cssText = "display:inline-flex;align-items:center;align-self:center;width:13px;height:13px;margin-inline-end:3px;flex:none;color:inherit;user-select:none;line-height:0";
+    span.style.cssText = "display:inline-flex;align-items:center;flex:none;width:12px;height:12px;color:inherit;user-select:none;line-height:0;pointer-events:auto";
     var color = timeColor(clock);
     if (color && color !== "rgba(0, 0, 0, 0)" && color !== "transparent") span.style.color = color;
     var graphic = svgEl(GLYPH[kind] || []);
@@ -180,19 +269,41 @@
   function paint(node) {
     if (!node || !node.getAttribute) return;
     var kind = enabled ? deviceOf(messageToken(attr(node, "data-id"))) : "";
-    var existing = node.querySelector && node.querySelector("[data-wr-device]");
     if (!kind) {
-      if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+      clearMarks(node);
       return;
     }
     var clock = clockSpan(node);
-    if (!clock || !clock.parentNode) {
-      if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+    if (!clock) {
+      clearMarks(node);
       return;
     }
-    if (existing && existing.getAttribute("data-wr-device") === kind && existing.nextSibling === clock) return;
-    if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
-    clock.parentNode.insertBefore(iconElement(kind, clock), clock);
+    var existing = node.querySelector && node.querySelector("[data-wr-device]");
+    var placed = existing && existing.parentNode === clock && clock.children && clock.children[0] === existing && existing.getAttribute("data-wr-device") === kind;
+    if (!placed) {
+      if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+      var icon = iconElement(kind, clock);
+      var before = clock.firstChild || null;
+      if (clock.insertBefore) clock.insertBefore(icon, before);
+      else if (clock.appendChild) clock.appendChild(icon);
+      var floated = floatOf(clock);
+      if (clock.style && floated !== "left" && floated !== "right") {
+        clock.style.display = "inline-flex";
+        clock.style.alignItems = "center";
+        clock.style.columnGap = "3px";
+        clock.style.whiteSpace = "nowrap";
+        clock.style.width = "max-content";
+        clock.style.maxWidth = "none";
+        clock.style.overflow = "visible";
+      }
+    }
+    var layer = outOfFlow(clock, node);
+    if (layer) {
+      if (layer.style && !layer.style.zIndex) layer.style.zIndex = "2";
+      reserve(node, layer);
+    } else {
+      removeSpacers(node);
+    }
   }
 
   function conversation() {

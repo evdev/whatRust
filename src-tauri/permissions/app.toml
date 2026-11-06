@@ -6,7 +6,9 @@ identifier = "allow-whatsapp-bridge"
 description = "Forward notifications, unread titles and diagnostics from WhatsApp account windows."
 commands.allow = [
   "notify", "set_unread", "dlog", "switcher_accounts", "switch_account",
-  "voice_prefs", "voice_lookup", "transcribe_voice", "summarize_voice"
+  "voice_prefs", "voice_lookup", "transcribe_voice", "summarize_voice",
+  "todo_list", "todo_add", "todo_update", "todo_toggle_done", "todo_delete",
+  "todo_snooze", "todo_dismiss_alarm", "todo_clear_done"
 ]
 
 [[permission]]

@@ -175,7 +175,10 @@ api.paint(sample.message);
 const icons = sample.message.querySelectorAll("[data-wr-device]");
 assert(icons.length === 1, "painting twice keeps a single icon");
 assert(icons[0].getAttribute("data-wr-device") === "computer", "a web message shows the computer icon");
-assert(icons[0].nextSibling === sample.clock, "the icon sits immediately before the time");
+assert(icons[0].parentNode === sample.clock, "the icon sits inside the time, not among the words");
+assert(api.clockSpan(sample.message) === sample.clock, "the icon inside the time does not hide the clock");
+assert(sample.clock.style.display === "inline-flex", "the time and the icon stay on one line");
+assert(sample.message.querySelector("[data-wr-device-spacer]") === null, "an in-flow time does not add a gap");
 assert(icons[0].getAttribute("title") === "Sent from a computer", "the tooltip names a computer");
 assert(icons[0].querySelector("svg"), "the icon is an svg");
 
@@ -200,9 +203,29 @@ assert(api.clockSpan(mismatched.message) === null, "a duration is not used when 
 api.paint(mismatched.message);
 assert(mismatched.message.querySelector("[data-wr-device]") === null, "no clock means no icon");
 
+const positions = new Map();
+globalThis.getComputedStyle = (el) => ({
+  position: positions.get(el) || "static",
+  color: "",
+  float: "none",
+  cssFloat: "none",
+});
+const corner = row(apple, "9:01");
+const cornerBody = corner.message.querySelector("span");
+cornerBody.setAttribute("class", "selectable-text copyable-text");
+positions.set(corner.clock, "absolute");
+api.paint(corner.message);
+api.paint(corner.message);
+const spacers = corner.message.querySelectorAll("[data-wr-device-spacer]");
+assert(spacers.length === 1 && spacers[0].parentNode === cornerBody, "an overlaid time reserves space at the end of the text");
+assert(corner.message.querySelector("[data-wr-device]").parentNode === corner.clock, "the overlaid icon stays inside the time");
+assert(corner.clock.style.zIndex === "2", "the time stays above the last line");
+
 api.setEnabled(false);
 api.paint(sample.message);
 assert(sample.message.querySelector("[data-wr-device]") === null, "turning the feature off removes the icon");
+api.paint(corner.message);
+assert(corner.message.querySelector("[data-wr-device-spacer]") === null, "turning the feature off removes the reserved space");
 api.setEnabled(true);
 
 const main = new El("div");

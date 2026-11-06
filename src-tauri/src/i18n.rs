@@ -243,6 +243,19 @@ static EN_TABLE: &[(&str, &str)] = &[
     ("Não foi possível guardar a chave da API.", "The API key could not be saved."),
     ("Nenhuma chave guardada.", "No key saved."),
     ("Não foi possível listar os modelos.", "The models could not be listed."),
+    ("Digite a chave da API.", "Enter the API key."),
+    ("A chave deste provedor foi removida deste Mac.", "This provider's key was removed from this Mac."),
+    ("A chave foi recusada pelo provedor.", "The provider rejected the key."),
+    ("A conta está sem créditos ou o pagamento é exigido.", "The account is out of credits or payment is required."),
+    ("A cota ou o limite de uso desta chave se esgotou.", "This key's quota or usage limit is used up."),
+    ("O modelo ou o recurso não está disponível para esta chave.", "The model or feature is not available for this key."),
+    ("O provedor não aceitou o pedido.", "The provider did not accept the request."),
+    ("Não foi possível contactar o provedor.", "The provider could not be reached."),
+    ("O pedido ao provedor expirou.", "The request to the provider timed out."),
+    ("Chave guardada.", "Key saved."),
+    ("Chave guardada. {0} modelos principais disponíveis.", "Key saved. {0} main models available."),
+    ("Chave guardada. O provedor aceitou a chave.", "Key saved. The provider accepted the key."),
+    ("Chave guardada. Nenhum modelo principal está disponível para esta chave.", "Key saved. No main model is available for this key."),
     // tray and menus
     ("Contas…", "Accounts…"),
     ("Contas", "Accounts"),
@@ -259,6 +272,15 @@ static EN_TABLE: &[(&str, &str)] = &[
     // window titles
     ("whatRust — Configurações", "whatRust — Settings"),
     ("whatRust — Conta destacada", "whatRust — Detached account"),
+    // to-do list
+    ("Lembrete: {0}", "Reminder: {0}"),
+    ("Toque para ver o item na lista de tarefas.", "Tap to see the item on the to-do list."),
+    ("Você tem {0} lembretes pendentes na lista de tarefas.", "You have {0} pending reminders on the to-do list."),
+    ("Abra a lista de tarefas para vê-los.", "Open the to-do list to see them."),
+    ("Tarefa não encontrada.", "Task not found."),
+    ("A lista de tarefas está cheia.", "The to-do list is full."),
+    ("Dados da tarefa inválidos.", "The task data is not valid."),
+    ("Mensagem do WhatsApp", "WhatsApp message"),
 ];
 
 #[cfg(test)]
@@ -347,7 +369,9 @@ mod tests {
             include_str!("sessions.rs"),
             include_str!("settings.rs"),
             include_str!("tray.rs"),
+            include_str!("llm.rs"),
             include_str!("voice.rs"),
+            include_str!("todo.rs"),
             include_str!("window.rs"),
             include_str!("biometric/macos.rs"),
         ];

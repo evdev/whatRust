@@ -401,6 +401,7 @@ pub async fn remove_account(
         map.remove(&removed.id);
     }
     accounts::delete_profile(&app, &removed.id);
+    crate::todo::delete_account(&app, &removed.id);
 
     // If the removed account was the active one, point at a surviving account
     // so toggle/show don't target a window that no longer exists. (On Windows

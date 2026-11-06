@@ -23,7 +23,15 @@
     "allow-voice-prefs",
     "allow-voice-lookup",
     "allow-transcribe-voice",
-    "allow-summarize-voice"
+    "allow-summarize-voice",
+    "allow-todo-list",
+    "allow-todo-add",
+    "allow-todo-update",
+    "allow-todo-toggle-done",
+    "allow-todo-delete",
+    "allow-todo-snooze",
+    "allow-todo-dismiss-alarm",
+    "allow-todo-clear-done"
   ],
   "webviews": [
     "wa-*"

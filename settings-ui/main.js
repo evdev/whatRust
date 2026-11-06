@@ -277,6 +277,10 @@ window.addEventListener("DOMContentLoaded", () => {
   }
   document.getElementById("test_fluidvoice").addEventListener("click", testFluidVoice);
   document.getElementById("save_ai_key").addEventListener("click", saveAiKey);
+  document.getElementById("remove_ai_key").addEventListener("click", removeAiKey);
+  document.getElementById("ai_key").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") saveAiKey();
+  });
 });
 
 function usesModelList(provider) {
@@ -365,16 +369,29 @@ async function loadModelCatalog(provider) {
       : "Nenhum modelo principal disponível para esta chave.";
   } catch (e) {
     if (token !== catalogToken || shownProvider !== provider) return;
-    hint.textContent = String(e);
+    const message = errorText(e);
+    hint.textContent = message;
+    setKeyStatus(message, "bad");
   }
   renderModelSelects();
 }
 
+function errorText(error) {
+  if (error == null) return "";
+  if (typeof error === "string") return error;
+  if (typeof error.message === "string") return error.message;
+  return String(error);
+}
+
+function setKeyStatus(text, tone) {
+  const el = document.getElementById("ai_key_state");
+  el.textContent = text;
+  el.className = "key-status" + (tone && tone !== "ok" ? " " + tone : "");
+}
+
 function refreshKeyState() {
   const on = keyFlags[document.getElementById("ai_provider").value];
-  document.getElementById("ai_key_state").textContent = on
-    ? "Chave guardada neste Mac."
-    : "Nenhuma chave guardada.";
+  setKeyStatus(on ? "Chave guardada neste Mac." : "Nenhuma chave guardada.", "ok");
 }
 
 async function testFluidVoice() {
@@ -394,15 +411,54 @@ async function testFluidVoice() {
 async function saveAiKey() {
   const provider = document.getElementById("ai_provider").value;
   const input = document.getElementById("ai_key");
+  const key = input.value.trim();
+  const button = document.getElementById("save_ai_key");
+  if (!key) {
+    setKeyStatus("Digite a chave da API.", "warn");
+    return;
+  }
+  button.disabled = true;
+  catalogToken += 1;
+  setKeyStatus("Verificando a chave…", "ok");
   try {
-    await invoke("set_ai_key", { provider, key: input.value });
-    keyFlags[provider] = input.value.trim().length > 0;
-    input.value = "";
+    const result = await invoke("set_ai_key", { provider, key, remove: false });
+    keyFlags[provider] = !!result.stored;
+    if (result.accepted) input.value = "";
+    if (result.accepted && usesModelList(provider)) {
+      modelCatalogs[provider] = Array.isArray(result.models) ? result.models : [];
+    }
+    if (document.getElementById("ai_provider").value === provider) {
+      setKeyStatus(result.detail || "", result.tone || "ok");
+      syncModelControls();
+    }
+  } catch (e) {
+    if (document.getElementById("ai_provider").value === provider) {
+      setKeyStatus(errorText(e), "bad");
+    }
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function removeAiKey() {
+  const provider = document.getElementById("ai_provider").value;
+  if (!keyFlags[provider]) {
+    setKeyStatus("Nenhuma chave guardada.", "ok");
+    return;
+  }
+  if (!await Dlg.confirm("A chave guardada deste provedor será apagada deste Mac.", {
+    title: "Remover chave",
+    okLabel: "Remover",
+    danger: true,
+  })) return;
+  try {
+    const result = await invoke("set_ai_key", { provider, key: "", remove: true });
+    keyFlags[provider] = false;
     modelCatalogs[provider] = null;
-    refreshKeyState();
+    setKeyStatus(result.detail || "A chave deste provedor foi removida deste Mac.", "ok");
     if (provider === shownProvider) syncModelControls();
   } catch (e) {
-    document.getElementById("ai_key_state").textContent = String(e);
+    setKeyStatus(errorText(e), "bad");
   }
 }
 

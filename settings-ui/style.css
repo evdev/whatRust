@@ -56,6 +56,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .group-note { font-size: 13px; line-height: 1.55; margin: 16px 0; color: var(--dim); }
 .group-note code { font: inherit; background: var(--hover); padding: 2px 4px; }
 .group-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; }
+.key-status { font-size: 13px; line-height: 1.5; margin: 12px 0 0; color: var(--fg); }
+.key-status.warn { color: var(--warn); }
+.key-status.bad { color: var(--danger); }
 .boxed-list > * + * { border-top: 1px solid var(--border); }
 .boxed-list:empty { display: none; }
 .row { display: flex; align-items: center; gap: 20px; min-height: 76px; padding: 16px 0; }

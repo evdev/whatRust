@@ -11,7 +11,7 @@ use crate::llm::{self, Completion};
 use crate::settings::{self, Settings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{InvokeBody, Request};
@@ -226,19 +226,100 @@ pub async fn fluidvoice_status(
     }
 }
 
+#[derive(serde::Serialize)]
+pub struct AiKeyReport {
+    pub stored: bool,
+    pub accepted: bool,
+    pub tone: String,
+    pub detail: String,
+    pub models: Vec<llm::ModelChoice>,
+}
+
 #[tauri::command]
-pub fn set_ai_key(
+pub async fn set_ai_key(
     window: Webview,
     app: AppHandle,
     provider: String,
     key: String,
-) -> Result<(), String> {
+    remove: Option<bool>,
+) -> Result<AiKeyReport, String> {
     settings_window(&window, &app)?;
-    keys::set_key(&app, &provider, &key).map_err(|code| match code {
+    if !keys::known_provider(&provider) {
+        return Err(tr("Provedor de IA desconhecido.").into_owned());
+    }
+    if remove.unwrap_or(false) {
+        keys::set_key(&app, &provider, "").map_err(key_store_error)?;
+        return Ok(AiKeyReport {
+            stored: false,
+            accepted: false,
+            tone: "ok".into(),
+            detail: tr("A chave deste provedor foi removida deste Mac.").into_owned(),
+            models: Vec::new(),
+        });
+    }
+    let key = key.trim();
+    if key.is_empty() {
+        return Ok(AiKeyReport {
+            stored: keys::has_key(&app, &provider),
+            accepted: false,
+            tone: "warn".into(),
+            detail: tr("Digite a chave da API.").into_owned(),
+            models: Vec::new(),
+        });
+    }
+    if key.len() > 512 || key.chars().any(char::is_control) {
+        return Ok(AiKeyReport {
+            stored: keys::has_key(&app, &provider),
+            accepted: false,
+            tone: "bad".into(),
+            detail: tr("A chave da API não foi aceita.").into_owned(),
+            models: Vec::new(),
+        });
+    }
+    let settings = settings::load(&app);
+    let probe_model = match provider.as_str() {
+        "gemini" => settings.ai_model_gemini.clone(),
+        "anthropic" => settings.ai_model_anthropic.clone(),
+        _ => settings.ai_model_openrouter.clone(),
+    };
+    let provider_for_check = provider.clone();
+    let key_for_check = key.to_string();
+    let checked = tauri::async_runtime::spawn_blocking(move || {
+        llm::inspect_key(&provider_for_check, &key_for_check, &probe_model)
+    })
+    .await
+    .map_err(|_| tr("Não foi possível contactar o provedor.").into_owned())?;
+    match checked {
+        Ok(inspection) => {
+            keys::set_key(&app, &provider, key).map_err(key_store_error)?;
+            Ok(AiKeyReport {
+                stored: true,
+                accepted: true,
+                tone: if inspection.warning.is_some() {
+                    "warn".into()
+                } else {
+                    "ok".into()
+                },
+                detail: inspection.detail,
+                models: inspection.models,
+            })
+        }
+        Err(error) => Ok(AiKeyReport {
+            stored: keys::has_key(&app, &provider),
+            accepted: false,
+            tone: error.tone().into(),
+            detail: error.detail,
+            models: Vec::new(),
+        }),
+    }
+}
+
+fn key_store_error(code: &str) -> String {
+    match code {
         "bad_provider" => tr("Provedor de IA desconhecido.").into_owned(),
         "bad_key" => tr("A chave da API não foi aceita.").into_owned(),
         _ => tr("Não foi possível guardar a chave da API.").into_owned(),
-    })
+    }
 }
 
 #[tauri::command]
@@ -263,8 +344,8 @@ pub async fn list_ai_models(
     };
     tauri::async_runtime::spawn_blocking(move || llm::list_main_models(&provider, &key))
         .await
-        .map_err(|_| tr("Não foi possível listar os modelos.").into_owned())?
-        .map_err(|_| tr("Não foi possível listar os modelos.").into_owned())
+        .map_err(|_| tr("Não foi possível contactar o provedor.").into_owned())?
+        .map_err(|error| error.detail)
 }
 
 fn disabled(id: String) -> VoiceView {
@@ -616,9 +697,109 @@ pub fn probe_health(port: u16) -> Result<String, &'static str> {
         .to_string())
 }
 
-fn fluid_transcribe(port: u16, audio: &[u8], filename: &str) -> Result<String, &'static str> {
+fn wants_speaker_labels(audio: &[u8]) -> bool {
+    !audio.starts_with(b"OggS")
+}
+
+fn transcribe_url(port: u16, speaker_labels: bool) -> String {
     let port = settings::sanitize_port(port);
-    let url = format!("http://127.0.0.1:{port}/v1/transcribe");
+    if speaker_labels {
+        format!("http://127.0.0.1:{port}/v1/transcribe?speakerLabels=1")
+    } else {
+        format!("http://127.0.0.1:{port}/v1/transcribe")
+    }
+}
+
+/// Prefer speaker turns when FluidVoice labeled more than one speaker.
+/// A missing or unusable `speakerSegments` field keeps `text`.
+fn transcript_text(value: &Value) -> Option<String> {
+    let plain = value.get("text").and_then(Value::as_str)?.to_owned();
+    let Some(segments) = value.get("speakerSegments").and_then(Value::as_array) else {
+        return Some(plain);
+    };
+    Some(labeled_transcript(segments).unwrap_or(plain))
+}
+
+struct SpeakerTurn {
+    speaker: String,
+    start: f64,
+    text: String,
+}
+
+fn labeled_transcript(segments: &[Value]) -> Option<String> {
+    let mut turns = Vec::new();
+    for item in segments {
+        let Some(text) = item.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let speaker = item
+            .get("speaker")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if speaker.is_empty() {
+            return None;
+        }
+        let Some(start) = item.get("startSeconds").and_then(Value::as_f64) else {
+            continue;
+        };
+        if !start.is_finite() {
+            continue;
+        }
+        turns.push(SpeakerTurn {
+            speaker: speaker.to_string(),
+            start,
+            text: text.to_string(),
+        });
+    }
+    if turns.is_empty() {
+        return None;
+    }
+    turns.sort_by(|left, right| left.start.total_cmp(&right.start));
+    let names: BTreeSet<&str> = turns.iter().map(|turn| turn.speaker.as_str()).collect();
+    if names.len() < 2 {
+        return Some(
+            turns
+                .into_iter()
+                .map(|turn| turn.text)
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+    }
+    Some(
+        turns
+            .iter()
+            .map(|turn| {
+                format!(
+                    "[{}] {}: {}",
+                    speaker_timestamp(turn.start),
+                    turn.speaker,
+                    turn.text
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
+}
+
+fn speaker_timestamp(seconds: f64) -> String {
+    let total = seconds.max(0.0).floor() as u64;
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let secs = total % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{secs:02}")
+    } else {
+        format!("{minutes}:{secs:02}")
+    }
+}
+
+fn fluid_transcribe(port: u16, audio: &[u8], filename: &str) -> Result<String, &'static str> {
+    let url = transcribe_url(port, wants_speaker_labels(audio));
     let response = llm::client(Duration::from_secs(FLUID_TRANSCRIBE_SECS))
         .post(&url)
         .set("X-Filename", filename)
@@ -643,11 +824,7 @@ fn fluid_transcribe(port: u16, audio: &[u8], filename: &str) -> Result<String, &
     };
     let text = response.into_string().map_err(|_| "fluidvoice")?;
     let value: Value = serde_json::from_str(&text).map_err(|_| "fluidvoice")?;
-    value
-        .get("text")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or("fluidvoice")
+    transcript_text(&value).ok_or("fluidvoice")
 }
 
 #[cfg(test)]
@@ -688,6 +865,66 @@ mod tests {
         let mut huge = frame("false_123@c.us_ABC", b"x");
         huge.resize(MAX_AUDIO + 183, 1);
         assert_eq!(split_payload(&huge).unwrap_err(), "too_large");
+    }
+
+    #[test]
+    fn speaker_labels_are_requested_only_for_non_ogg() {
+        assert!(!wants_speaker_labels(b"OggSrest"));
+        assert!(wants_speaker_labels(b"xxxxftyp"));
+        assert!(wants_speaker_labels(b"RIFFwav"));
+        assert!(wants_speaker_labels(b"ID3tag"));
+        assert!(wants_speaker_labels(b"????"));
+        assert_eq!(
+            transcribe_url(47733, false),
+            "http://127.0.0.1:47733/v1/transcribe"
+        );
+        assert_eq!(
+            transcribe_url(47733, true),
+            "http://127.0.0.1:47733/v1/transcribe?speakerLabels=1"
+        );
+    }
+
+    #[test]
+    fn speaker_segments_format_when_several_people_speak() {
+        let value = serde_json::json!({
+            "text": "labeled already",
+            "speakerSegments": [
+                {"speaker": "Speaker 2", "startSeconds": 3723.4, "text": "later"},
+                {"speaker": "Speaker 1", "startSeconds": 12.2, "text": "  hello "},
+                {"speaker": "Speaker 2", "startSeconds": 40, "text": "middle"},
+                {"speaker": "", "startSeconds": 1, "text": ""}
+            ]
+        });
+        assert_eq!(
+            transcript_text(&value).unwrap(),
+            "[0:12] Speaker 1: hello\n\n[0:40] Speaker 2: middle\n\n[1:02:03] Speaker 2: later"
+        );
+    }
+
+    #[test]
+    fn one_speaker_or_bad_segments_stay_unlabeled() {
+        let one = serde_json::json!({
+            "text": "[0:01] Speaker 1: baked label",
+            "speakerSegments": [
+                {"speaker": "Speaker 1", "startSeconds": 2, "text": "second"},
+                {"speaker": "Speaker 1", "startSeconds": 1, "text": "first"}
+            ]
+        });
+        assert_eq!(transcript_text(&one).unwrap(), "first second");
+
+        let empty = serde_json::json!({"text": "plain", "speakerSegments": []});
+        assert_eq!(transcript_text(&empty).unwrap(), "plain");
+
+        let not_array = serde_json::json!({"text": "plain", "speakerSegments": {"speaker": "A"}});
+        assert_eq!(transcript_text(&not_array).unwrap(), "plain");
+
+        let blank_name = serde_json::json!({
+            "text": "plain",
+            "speakerSegments": [{"speaker": "  ", "startSeconds": 1, "text": "hidden"}]
+        });
+        assert_eq!(transcript_text(&blank_name).unwrap(), "plain");
+
+        assert!(transcript_text(&serde_json::json!({"speakerSegments": []})).is_none());
     }
 
     #[test]
