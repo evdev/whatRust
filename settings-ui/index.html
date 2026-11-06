@@ -10,7 +10,7 @@
   </head>
   <body>
     <header class="app-header"><div><strong>Configurações</strong><span>whatRust</span></div><button id="back-to-chat" type="button" class="secondary back-button" aria-label="Voltar ao WhatsApp" title="Voltar ao WhatsApp" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5 M12 5l-7 7 7 7"/></svg><span>Voltar ao WhatsApp</span></button></header>
-    <div class="settings-layout"><nav class="settings-nav" aria-label="Configurações"><a href="#sec-contas">Contas</a><a href="#sec-notificacoes">Notificações</a><a href="#sec-aparencia">Aparência</a><a href="#sec-seguranca">Segurança</a><a href="#sec-sistema">Inicialização</a><a href="#sec-atalhos">Atalhos</a><a href="#sec-diagnostico">Diagnóstico</a></nav>
+    <div class="settings-layout"><nav class="settings-nav" aria-label="Configurações"><a href="#sec-contas">Contas</a><a href="#sec-notificacoes">Notificações</a><a href="#sec-voz">Notas de voz</a><a href="#sec-aparencia">Aparência</a><a href="#sec-seguranca">Segurança</a><a href="#sec-sistema">Inicialização</a><a href="#sec-atalhos">Atalhos</a><a href="#sec-diagnostico">Diagnóstico</a></nav>
     <!-- Local preferences use familiar WhatsApp rows: titled
          groups of boxed-list rows, a title + subtitle on the left and the control
          on the right. Element ids are what main.js uses; keep them stable. -->
@@ -62,9 +62,73 @@
         </div>
       </section>
 
+      <section class="group" id="sec-voz">
+        <h2 class="group-title">Notas de voz</h2>
+        <div class="boxed-list">
+          <label class="row">
+            <span class="row-text"><span class="row-title">Transcrever notas de voz</span>
+              <span class="row-subtitle">Mostra a transcrição embaixo de cada nota de voz. O áudio fica neste Mac e é transcrito pelo FluidVoice.</span></span>
+            <input type="checkbox" class="switch" id="voice_transcribe" />
+          </label>
+          <label class="row">
+            <span class="row-text"><span class="row-title">Porta do FluidVoice</span>
+              <span class="row-subtitle">API local do FluidVoice. O padrão é 47733.</span></span>
+            <input type="number" id="fluidvoice_port" min="1" max="65535" value="47733" aria-label="Porta do FluidVoice" />
+          </label>
+          <div class="row">
+            <span class="row-text"><span class="row-title">Conexão</span>
+              <span class="row-subtitle" id="fluidvoice_status">Ainda não verificada.</span></span>
+            <button type="button" id="test_fluidvoice" class="secondary">Testar conexão</button>
+          </div>
+          <label class="row">
+            <span class="row-text"><span class="row-title">Traduzir transcrições</span>
+              <span class="row-subtitle">Envia só o texto da transcrição para o provedor escolhido.</span></span>
+            <input type="checkbox" class="switch" id="translate_enabled" />
+          </label>
+          <label class="row">
+            <span class="row-text"><span class="row-title">Idioma da tradução</span></span>
+            <input type="text" id="translate_target_lang" placeholder="English" aria-label="Idioma da tradução" />
+          </label>
+          <label class="row">
+            <span class="row-text"><span class="row-title">Provedor de IA</span></span>
+            <select id="ai_provider" aria-label="Provedor de IA">
+              <option value="openrouter">OpenRouter</option>
+              <option value="gemini">Gemini</option>
+              <option value="anthropic">Anthropic</option>
+            </select>
+          </label>
+          <div class="row">
+            <span class="row-text"><span class="row-title">Modelo da tradução</span>
+              <span class="row-subtitle" id="translate_model_hint">Nome do modelo aceito por esse provedor.</span></span>
+            <input type="text" class="model-choice" id="translate_model" aria-label="Modelo da tradução" />
+            <select class="model-choice" id="translate_model_select" aria-label="Modelo da tradução" hidden></select>
+          </div>
+          <div class="row">
+            <span class="row-text"><span class="row-title">Modelo do resumo</span>
+              <span class="row-subtitle" id="summary_model_hint">Usado pelo botão Resumir em cada transcrição.</span></span>
+            <input type="text" class="model-choice" id="summary_model" aria-label="Modelo do resumo" />
+            <select class="model-choice" id="summary_model_select" aria-label="Modelo do resumo" hidden></select>
+          </div>
+          <label class="row entry-row">
+            <span class="row-text"><span class="row-title">Chave da API</span>
+              <span class="row-subtitle" id="ai_key_state">Nenhuma chave guardada.</span></span>
+            <input type="password" id="ai_key" autocomplete="off" aria-label="Chave da API" />
+          </label>
+        </div>
+        <div class="group-actions">
+          <button type="button" id="save_ai_key" class="secondary">Guardar chave</button>
+        </div>
+        <p class="group-note">A chave fica neste computador e nunca entra na página do WhatsApp. A tradução e o botão Resumir usam o modelo escolhido para cada um.</p>
+      </section>
+
       <section class="group" id="sec-aparencia">
         <h2 class="group-title">Aparência</h2>
         <div class="boxed-list">
+          <label class="row">
+            <span class="row-text"><span class="row-title">Aparelho de origem</span>
+              <span class="row-subtitle">Um ícone ao lado do horário indica um aparelho Apple, um Android ou um computador, quando o identificador da mensagem permite.</span></span>
+            <input type="checkbox" class="switch" id="show_message_device" />
+          </label>
           <label class="row">
             <span class="row-text"><span class="row-title">Tamanho da interface</span>
               <span class="row-subtitle">Ajusta o tamanho do WhatsApp sem alterar as outras contas.</span></span>

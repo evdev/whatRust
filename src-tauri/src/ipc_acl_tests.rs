@@ -25,6 +25,10 @@ const PAGE_COMMANDS: &[&str] = &[
     "reveal_download",
     "switcher_accounts",
     "switch_account",
+    "voice_prefs",
+    "voice_lookup",
+    "transcribe_voice",
+    "summarize_voice",
 ];
 /// Commands only the local settings window may use.
 const SETTINGS_COMMANDS: &[&str] = &[
@@ -43,6 +47,9 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "set_app_lock_options",
     "set_biometric_enabled",
     "lock_app",
+    "fluidvoice_status",
+    "set_ai_key",
+    "list_ai_models",
 ];
 /// Commands only the lock screen may use.
 const LOCK_COMMANDS: &[&str] = &[
@@ -225,7 +232,15 @@ fn local_windows_keep_exactly_their_own_commands() {
             "settings must not reach {cmd}"
         );
     }
-    for cmd in ["get_settings", "add_account", "disable_app_lock", "notify"] {
+    for cmd in [
+        "get_settings",
+        "add_account",
+        "disable_app_lock",
+        "notify",
+        "set_ai_key",
+        "list_ai_models",
+        "fluidvoice_status",
+    ] {
         assert!(
             !allowed(&app, "lock", local, cmd),
             "lock must not reach {cmd}"

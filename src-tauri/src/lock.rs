@@ -161,6 +161,7 @@ fn lock_on_main(app: &AppHandle, prompt: bool) {
     }
     crate::notify::on_lock(app);
     crate::integration::broadcast(app);
+    crate::voice::push_prefs(app, &crate::settings::load(app));
     let mut hidden = Vec::new();
     for (label, w) in app.windows() {
         if should_hide(&label) && w.is_visible().unwrap_or(false) {
@@ -198,6 +199,7 @@ fn unlock_on_main(app: &AppHandle) {
     state.prompt_requested.store(false, Ordering::SeqCst);
     crate::notify::on_unlock(app);
     *guard(&state.unlocked) = true;
+    crate::voice::push_prefs(app, &crate::settings::load(app));
     if let Some(w) = app.get_webview_window("lock") {
         let _ = w.destroy();
     }

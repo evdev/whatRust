@@ -93,6 +93,51 @@
   var switcherTimer = setInterval(mountAccountSwitcher, 500);
   setTimeout(function () { clearInterval(switcherTimer); }, 30000);
 
+  // WhatsApp pins a "Get WhatsApp for Mac" promo under the chat list.
+  try {
+    var bannerTimer = 0;
+    function hideDownloadBanner() {
+      var roots = document.querySelectorAll("#side, #pane-side");
+      if (!roots.length && document.body) roots = [document.body];
+      for (var r = 0; r < roots.length; r++) {
+        if (!roots[r].querySelectorAll) continue;
+        var nodes = roots[r].querySelectorAll("span, a, div");
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        if (!el.closest || el.closest("[data-id], [role='row'], [role='listitem'], #main, [data-wr-voice], [data-wr-banner]")) continue;
+        var text = (el.textContent || "").replace(/\s+/g, " ").trim();
+        if (
+          text.length > 40 ||
+          (text.indexOf("Get WhatsApp for ") !== 0 &&
+            text.indexOf("Baixar o WhatsApp") !== 0 &&
+            text.indexOf("Obter o WhatsApp") !== 0)
+        ) continue;
+        var box = el;
+        for (var d = 0; d < 6 && box.parentElement; d++) {
+          var parent = box.parentElement;
+          if (parent.id === "side" || parent.id === "pane-side" || parent.id === "app") break;
+          var parentText = (parent.textContent || "").replace(/\s+/g, " ").trim();
+          if (parentText.length > 90) break;
+          box = parent;
+        }
+        if (box.setAttribute) box.setAttribute("data-wr-banner", "1");
+        if (box.style && box.style.setProperty) box.style.setProperty("display", "none", "important");
+      }
+      }
+    }
+    function scheduleBannerHide() {
+      if (bannerTimer) return;
+      bannerTimer = setTimeout(function () {
+        bannerTimer = 0;
+        try { hideDownloadBanner(); } catch (e) {}
+      }, 200);
+    }
+    if (document.documentElement && typeof MutationObserver === "function") {
+      new MutationObserver(scheduleBannerHide).observe(document.documentElement, { childList: true, subtree: true });
+    }
+    scheduleBannerHide();
+  } catch (e) {}
+
   // Native OS toast with short-window de-duplication. WhatsApp can raise the same alert
   // more than once in a burst (a React re-render, or one message surfacing through two
   // notification code paths), and unlike a browser (which collapses repeats by tag) a

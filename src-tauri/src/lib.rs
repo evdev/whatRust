@@ -9,7 +9,9 @@ mod downloads;
 mod i18n;
 mod integration;
 mod jsonfile;
+mod keys;
 mod links;
+mod llm;
 mod lock;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod menubar;
@@ -25,6 +27,7 @@ mod tray;
 #[cfg(windows)]
 mod ui_health;
 mod unread;
+mod voice;
 mod window;
 
 // Linux only: the capability files are the same on every OS, and a second
@@ -171,6 +174,7 @@ pub fn run() {
         .manage(notify::Recent::default())
         .manage(integration::Integration::default())
         .manage(accounts::ActiveAccount::new("wa-default".into()))
+        .manage(voice::VoiceState::default())
         .invoke_handler(tauri::generate_handler![
             integration::integration_state,
             integration::report_integration,
@@ -209,6 +213,13 @@ pub fn run() {
             commands::unlock_password,
             commands::unlock_biometric,
             commands::reset_app_lock,
+            voice::voice_prefs,
+            voice::voice_lookup,
+            voice::transcribe_voice,
+            voice::summarize_voice,
+            voice::fluidvoice_status,
+            voice::set_ai_key,
+            voice::list_ai_models,
         ])
         .setup(move |app| {
             // Menu-bar-only on macOS: load settings early (the rest of setup needs them

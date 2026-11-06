@@ -61,6 +61,12 @@ jobs:
       - name: bridge.js tests — notifications, downloads, drop injector (mock DOM, zero deps)
         run: node src-tauri/resources/bridge.test.mjs
 
+      - name: voice.js tests — queue and transcript box
+        run: node src-tauri/resources/voice.test.mjs
+
+      - name: device.js tests — source-device icon
+        run: node src-tauri/resources/device.test.mjs
+
       - name: settings-ui hotkey tests
         run: node settings-ui/comboToAccelerator.test.mjs
 

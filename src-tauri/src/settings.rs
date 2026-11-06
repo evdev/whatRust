@@ -19,6 +19,9 @@ pub struct Settings {
     pub menubar_only: bool,
     /// Display zoom for the WhatsApp webview, 1.0 = the site's own sizing.
     pub zoom: f64,
+    /// Icon beside a message's time when its id indicates an Apple device,
+    /// Android, or a computer. On by default.
+    pub show_message_device: bool,
     /// macOS only (issue #44): show the icon in the menu bar. With it off, the
     /// Dock icon brings a hidden window back. Windows and Linux always show the
     /// tray icon, since there it is the only way back to a hidden window.
@@ -26,7 +29,31 @@ pub struct Settings {
     /// Interface language: `en` or `pt-BR`. Defaults to the OS language
     /// (Portuguese for a Portuguese system, English otherwise).
     pub language: String,
+    /// Transcribe WhatsApp voice notes with the local FluidVoice API.
+    pub voice_transcribe: bool,
+    /// FluidVoice local API port. `47733` is FluidVoice's own default.
+    pub fluidvoice_port: u16,
+    /// Translate each transcript into `translate_target_lang`.
+    pub translate_enabled: bool,
+    /// Language name passed to the model, for example `English` or `português`.
+    pub translate_target_lang: String,
+    /// `openrouter`, `gemini` or `anthropic`.
+    pub ai_provider: String,
+    /// Translation model for each provider. Summaries use the `summary_model_*`
+    /// fields and fall back to these when a summary model has not been chosen.
+    pub ai_model_openrouter: String,
+    pub ai_model_gemini: String,
+    pub ai_model_anthropic: String,
+    /// `None` means the field was absent, so the translation model is used.
+    pub summary_model_openrouter: Option<String>,
+    pub summary_model_gemini: Option<String>,
+    pub summary_model_anthropic: Option<String>,
 }
+
+pub const FLUIDVOICE_PORT_DEFAULT: u16 = 47_733;
+pub const DEFAULT_MODEL_OPENROUTER: &str = "google/gemini-2.5-flash";
+pub const DEFAULT_MODEL_GEMINI: &str = "gemini-2.5-flash";
+pub const DEFAULT_MODEL_ANTHROPIC: &str = "claude-haiku-4-5";
 
 impl Default for Settings {
     fn default() -> Self {
@@ -42,8 +69,20 @@ impl Default for Settings {
             respect_muted: true,
             menubar_only: false,
             zoom: 1.0,
+            show_message_device: true,
             menu_bar_icon: true,
             language: crate::i18n::system_default().to_string(),
+            voice_transcribe: true,
+            fluidvoice_port: FLUIDVOICE_PORT_DEFAULT,
+            translate_enabled: false,
+            translate_target_lang: "English".into(),
+            ai_provider: "openrouter".into(),
+            ai_model_openrouter: DEFAULT_MODEL_OPENROUTER.into(),
+            ai_model_gemini: DEFAULT_MODEL_GEMINI.into(),
+            ai_model_anthropic: DEFAULT_MODEL_ANTHROPIC.into(),
+            summary_model_openrouter: None,
+            summary_model_gemini: None,
+            summary_model_anthropic: None,
         }
     }
 }
@@ -83,11 +122,85 @@ pub fn sanitize_zoom(zoom: f64) -> f64 {
     }
 }
 
+pub fn sanitize_port(port: u16) -> u16 {
+    if port == 0 {
+        FLUIDVOICE_PORT_DEFAULT
+    } else {
+        port
+    }
+}
+
+pub fn sanitize_provider(provider: &str) -> String {
+    match provider {
+        "gemini" | "anthropic" => provider.to_string(),
+        _ => "openrouter".into(),
+    }
+}
+
+fn sanitize_model(model: &str, fallback: &str) -> String {
+    let model = model.trim();
+    if model.is_empty() || model.len() > 120 || model.chars().any(char::is_control) {
+        fallback.to_string()
+    } else {
+        model.to_string()
+    }
+}
+
+fn sanitize_label(value: &str, fallback: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 40 || value.chars().any(char::is_control) {
+        fallback.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 impl Settings {
+    /// Translation model for the selected provider.
+    pub fn ai_model(&self) -> &str {
+        match self.ai_provider.as_str() {
+            "gemini" => self.ai_model_gemini.as_str(),
+            "anthropic" => self.ai_model_anthropic.as_str(),
+            _ => self.ai_model_openrouter.as_str(),
+        }
+    }
+
+    /// Summary model for the selected provider.
+    pub fn summary_model(&self) -> &str {
+        let chosen = match self.ai_provider.as_str() {
+            "gemini" => self.summary_model_gemini.as_deref(),
+            "anthropic" => self.summary_model_anthropic.as_deref(),
+            _ => self.summary_model_openrouter.as_deref(),
+        };
+        chosen
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .unwrap_or_else(|| self.ai_model())
+    }
+
     /// Repair values an older or hand-edited settings.json can carry.
     pub fn sanitized(mut self) -> Self {
         self.zoom = sanitize_zoom(self.zoom);
         self.language = crate::i18n::sanitize_code(&self.language);
+        self.fluidvoice_port = sanitize_port(self.fluidvoice_port);
+        self.translate_target_lang = sanitize_label(&self.translate_target_lang, "English");
+        self.ai_provider = sanitize_provider(&self.ai_provider);
+        self.ai_model_openrouter =
+            sanitize_model(&self.ai_model_openrouter, DEFAULT_MODEL_OPENROUTER);
+        self.ai_model_gemini = sanitize_model(&self.ai_model_gemini, DEFAULT_MODEL_GEMINI);
+        self.ai_model_anthropic = sanitize_model(&self.ai_model_anthropic, DEFAULT_MODEL_ANTHROPIC);
+        self.summary_model_openrouter = Some(sanitize_model(
+            self.summary_model_openrouter.as_deref().unwrap_or(""),
+            &self.ai_model_openrouter,
+        ));
+        self.summary_model_gemini = Some(sanitize_model(
+            self.summary_model_gemini.as_deref().unwrap_or(""),
+            &self.ai_model_gemini,
+        ));
+        self.summary_model_anthropic = Some(sanitize_model(
+            self.summary_model_anthropic.as_deref().unwrap_or(""),
+            &self.ai_model_anthropic,
+        ));
         // Menu-bar-only mode needs WKWebView's inactive-scheduling policy
         // (macOS 14+). Dropping the flag here means a settings file or an
         // older build can never leave the app in a mode it cannot sustain.
@@ -305,7 +418,10 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_zoom, Settings, ZOOM_MAX, ZOOM_MIN};
+    use super::{
+        sanitize_zoom, Settings, DEFAULT_MODEL_OPENROUTER, FLUIDVOICE_PORT_DEFAULT, ZOOM_MAX,
+        ZOOM_MIN,
+    };
 
     #[cfg(target_os = "linux")]
     use super::{flatpak_autostart_entry, is_valid_flatpak_id};
@@ -389,6 +505,49 @@ mod tests {
         assert_eq!(s.hotkey, "CmdOrCtrl+Shift+W");
         // Absent in a settings.json written before issue #44: keep the icon.
         assert!(s.menu_bar_icon);
+        assert!(s.voice_transcribe);
+        assert!(s.show_message_device);
+        assert_eq!(s.fluidvoice_port, FLUIDVOICE_PORT_DEFAULT);
+        assert!(!s.translate_enabled);
+        assert_eq!(s.ai_provider, "openrouter");
+    }
+
+    #[test]
+    fn voice_settings_are_repaired() {
+        let s: Settings = serde_json::from_str(
+            r#"{"fluidvoice_port":0,"ai_provider":"nope","ai_model_gemini":"  gemini-2.5-flash  ","translate_target_lang":"português"}"#,
+        )
+        .unwrap();
+        let s = s.sanitized();
+        assert_eq!(s.fluidvoice_port, FLUIDVOICE_PORT_DEFAULT);
+        assert_eq!(s.ai_provider, "openrouter");
+        assert_eq!(s.ai_model_gemini, "gemini-2.5-flash");
+        assert_eq!(s.translate_target_lang, "português");
+        assert_eq!(s.ai_model(), DEFAULT_MODEL_OPENROUTER);
+        assert_eq!(s.summary_model_gemini.as_deref(), Some("gemini-2.5-flash"));
+        assert_eq!(s.summary_model(), DEFAULT_MODEL_OPENROUTER);
+    }
+
+    #[test]
+    fn summary_model_can_differ_from_the_translation_model() {
+        let s: Settings = serde_json::from_str(
+            r#"{"ai_provider":"anthropic","ai_model_anthropic":"claude-haiku-5-5","summary_model_anthropic":"claude-sonnet-5-5"}"#,
+        )
+        .unwrap();
+        let s = s.sanitized();
+        assert_eq!(s.ai_model(), "claude-haiku-5-5");
+        assert_eq!(s.summary_model(), "claude-sonnet-5-5");
+    }
+
+    #[test]
+    fn missing_summary_model_follows_the_translation_model() {
+        let s: Settings = serde_json::from_str(
+            r#"{"ai_provider":"gemini","ai_model_gemini":"gemini-3.8-flash"}"#,
+        )
+        .unwrap();
+        assert!(s.summary_model_gemini.is_none());
+        let s = s.sanitized();
+        assert_eq!(s.summary_model(), "gemini-3.8-flash");
     }
 
     #[test]

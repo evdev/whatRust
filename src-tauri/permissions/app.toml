@@ -4,7 +4,10 @@
 [[permission]]
 identifier = "allow-whatsapp-bridge"
 description = "Forward notifications, unread titles and diagnostics from WhatsApp account windows."
-commands.allow = ["notify", "set_unread", "dlog", "switcher_accounts", "switch_account"]
+commands.allow = [
+  "notify", "set_unread", "dlog", "switcher_accounts", "switch_account",
+  "voice_prefs", "voice_lookup", "transcribe_voice", "summarize_voice"
+]
 
 [[permission]]
 identifier = "allow-settings-commands"
@@ -13,7 +16,8 @@ commands.allow = [
   "get_settings", "set_settings", "open_settings", "list_accounts",
   "add_account", "remove_account", "rename_account", "open_account", "set_default_account",
   "get_lock_status", "set_app_lock_password", "change_app_lock_password",
-  "disable_app_lock", "set_app_lock_options", "set_biometric_enabled", "lock_app"
+  "disable_app_lock", "set_app_lock_options", "set_biometric_enabled", "lock_app",
+  "fluidvoice_status", "set_ai_key", "list_ai_models"
 ]
 
 [[permission]]

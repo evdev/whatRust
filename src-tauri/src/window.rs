@@ -60,6 +60,28 @@ fn safari_ua(macos_major: u64) -> String {
 }
 
 const BRIDGE_JS: &str = include_str!("../resources/bridge.js");
+
+/// Tell open WhatsApp pages whether to show the source-device icon.
+/// `device.js` installs `window.__whatrustDevicePrefs`.
+pub(crate) fn push_device_icons(app: &AppHandle, enabled: bool) {
+    let script = format!("window.__whatrustDevicePrefs&&window.__whatrustDevicePrefs({enabled})");
+    for (label, view) in app.webviews() {
+        if label.starts_with("wa-") {
+            let _ = view.eval(&script);
+        }
+    }
+}
+
+/// WA-JS at document start breaks WhatsApp's login page (the QR never paints).
+/// Run it only after the chat list exists.
+fn wajs_when_ready() -> String {
+    let mut script = String::from(
+        r#"(function(){function start(){if(!document.getElementById("pane-side")){setTimeout(start,500);return;}"#,
+    );
+    script.push_str(include_str!("../resources/wppconnect-wa.js"));
+    script.push_str("}start();})();");
+    script
+}
 const APP_ICON: &[u8] = include_bytes!("../icons/128x128.png");
 
 /// Platform routing keeps the existing non-Windows account-window flow.
@@ -93,6 +115,18 @@ macro_rules! account_webview {
             })
             .initialization_script(include_str!("../resources/integration.js"))
             .initialization_script(BRIDGE_JS)
+            // WA-JS (Apache-2.0) reads WhatsApp's own media loader so a voice
+            // note can be transcribed without pressing play. voice.js renders
+            // the transcript under the bubble. See resources/wppconnect-wa.LICENSE.
+            .initialization_script(wajs_when_ready())
+            .initialization_script(include_str!("../resources/voice.js"))
+            // Source-device icon beside the message time. The flag is the saved
+            // setting; device.js reads it at startup and live via __whatrustDevicePrefs.
+            .initialization_script(format!(
+                "window.__WHATRUST_DEVICE={};",
+                crate::settings::load($app).show_message_device
+            ))
+            .initialization_script(include_str!("../resources/device.js"))
             // Drag-and-drop is done by capturing the OS drop in Rust and streaming the file
             // into the page (see `register_drop_handler` + bridge.js `__whatrustDropFeed`).
             // We deliberately KEEP Tauri's drag-drop handler enabled (except on Windows, see
@@ -258,6 +292,11 @@ pub(crate) fn build_account_window(
     let builder = apply_isolation(builder, account, app);
     let win = builder.build()?;
     crate::dlog::log("account window: WebView created");
+    if !start_hidden {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
 
     // Close-to-tray (reads the live setting so the toggle takes effect without a restart).
     let app_handle = app.clone();
@@ -1560,7 +1599,7 @@ fn open_settings_legacy(app: &AppHandle) {
     match WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .initialization_script(crate::i18n::init_script())
         .title(tr("whatRust — Configurações"))
-        .inner_size(440.0, 680.0)
+        .inner_size(860.0, 720.0)
         .min_inner_size(440.0, 520.0)
         .resizable(true)
         .visible(false)

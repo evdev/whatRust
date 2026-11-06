@@ -141,6 +141,10 @@ pub struct SettingsView {
     /// `menubar::supported`). The UI disables the switch elsewhere rather
     /// than letting the user opt into a mode that would drop the session.
     pub menubar_supported: bool,
+    /// Which providers have a key stored. The key itself is never returned.
+    pub ai_key_openrouter: bool,
+    pub ai_key_gemini: bool,
+    pub ai_key_anthropic: bool,
 }
 
 #[tauri::command]
@@ -150,6 +154,9 @@ pub fn get_settings(window: tauri::Webview, app: tauri::AppHandle) -> Result<Set
     }
     lock::require_unlocked(&app)?;
     Ok(SettingsView {
+        ai_key_openrouter: crate::keys::has_key(&app, "openrouter"),
+        ai_key_gemini: crate::keys::has_key(&app, "gemini"),
+        ai_key_anthropic: crate::keys::has_key(&app, "anthropic"),
         settings: crate::settings::load(&app),
         platform: std::env::consts::OS,
         menubar_supported: crate::menubar::supported(),
@@ -168,7 +175,10 @@ pub fn set_settings(
     lock::require_unlocked(&app)?;
     let settings = settings.sanitized();
     crate::settings::save(&app, &settings).map_err(|e| e.to_string())?;
-    Ok(crate::settings::apply(&app, &settings))
+    let warning = crate::settings::apply(&app, &settings);
+    crate::voice::push_prefs(&app, &settings);
+    crate::window::push_device_icons(&app, settings.show_message_device);
+    Ok(warning)
 }
 
 // Commands that build a window are `async`. Tauri runs a synchronous command

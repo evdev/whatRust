@@ -19,7 +19,11 @@
     "allow-integration-state",
     "allow-report-integration",
     "allow-report-message-signal",
-    "allow-open-app-panel"
+    "allow-open-app-panel",
+    "allow-voice-prefs",
+    "allow-voice-lookup",
+    "allow-transcribe-voice",
+    "allow-summarize-voice"
   ],
   "webviews": [
     "wa-*"

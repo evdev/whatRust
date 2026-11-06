@@ -26,7 +26,10 @@
     "allow-reorder-accounts",
     "allow-notification-diagnostics",
     "allow-test-notification",
-    "allow-open-notification-settings"
+    "allow-open-notification-settings",
+    "allow-fluidvoice-status",
+    "allow-set-ai-key",
+    "allow-list-ai-models"
   ],
   "webviews": [
     "settings"

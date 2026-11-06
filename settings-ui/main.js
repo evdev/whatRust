@@ -1,6 +1,15 @@
 const invoke = window.__TAURI__.core.invoke;
 const LANGS = ["pt-BR", "en"];
-const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "menu_bar_icon", "menubar_only", "notify_when_focused", "notify_active_chat", "respect_muted"];
+const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "menu_bar_icon", "menubar_only", "notify_when_focused", "notify_active_chat", "respect_muted", "voice_transcribe", "translate_enabled", "show_message_device"];
+const AI_PROVIDERS = ["openrouter", "gemini", "anthropic"];
+const LIST_PROVIDERS = ["gemini", "anthropic"];
+let translateModels = { openrouter: "", gemini: "", anthropic: "" };
+let summaryModels = { openrouter: "", gemini: "", anthropic: "" };
+let shownProvider = "openrouter";
+let keyFlags = { openrouter: false, gemini: false, anthropic: false };
+// Successful model lists, keyed by provider. Null means not loaded yet.
+let modelCatalogs = { gemini: null, anthropic: null };
+let catalogToken = 0;
 const ZOOM_DEFAULT = 1;
 
 // The menu-bar rows are macOS-only. get_settings reports the OS this build targets
@@ -62,6 +71,27 @@ async function load() {
   const lang = LANGS.includes(s.language) ? s.language : "en";
   document.getElementById("language").value = lang;
   if (I18n.lang() !== lang) I18n.setLang(lang);
+  document.getElementById("fluidvoice_port").value = String(s.fluidvoice_port || 47733);
+  document.getElementById("translate_target_lang").value = s.translate_target_lang || "English";
+  translateModels = {
+    openrouter: s.ai_model_openrouter || "",
+    gemini: s.ai_model_gemini || "",
+    anthropic: s.ai_model_anthropic || "",
+  };
+  summaryModels = {
+    openrouter: s.summary_model_openrouter || translateModels.openrouter,
+    gemini: s.summary_model_gemini || translateModels.gemini,
+    anthropic: s.summary_model_anthropic || translateModels.anthropic,
+  };
+  document.getElementById("ai_provider").value = AI_PROVIDERS.includes(s.ai_provider) ? s.ai_provider : "openrouter";
+  shownProvider = document.getElementById("ai_provider").value;
+  keyFlags = {
+    openrouter: !!s.ai_key_openrouter,
+    gemini: !!s.ai_key_gemini,
+    anthropic: !!s.ai_key_anthropic,
+  };
+  refreshKeyState();
+  syncModelControls();
   menuBarIconChecked = document.getElementById("menu_bar_icon").checked;
   syncMenuBarIconRow();
 }
@@ -76,6 +106,16 @@ async function save() {
   s.hotkey = hk || "CmdOrCtrl+Shift+W";
   s.zoom = parseFloat(document.getElementById("zoom").value) || ZOOM_DEFAULT;
   s.language = document.getElementById("language").value;
+  commitModelFields();
+  s.fluidvoice_port = parseInt(document.getElementById("fluidvoice_port").value, 10) || 47733;
+  s.translate_target_lang = document.getElementById("translate_target_lang").value.trim() || "English";
+  s.ai_provider = document.getElementById("ai_provider").value;
+  s.ai_model_openrouter = translateModels.openrouter;
+  s.ai_model_gemini = translateModels.gemini;
+  s.ai_model_anthropic = translateModels.anthropic;
+  s.summary_model_openrouter = summaryModels.openrouter;
+  s.summary_model_gemini = summaryModels.gemini;
+  s.summary_model_anthropic = summaryModels.anthropic;
   const note = document.getElementById("note");
   try {
     const warn = await invoke("set_settings", { settings: s });
@@ -223,7 +263,148 @@ window.addEventListener("DOMContentLoaded", () => {
     I18n.setLang(document.getElementById("language").value);
     await save();
   });
+  document.getElementById("ai_provider").addEventListener("change", () => {
+    commitModelFields();
+    shownProvider = document.getElementById("ai_provider").value;
+    refreshKeyState();
+    syncModelControls();
+  });
+  for (const id of ["translate_model", "summary_model"]) {
+    document.getElementById(id).addEventListener("input", commitModelFields);
+  }
+  for (const id of ["translate_model_select", "summary_model_select"]) {
+    document.getElementById(id).addEventListener("change", commitModelFields);
+  }
+  document.getElementById("test_fluidvoice").addEventListener("click", testFluidVoice);
+  document.getElementById("save_ai_key").addEventListener("click", saveAiKey);
 });
+
+function usesModelList(provider) {
+  return LIST_PROVIDERS.includes(provider);
+}
+
+function commitModelFields() {
+  if (usesModelList(shownProvider)) {
+    const translate = document.getElementById("translate_model_select").value.trim();
+    const summary = document.getElementById("summary_model_select").value.trim();
+    if (translate) translateModels[shownProvider] = translate;
+    if (summary) summaryModels[shownProvider] = summary;
+    return;
+  }
+  translateModels[shownProvider] = document.getElementById("translate_model").value.trim();
+  summaryModels[shownProvider] = document.getElementById("summary_model").value.trim();
+}
+
+function syncModelControls() {
+  const listed = usesModelList(shownProvider);
+  document.getElementById("translate_model").hidden = listed;
+  document.getElementById("summary_model").hidden = listed;
+  document.getElementById("translate_model_select").hidden = !listed;
+  document.getElementById("summary_model_select").hidden = !listed;
+  if (!listed) {
+    catalogToken += 1;
+    document.getElementById("translate_model").value = translateModels[shownProvider] || "";
+    document.getElementById("summary_model").value = summaryModels[shownProvider] || "";
+    document.getElementById("translate_model_hint").textContent = "Nome do modelo aceito por esse provedor.";
+    return;
+  }
+  renderModelSelects();
+  loadModelCatalog(shownProvider);
+}
+
+function renderModelSelects() {
+  const models = modelCatalogs[shownProvider] || [];
+  fillModelSelect("translate_model_select", translateModels[shownProvider], models);
+  fillModelSelect("summary_model_select", summaryModels[shownProvider], models);
+}
+
+function fillModelSelect(id, saved, models) {
+  const select = document.getElementById(id);
+  const options = models
+    .filter((model) => model && model.id)
+    .map((model) => ({ id: model.id, label: model.label || model.id }));
+  if (saved && !options.some((model) => model.id === saved)) {
+    options.unshift({ id: saved, label: saved });
+  }
+  select.replaceChildren();
+  for (const model of options) {
+    const option = document.createElement("option");
+    option.value = model.id;
+    option.textContent = model.label;
+    option.title = model.id;
+    select.appendChild(option);
+  }
+  if (saved) select.value = saved;
+  select.disabled = !keyFlags[shownProvider] || select.options.length === 0;
+}
+
+async function loadModelCatalog(provider) {
+  const hint = document.getElementById("translate_model_hint");
+  if (!keyFlags[provider]) {
+    hint.textContent = "Guarde a chave da API para listar os modelos.";
+    renderModelSelects();
+    return;
+  }
+  if (modelCatalogs[provider]) {
+    hint.textContent = modelCatalogs[provider].length
+      ? "Modelos principais disponíveis para esta chave."
+      : "Nenhum modelo principal disponível para esta chave.";
+    renderModelSelects();
+    return;
+  }
+  const token = ++catalogToken;
+  hint.textContent = "Carregando modelos…";
+  document.getElementById("translate_model_select").disabled = true;
+  document.getElementById("summary_model_select").disabled = true;
+  try {
+    const models = await invoke("list_ai_models", { provider });
+    if (token !== catalogToken || shownProvider !== provider) return;
+    modelCatalogs[provider] = Array.isArray(models) ? models : [];
+    hint.textContent = modelCatalogs[provider].length
+      ? "Modelos principais disponíveis para esta chave."
+      : "Nenhum modelo principal disponível para esta chave.";
+  } catch (e) {
+    if (token !== catalogToken || shownProvider !== provider) return;
+    hint.textContent = String(e);
+  }
+  renderModelSelects();
+}
+
+function refreshKeyState() {
+  const on = keyFlags[document.getElementById("ai_provider").value];
+  document.getElementById("ai_key_state").textContent = on
+    ? "Chave guardada neste Mac."
+    : "Nenhuma chave guardada.";
+}
+
+async function testFluidVoice() {
+  const status = document.getElementById("fluidvoice_status");
+  status.textContent = "Verificando…";
+  try {
+    const port = parseInt(document.getElementById("fluidvoice_port").value, 10) || 47733;
+    const result = await invoke("fluidvoice_status", { port });
+    status.textContent = result.ok && result.version
+      ? result.detail + " (" + result.version + ")"
+      : result.detail;
+  } catch (e) {
+    status.textContent = String(e);
+  }
+}
+
+async function saveAiKey() {
+  const provider = document.getElementById("ai_provider").value;
+  const input = document.getElementById("ai_key");
+  try {
+    await invoke("set_ai_key", { provider, key: input.value });
+    keyFlags[provider] = input.value.trim().length > 0;
+    input.value = "";
+    modelCatalogs[provider] = null;
+    refreshKeyState();
+    if (provider === shownProvider) syncModelControls();
+  } catch (e) {
+    document.getElementById("ai_key_state").textContent = String(e);
+  }
+}
 
 // --- App lock ---
 

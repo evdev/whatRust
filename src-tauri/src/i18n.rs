@@ -235,6 +235,14 @@ static EN_TABLE: &[(&str, &str)] = &[
     // settings side effects
     ("Não foi possível atualizar a inicialização automática: {0}", "Could not update automatic startup: {0}"),
     ("Não foi possível registrar o atalho (ele pode estar em uso): {0}", "Could not register the shortcut (it may be in use): {0}"),
+    // voice notes
+    ("FluidVoice respondeu.", "FluidVoice responded."),
+    ("FluidVoice não respondeu. Ative a API local e reinicie o FluidVoice.", "FluidVoice did not respond. Turn on its local API and restart FluidVoice."),
+    ("Provedor de IA desconhecido.", "Unknown AI provider."),
+    ("A chave da API não foi aceita.", "The API key was not accepted."),
+    ("Não foi possível guardar a chave da API.", "The API key could not be saved."),
+    ("Nenhuma chave guardada.", "No key saved."),
+    ("Não foi possível listar os modelos.", "The models could not be listed."),
     // tray and menus
     ("Contas…", "Accounts…"),
     ("Contas", "Accounts"),
@@ -339,6 +347,7 @@ mod tests {
             include_str!("sessions.rs"),
             include_str!("settings.rs"),
             include_str!("tray.rs"),
+            include_str!("voice.rs"),
             include_str!("window.rs"),
             include_str!("biometric/macos.rs"),
         ];

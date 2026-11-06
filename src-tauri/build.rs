@@ -26,6 +26,10 @@ fn main() {
             "reveal_download",
             "switcher_accounts",
             "switch_account",
+            "voice_prefs",
+            "voice_lookup",
+            "transcribe_voice",
+            "summarize_voice",
             // settings window
             "get_settings",
             "set_settings",
@@ -48,6 +52,9 @@ fn main() {
             "unlock_password",
             "unlock_biometric",
             "reset_app_lock",
+            "fluidvoice_status",
+            "set_ai_key",
+            "list_ai_models",
         ]),
     ))
     .expect("failed to run tauri-build");
