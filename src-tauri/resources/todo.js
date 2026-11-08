@@ -39,6 +39,29 @@
     return match ? match[1] : "";
   }
 
+  // WhatsApp Web now puts only the message id on the row. The chat is the open
+  // conversation. A device suffix (`1555:14@lid`) is the same chat as `1555@lid`.
+  function normalizeChatId(value) {
+    var raw = String(value || "").trim();
+    if (!raw || raw.length > 180) return "";
+    var compound = chatFromId(raw);
+    if (compound) raw = compound;
+    var at = raw.lastIndexOf("@");
+    if (at <= 0 || at === raw.length - 1) return "";
+    var local = raw.slice(0, at);
+    var host = raw.slice(at + 1).toLowerCase();
+    var colon = local.indexOf(":");
+    if (colon > 0) local = local.slice(0, colon);
+    if (!local || !host) return "";
+    if (/[\s_@]/.test(local) || /[\s_@:]/.test(host)) return "";
+    if (host === "broadcast") return "";
+    return local + "@" + host;
+  }
+
+  function chatForMark(messageChat, activeChat) {
+    return normalizeChatId(messageChat) || normalizeChatId(activeChat) || "";
+  }
+
   function parsePlain(value) {
     var text = String(value || "").replace(/[\u200e\u200f\u200b\u2066-\u2069]/g, "");
     var match = /^\[(\d{1,2}:\d{2}(?:\s*[AP]M)?)[,\s]+([^\]]+)\]\s*([^:\n]{0,160})/.exec(text);
@@ -254,13 +277,26 @@
     return {
       msg_id: id,
       msg_token: token,
-      chat_id: chatFromId(id),
+      chat_id: normalizeChatId(id),
       chat_name: "",
       sender: parsed.sender,
       snippet: String(text || "").replace(/\u0000/g, "").slice(0, 1000),
       msg_timestamp: parsed.time,
       kind: kind,
+      from_me: messageOutgoing(row, id),
     };
+  }
+
+  // The bubble class is the direction. A bare message id has no true_/false_ prefix.
+  function messageOutgoing(row, id) {
+    var cur = row;
+    for (var i = 0; cur && i < 8; i++) {
+      var cls = classOf(cur);
+      if (/(?:^|\s)message-out(?:\s|$)/.test(cls)) return true;
+      if (/(?:^|\s)message-in(?:\s|$)/.test(cls)) return false;
+      cur = cur.parentElement || null;
+    }
+    return typeof id === "string" && id.indexOf("true_") === 0;
   }
 
   function isWatch(item) {
@@ -299,13 +335,21 @@
     return false;
   }
 
+  function chatKey(value) {
+    var chat = normalizeChatId(value);
+    return chat || String(value || "");
+  }
+
   function sameWatchChat(itemChat, signalChat, lookup) {
-    if (!itemChat || !signalChat) return false;
-    if (itemChat === signalChat) return true;
+    var left = normalizeChatId(itemChat);
+    var right = normalizeChatId(signalChat);
+    if (!left || !right) return false;
+    if (left === right) return true;
     if (typeof lookup !== "function") return false;
-    var left = lookup(itemChat);
-    var right = lookup(signalChat);
-    return !!(left && right && left === right);
+    var leftResolved = lookup(left) || lookup(itemChat);
+    var rightResolved = lookup(right) || lookup(signalChat);
+    if (!leftResolved || !rightResolved) return false;
+    return chatKey(leftResolved) === chatKey(rightResolved);
   }
 
   // A later message clears a watch only when it is newer than both the marked
@@ -458,24 +502,72 @@
     if (!value) return "";
     if (typeof value === "string") return value;
     if (typeof value._serialized === "string") return value._serialized;
+    if (typeof value.toString === "function") {
+      try {
+        var text = String(value.toString());
+        if (text && text !== "[object Object]") return text;
+      } catch (e) {}
+    }
     return "";
   }
 
-  // The message key's remote is the chat. `msg.chat` and from/to can point at
-  // the sender in a group, which would clear a different conversation.
-  function messageChatId(msg) {
+  // The key's remote, then the chat model. from/to is not used here: in a
+  // group those name the sender. A status broadcast is not a conversation.
+  function rawDirectChat(msg) {
     if (!msg) return "";
     var id = msg.id;
-    if (typeof id === "string") {
-      var parsed = chatFromId(id);
-      if (parsed) return parsed;
-    }
-    var chat = widText(id && id.remote);
-    if (chat) return chat;
-    if (msg.chat && msg.chat.id) chat = widText(msg.chat.id);
-    if (chat) return chat;
+    var raw = "";
+    if (typeof id === "string") raw = chatFromId(id);
+    if (!raw) raw = widText(id && id.remote);
+    if (!raw && msg.chat && msg.chat.id) raw = widText(msg.chat.id);
+    return raw;
+  }
+
+  function directChatId(msg) {
+    var raw = rawDirectChat(msg);
+    if (/@broadcast/.test(raw)) return "";
+    return normalizeChatId(raw);
+  }
+
+  function messageChatId(msg) {
+    var raw = rawDirectChat(msg);
+    if (/@broadcast/.test(raw)) return "";
+    var direct = normalizeChatId(raw);
+    if (direct) return direct;
+    if (!msg) return "";
+    var id = msg.id;
     var fromMe = !!(id && id.fromMe);
-    return widText(fromMe ? msg.to : msg.from);
+    var fallback = widText(fromMe ? msg.to : msg.from);
+    if (/@broadcast/.test(fallback)) return "";
+    return normalizeChatId(fallback);
+  }
+
+  // A data-id that is a message is not a conversation. Device suffixes are
+  // stripped, and a status broadcast is not a chat.
+  function chatMarked(node) {
+    var id = attr(node, "data-id");
+    if (!id || messageToken(id)) return "";
+    return normalizeChatId(id);
+  }
+
+  function firstChatId(node) {
+    if (!node) return "";
+    var found = "";
+    walk(node, function (el) {
+      if (found) return;
+      var chat = chatMarked(el);
+      if (chat) found = chat;
+    });
+    return found;
+  }
+
+  function chooseOpenChat(modelId, headerNode, selectedNode) {
+    return normalizeChatId(modelId)
+      || chatMarked(headerNode)
+      || chatMarked(selectedNode)
+      || firstChatId(selectedNode)
+      || firstChatId(headerNode)
+      || "";
   }
 
   function menuActions(task, watch, fromMe) {
@@ -783,6 +875,8 @@
     root.__whatrustTodoApi = {
       messageToken: messageToken,
       chatFromId: chatFromId,
+      normalizeChatId: normalizeChatId,
+      chatForMark: chatForMark,
       parsePlain: parsePlain,
       dayStart: dayStart,
       extractDom: extractDom,
@@ -804,6 +898,8 @@
       clearsWatch: clearsWatch,
       markerChoice: markerChoice,
       messageChatId: messageChatId,
+      directChatId: directChatId,
+      chooseOpenChat: chooseOpenChat,
       lookupMapped: lookupMapped,
       clearanceFor: clearanceFor,
       pickClearance: pickClearance,
@@ -2452,26 +2548,30 @@
     });
   }
 
-  function lookupChat(id) {
+  function readChat(id) {
     var wpp = root.WPP;
     if (!id || !wpp || !wpp.chat || typeof wpp.chat.get !== "function") return "";
     try {
       var chat = wpp.chat.get(id);
       if (!chat || typeof chat.then === "function") return "";
-      var cid = chat.id;
-      if (!cid) return "";
-      return typeof cid === "string" ? cid : (cid._serialized || "");
+      return widText(chat.id);
     } catch (e) {
       return "";
     }
   }
 
+  function lookupChat(id) {
+    var found = readChat(id);
+    if (found) return found;
+    var plain = normalizeChatId(id);
+    if (!plain || plain === id) return "";
+    return readChat(plain);
+  }
+
   function signalFromWpp(msg, live) {
     if (!msg) return null;
     var id = msg.id;
-    var serialized = "";
-    if (typeof id === "string") serialized = id;
-    else if (id && typeof id._serialized === "string") serialized = id._serialized;
+    var serialized = typeof id === "string" ? id : widText(id);
     var fromMe = !!(id && id.fromMe) || serialized.indexOf("true_") === 0;
     var at = Number(msg.t || 0);
     if (at > 0 && at < 1e12) at *= 1000;
@@ -2758,7 +2858,7 @@
     var msg = {
       msg_id: extract.msg_id,
       msg_token: extract.msg_token,
-      chat_id: extract.chat_id || null,
+      chat_id: chatForMark(extract.chat_id, "") || null,
       chat_name: extract.chat_name || activeChatName(),
       sender: extract.sender || "",
       snippet: extract.snippet || "",
@@ -2797,9 +2897,98 @@
     return null;
   }
 
+  function activeChatModel() {
+    var wpp = root.WPP;
+    if (!wpp || !wpp.chat || typeof wpp.chat.getActiveChat !== "function") return null;
+    try {
+      var chat = wpp.chat.getActiveChat();
+      if (!chat || typeof chat.then === "function") return null;
+      return chat;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function modelList(collection) {
+    if (!collection) return [];
+    try {
+      if (typeof collection.getModelsArray === "function") return collection.getModelsArray() || [];
+    } catch (e) {}
+    if (collection.models) return collection.models;
+    if (collection._models) return collection._models;
+    return [];
+  }
+
+  function serializedOf(id) {
+    if (!id) return "";
+    if (typeof id === "string") return id;
+    if (typeof id._serialized === "string") return id._serialized;
+    if (typeof id.toString === "function") {
+      try {
+        var text = String(id.toString());
+        if (text && text !== "[object Object]") return text;
+      } catch (e) {}
+    }
+    return "";
+  }
+
+  // The open conversation. The message row often has only the bare message id,
+  // so the chat has to come from here.
+  function openChatId() {
+    var chat = activeChatModel();
+    var modelId = chat ? widText(chat.id) : "";
+    var header = null;
+    var main = document.getElementById("main");
+    if (main) {
+      walk(main, function (node) {
+        if (!header && tagIs(node, "header")) header = node;
+      });
+    }
+    var side = document.getElementById("pane-side") || document.getElementById("side");
+    var selected = side && side.querySelector ? side.querySelector('[aria-selected="true"]') : null;
+    return chooseOpenChat(modelId, header, selected);
+  }
+
+  function loadedMessage(token) {
+    if (!token) return null;
+    var chat = activeChatModel();
+    var list = modelList(chat && chat.msgs);
+    for (var i = 0; i < list.length; i++) {
+      var msg = list[i];
+      var id = msg && msg.id;
+      var bare = id && typeof id.id === "string" ? id.id : "";
+      var serialized = serializedOf(id);
+      if (bare === token || (serialized && messageToken(serialized) === token)) return msg;
+    }
+    return null;
+  }
+
+  function applyWppMessage(extract, msg) {
+    if (!extract || !msg) return extract;
+    var type = msg.type || (msg.attributes && msg.attributes.type) || "";
+    if (type === "ptt" || type === "audio") extract.kind = "voice";
+    else if (type === "image") extract.kind = "image";
+    else if (type === "video") extract.kind = "video";
+    else if (type === "document") extract.kind = "document";
+    else if (type === "chat" && extract.kind === "other") extract.kind = "text";
+    var body = msg.body || msg.caption || (msg.attributes && (msg.attributes.body || msg.attributes.caption)) || "";
+    if (body && !extract.snippet) extract.snippet = String(body).slice(0, 1000);
+    var chatId = directChatId(msg);
+    if (chatId) extract.chat_id = chatId;
+    if (!extract.chat_name && msg.chat && msg.chat.name) extract.chat_name = String(msg.chat.name).slice(0, 160);
+    var sent = Number(msg.t || (msg.attributes && msg.attributes.t) || 0);
+    if (sent > 0 && sent < 1e12) sent *= 1000;
+    if (sent > 0) extract.msg_epoch = sent;
+    var serialized = serializedOf(msg.id);
+    if (/^(?:true|false)_[^_\s]+@[^_\s]+_/.test(serialized) && serialized.length <= 180) extract.msg_id = serialized;
+    return extract;
+  }
+
   function addWatch(extract, kind) {
     if (!extract) return;
+    extract.chat_id = chatForMark(extract.chat_id, openChatId());
     if (!extract.chat_id) {
+      crumb("todo: mark refused no-chat");
       showToast(L("Não foi possível marcar essa mensagem.", "Could not mark that message."));
       return;
     }
@@ -2809,7 +2998,7 @@
     var msg = {
       msg_id: extract.msg_id,
       msg_token: extract.msg_token,
-      chat_id: extract.chat_id,
+      chat_id: chatForMark(extract.chat_id, ""),
       chat_name: extract.chat_name || activeChatName(),
       sender: extract.sender || "",
       snippet: extract.snippet || "",
@@ -2827,40 +3016,53 @@
       var watch = added || findOpenWatch(snapshot.items || [], extract);
       if (watch) showCapture(watch, false, previous ? previous.kind : "");
       else showToast(kind === "owe" ? L("Devo uma resposta.", "You owe a reply.") : L("Esperando resposta.", "Waiting on them."));
-    }).catch(function () {
+    }).catch(function (err) {
+      var reason = err && err.message ? err.message : err;
+      crumb("todo: mark refused " + String(reason || "error").replace(/\s+/g, " ").slice(0, 120));
       showToast(L("Não foi possível marcar essa mensagem.", "Could not mark that message."));
     });
   }
 
   function enrich(extract) {
+    if (!extract) return Promise.resolve(extract);
+    var token = extract.msg_token || messageToken(extract.msg_id);
+    var loaded = loadedMessage(token);
+    if (loaded) applyWppMessage(extract, loaded);
+    if (!extract.chat_id) extract.chat_id = openChatId();
+    // A bare row id is not a message key. Asking WA-JS for it searches the
+    // wrong id and rejects, which used to drop the mark.
+    var lookup = "";
+    if (!loaded && /^(?:true|false)_/.test(extract.msg_id || "")) lookup = extract.msg_id;
     var wpp = root.WPP;
-    if (!extract || !wpp || !wpp.isReady || !wpp.chat || typeof wpp.chat.getMessageById !== "function" || !extract.msg_id) {
+    if (!lookup || !wpp || !wpp.isReady || !wpp.chat || typeof wpp.chat.getMessageById !== "function") {
       return Promise.resolve(extract);
     }
-    return wpp.chat.getMessageById(extract.msg_id).then(function (msg) {
-      if (!msg) return extract;
-      var type = msg.type || (msg.attributes && msg.attributes.type) || "";
-      if (type === "ptt" || type === "audio") extract.kind = "voice";
-      else if (type === "image") extract.kind = "image";
-      else if (type === "video") extract.kind = "video";
-      else if (type === "document") extract.kind = "document";
-      else if (type === "chat" && extract.kind === "other") extract.kind = "text";
-      var body = msg.body || msg.caption || (msg.attributes && (msg.attributes.body || msg.attributes.caption)) || "";
-      if (body && !extract.snippet) extract.snippet = String(body).slice(0, 1000);
-      var chatId = messageChatId(msg);
-      if (chatId) extract.chat_id = chatId;
-      if (!extract.chat_name && msg.chat && msg.chat.name) extract.chat_name = String(msg.chat.name).slice(0, 160);
-      var sent = Number(msg.t || (msg.attributes && msg.attributes.t) || 0);
-      if (sent > 0 && sent < 1e12) sent *= 1000;
-      if (sent > 0) extract.msg_epoch = sent;
-      var serialized = "";
-      if (typeof msg.id === "string") serialized = msg.id;
-      else if (msg.id && typeof msg.id._serialized === "string") serialized = msg.id._serialized;
-      if (/^(?:true|false)_[^_\s]+@[^_\s]+_/.test(serialized) && serialized.length <= 180) {
-        extract.msg_id = serialized;
-      }
+    var pending;
+    try {
+      pending = wpp.chat.getMessageById(lookup);
+    } catch (e) {
+      return Promise.resolve(extract);
+    }
+    return Promise.resolve(pending).then(function (msg) {
+      if (msg) applyWppMessage(extract, msg);
+      if (!extract.chat_id) extract.chat_id = openChatId();
       return extract;
-    }).catch(function () { return extract; });
+    }).catch(function () {
+      if (!extract.chat_id) extract.chat_id = openChatId();
+      return extract;
+    });
+  }
+
+  function withExtract(extract, fn) {
+    try {
+      Promise.resolve(enrich(extract)).then(function (next) {
+        fn(next || extract);
+      }).catch(function () {
+        fn(extract);
+      });
+    } catch (e) {
+      fn(extract);
+    }
   }
 
   function menuLabel(action) {
@@ -2885,17 +3087,14 @@
   }
 
   function pendingMenuActions(extract) {
-    return menuActions(lookupExtract(extract), lookupWatch(extract), fromMeId(extract && extract.msg_id));
-  }
-
-  function fromMeId(id) {
-    return typeof id === "string" && id.indexOf("true_") === 0;
+    var mine = !!(extract && extract.from_me);
+    return menuActions(lookupExtract(extract), lookupWatch(extract), mine);
   }
 
   function runMenuAction(action, extract, existing) {
-    if (action === "add") enrich(extract).then(function (next) { addExtract(next, null); });
-    else if (action === "remind") enrich(extract).then(function (next) { addExtract(next, { remind: true }); });
-    else if (action === "waiting" || action === "owe") enrich(extract).then(function (next) { addWatch(next, action); });
+    if (action === "add") withExtract(extract, function (next) { addExtract(next, null); });
+    else if (action === "remind") withExtract(extract, function (next) { addExtract(next, { remind: true }); });
+    else if (action === "waiting" || action === "owe") withExtract(extract, function (next) { addWatch(next, action); });
     else if (action === "reply-open") {
       var openWatch = lookupWatch(extract);
       if (openWatch) openReplies(openWatch.id);
@@ -3287,7 +3486,7 @@
       event.preventDefault();
       event.stopPropagation();
       if (hover._item) openPanel(hover._item.id);
-      else enrich(hover._extract).then(function (next) { addExtract(next, null); });
+      else withExtract(hover._extract, function (next) { addExtract(next, null); });
     });
     hover.addEventListener("mouseenter", function () { clearTimeout(hoverTimer); });
     hover.addEventListener("mouseleave", hideHoverSoon);
@@ -3432,13 +3631,18 @@
     return ids;
   }
 
+  function resolvedChat(chat) {
+    return lookupChat(chat) || chat;
+  }
+
   function openBottom(chat) {
     var wpp = root.WPP;
-    if (!chat || !wpp || !wpp.chat || typeof wpp.chat.openChatBottom !== "function") {
+    var id = resolvedChat(chat);
+    if (!id || !wpp || !wpp.chat || typeof wpp.chat.openChatBottom !== "function") {
       showToast(L("Não foi possível abrir essa mensagem.", "Could not open that message."));
       return;
     }
-    Promise.resolve(wpp.chat.openChatBottom(chat)).then(function () {
+    Promise.resolve(wpp.chat.openChatBottom(id)).then(function () {
       showToast(L("A conversa foi aberta. A mensagem não está mais no histórico local.", "The chat was opened. That message is no longer in local history."));
     }).catch(function () {
       showToast(L("Não foi possível abrir essa mensagem.", "Could not open that message."));
@@ -3446,7 +3650,7 @@
   }
 
   function tryOpenAt(item, ids, index) {
-    var chat = item.message && item.message.chat_id;
+    var chat = resolvedChat(item.message && item.message.chat_id);
     var wpp = root.WPP;
     if (!chat || !wpp || !wpp.chat || typeof wpp.chat.openChatAt !== "function" || index >= ids.length) {
       openBottom(chat);
@@ -3580,7 +3784,7 @@
       extract = {
         msg_id: id,
         msg_token: messageToken(id),
-        chat_id: chatFromId(id) || null,
+        chat_id: normalizeChatId(id) || null,
         chat_name: "",
         sender: "",
         snippet: "",
@@ -3596,6 +3800,10 @@
       if (spoken) next.snippet = spoken.slice(0, 1000);
       next.kind = "voice";
       addExtract(next, { title: summary });
+    }).catch(function () {
+      if (spoken) extract.snippet = spoken.slice(0, 1000);
+      extract.kind = "voice";
+      addExtract(extract, { title: summary });
     });
   };
 

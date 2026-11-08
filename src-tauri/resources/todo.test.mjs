@@ -61,6 +61,13 @@ assert(api.messageToken("123456789@c.us") === "", "a chat id is not a message id
 assert(api.messageToken("false_not-a-jid_" + web) === "", "a compound id without a jid is ignored");
 assert(api.chatFromId("false_15551212@c.us_" + web) === "15551212@c.us", "chat jid comes from the compound id");
 assert(api.chatFromId(web) === "", "a bare id has no chat jid");
+assert(api.normalizeChatId("15551212:14@lid") === "15551212@lid", "a device suffix is the same chat");
+assert(api.normalizeChatId("status@broadcast") === "", "a status broadcast is not a chat");
+assert(api.chatForMark("", "15551212@c.us") === "15551212@c.us", "a bare message uses the open chat");
+assert(
+  api.chatForMark("false_15551212:14@lid_" + web, "999@c.us") === "15551212@lid",
+  "the message chat wins over the open chat"
+);
 
 const plain = api.parsePlain("[12:41, 6/11/2026] Ada: ");
 assert(plain.time === "12:41, 6/11/2026" && plain.sender === "Ada", "plain text keeps the clock and sender");
@@ -130,6 +137,56 @@ icon.setAttribute("data-icon", "audio-play");
 bare.appendChild(icon);
 assert(api.extractDom(bare).kind === "voice", "a play icon marks a voice note");
 assert(api.extractDom(bare).msg_id === web, "a bare data-id is stored whole");
+assert(api.extractDom(bare).chat_id === "", "a bare data-id has no chat of its own");
+assert(api.extractDom(bare).from_me === false, "a bare id without a bubble class is not treated as yours");
+
+const mine = new El("div");
+mine.setAttribute("class", "message-out");
+mine.setAttribute("data-id", web);
+assert(api.extractDom(mine).from_me === true, "an outgoing bubble is yours when the id is bare");
+const theirs = new El("div");
+theirs.setAttribute("class", "message-in focusable-list-item");
+theirs.setAttribute("data-id", web);
+assert(api.extractDom(theirs).from_me === false, "an incoming bubble is theirs");
+const outgoing = new El("div");
+outgoing.setAttribute("class", "message-out");
+const outgoingChild = new El("div");
+outgoingChild.setAttribute("data-id", web);
+outgoing.appendChild(outgoingChild);
+assert(api.extractDom(outgoingChild).from_me === true, "direction comes from the outgoing row");
+const legacyMine = new El("div");
+legacyMine.setAttribute("data-id", "true_1555@c.us_" + web);
+assert(api.extractDom(legacyMine).from_me === true, "a true_ id is your message");
+const deviceRow = new El("div");
+deviceRow.setAttribute("data-id", "false_15551212:14@lid_" + web + "_1555999:14@lid");
+assert(api.extractDom(deviceRow).chat_id === "15551212@lid", "a device suffix on the row is stored as the chat");
+assert(api.extractDom(deviceRow).msg_token === web, "the token stays the message id");
+
+const headerChat = new El("header");
+headerChat.setAttribute("data-id", "120363@g.us");
+const quoted = new El("div");
+quoted.setAttribute("data-id", "false_999@c.us_" + web);
+const person = new El("div");
+person.setAttribute("data-id", "111@c.us");
+headerChat.appendChild(quoted);
+headerChat.appendChild(person);
+const selectedChat = new El("div");
+selectedChat.setAttribute("data-id", "15551212:14@lid");
+assert(api.chooseOpenChat("1555:8@c.us", headerChat, selectedChat) === "1555@c.us", "the open conversation wins over the header and the chat list");
+assert(api.chooseOpenChat("", headerChat, selectedChat) === "120363@g.us", "the open pane's chat wins over the chat list");
+assert(api.chooseOpenChat("status@broadcast", headerChat, selectedChat) === "120363@g.us", "a status id is not the open chat");
+const headerOnlyMessage = new El("header");
+headerOnlyMessage.appendChild(quoted);
+assert(api.chooseOpenChat("", headerOnlyMessage, selectedChat) === "15551212@lid", "a nested message id is not the open chat");
+assert(api.chooseOpenChat("", headerOnlyMessage, null) === "", "a message id inside the header is not a chat");
+const wrapper = new El("div");
+const innerMsg = new El("div");
+innerMsg.setAttribute("data-id", "false_999@c.us_" + web);
+const innerChat = new El("div");
+innerChat.setAttribute("data-id", "1555:2@lid");
+wrapper.appendChild(innerMsg);
+wrapper.appendChild(innerChat);
+assert(api.chooseOpenChat("", null, wrapper) === "1555@lid", "a nested chat id is used when the row itself has none");
 
 const app = new El("div");
 app.id = "app";
@@ -282,6 +339,11 @@ assert(api.markerChoice(doneTask, null, openWatch).item.id === "watch" && api.ma
 assert(api.markerChoice(openTask, openTask, openWatch).item.id === "new" && !api.markerChoice(openTask, openTask, openWatch).replies, "an open to-do keeps the message marker");
 assert(api.messageChatId({ id: { remote: { _serialized: "1@g.us" }, fromMe: false }, chat: { id: { _serialized: "9@c.us" } }, from: { _serialized: "9@c.us" } }) === "1@g.us", "a group message uses the chat on the key, not the sender");
 assert(api.messageChatId({ id: "false_1555@g.us_" + token }) === "1555@g.us", "a string message id still carries its chat");
+assert(api.messageChatId({ id: { remote: { _serialized: "15551212:14@lid" }, fromMe: true }, from: { _serialized: "999@c.us" } }) === "15551212@lid", "a device suffix on the key is the same chat");
+assert(api.messageChatId({ id: { fromMe: false }, from: { _serialized: "1555:14@c.us" } }) === "1555@c.us", "without a key, the sender is the fallback");
+assert(api.messageChatId({ id: { remote: { _serialized: "status@broadcast" }, fromMe: false }, from: { _serialized: "1555@c.us" } }) === "", "a status is not the sender's chat");
+assert(api.directChatId({ id: { remote: { _serialized: "1:14@g.us" }, fromMe: false }, from: { _serialized: "9@c.us" } }) === "1@g.us", "marking uses the group on the key, not the sender");
+assert(api.directChatId({ id: { fromMe: false }, from: { _serialized: "9@c.us" } }) === "", "marking does not treat the sender as the chat");
 
 const chatOf = (id) => (id === "1555@c.us" || id === "1555@lid" ? "chat-1" : "");
 const base = { kind: "waiting", done: false, created_at: now - 1000, message: { chat_id: "1555@c.us", msg_id: "false_1555@c.us_OLD", msg_token: "OLD", msg_epoch: now - day } };
@@ -296,6 +358,13 @@ assert(api.clearsWatch(base, Object.assign({}, incoming, { type: "e2e_notificati
 assert(api.clearsWatch(base, Object.assign({}, incoming, { chat_id: "999@c.us" }), chatOf) === false, "an unresolved other chat does not clear");
 assert(api.clearsWatch(base, Object.assign({}, incoming, { chat_id: "1555@c.us", live: true, at_ms: now - 10 * 60000, now: now }), chatOf) === false, "history loaded with the chat is not a new reply");
 assert(api.clearsWatch(base, Object.assign({}, incoming, { chat_id: "1555@c.us", live: true, at_ms: now - 400, now: now }), chatOf) === true, "a recent message after you marked it can clear");
+const noChat = () => "";
+const storedLid = { kind: "waiting", done: false, created_at: now - 1000, message: { chat_id: "1555@lid", msg_id: "false_1555@lid_OLD", msg_token: "OLD", msg_epoch: now - day } };
+const deviceReply = { chat_id: "1555:14@lid", from_me: false, at_ms: now - 500, msg_id: "false_1555@lid_NEW", msg_token: "NEW", type: "chat", live: false, now: now };
+assert(api.clearsWatch(storedLid, deviceReply, noChat) === true, "a device suffix is the same chat when a reply arrives");
+assert(api.clearsWatch(base, Object.assign({}, incoming, { chat_id: "1555:14@lid" }), chatOf) === true, "a device suffix still resolves through the plain chat id");
+const uneven = (id) => (id === "1555@c.us" ? "1555:14@lid" : id === "1555@lid" ? "1555@lid" : "");
+assert(api.clearsWatch(base, incoming, uneven) === true, "a device suffix on only one resolved id is still the same chat");
 
 const chevron = new El("span");
 chevron.setAttribute("data-icon", "chevron-down");

@@ -1016,9 +1016,7 @@ fn sanitize_message(raw: TodoMessageRef) -> Result<TodoMessageRef, EditError> {
     let chat_id = raw
         .chat_id
         .as_deref()
-        .map(str::trim)
-        .filter(|id| valid_chat_id(id))
-        .map(str::to_string)
+        .and_then(canonical_chat_id)
         .or_else(|| chat_from_compound(&msg_id));
     let timestamp = raw
         .msg_timestamp
@@ -1043,16 +1041,35 @@ fn valid_stored_msg_id(id: &str) -> bool {
     if id.is_empty() || id.len() > 180 {
         return false;
     }
+    // `:` is the device suffix on a participant jid (`1555:14@lid`).
     if !id
         .bytes()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'@' | b'.' | b'_' | b'-' | b'+'))
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'@' | b'.' | b'_' | b'-' | b'+' | b':'))
     {
         return false;
     }
     if id.starts_with("true_") || id.starts_with("false_") {
-        return crate::voice::valid_message_id(id);
+        let mut bare = id.to_string();
+        bare.retain(|c| c != ':');
+        return crate::voice::valid_message_id(&bare);
     }
     (16..=80).contains(&id.len()) && id.bytes().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// `1555:14@lid` and `1555@lid` are the same chat. Status broadcasts are not chats.
+fn canonical_chat_id(id: &str) -> Option<String> {
+    let id = id.trim();
+    if id.is_empty() || id.len() > 120 {
+        return None;
+    }
+    let (local, host) = id.split_once('@')?;
+    let local = local.split_once(':').map(|(user, _)| user).unwrap_or(local);
+    let host = host.to_ascii_lowercase();
+    if host == "broadcast" || host.contains(':') {
+        return None;
+    }
+    let chat = format!("{local}@{host}");
+    valid_chat_id(&chat).then_some(chat)
 }
 
 fn valid_chat_id(id: &str) -> bool {
@@ -1068,7 +1085,7 @@ fn chat_from_compound(id: &str) -> Option<String> {
         .strip_prefix("true_")
         .or_else(|| id.strip_prefix("false_"))?;
     let (chat, _) = rest.split_once('_')?;
-    valid_chat_id(chat).then(|| chat.to_string())
+    canonical_chat_id(chat)
 }
 
 fn normalize_kind(kind: &str) -> String {
@@ -1570,6 +1587,23 @@ mod tests {
         assert_eq!(file.items[0].kind, ItemKind::Owe);
         assert_eq!(file.items[0].title, "keep the question");
         assert_eq!(file.items[0].remind_at, Some(1_700_000_100_000));
+    }
+
+    #[test]
+    fn a_device_jid_marks_the_chat_without_the_suffix() {
+        let mut file = TodoFile::default();
+        let token = "A".repeat(20);
+        let id = format!("false_15551212:14@lid_{token}_1555999:14@lid");
+        let mut draft = draft_message(&id);
+        draft.kind = Some(ItemKind::Waiting);
+        if let Some(msg) = draft.message.as_mut() {
+            msg.chat_id = Some("15551212:14@lid".into());
+        }
+        add_item(&mut file, draft, 1_700_000_000_000).unwrap();
+        let linked = file.items[0].message.as_ref().unwrap();
+        assert_eq!(linked.chat_id.as_deref(), Some("15551212@lid"));
+        assert_eq!(linked.msg_token, token);
+        assert_eq!(file.items[0].kind, ItemKind::Waiting);
     }
 
     #[test]
