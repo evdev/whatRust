@@ -281,6 +281,14 @@ static EN_TABLE: &[(&str, &str)] = &[
     ("A lista de tarefas está cheia.", "The to-do list is full."),
     ("Dados da tarefa inválidos.", "The task data is not valid."),
     ("Mensagem do WhatsApp", "WhatsApp message"),
+    ("essa conversa", "this chat"),
+    ("Ainda sem resposta: {0}", "Still waiting: {0}"),
+    ("Você ainda deve uma resposta em {0}", "You still owe a reply in {0}"),
+    ("Abra a conversa.", "Open the chat."),
+    ("Você tem {0} lembretes de resposta pendentes.", "You have {0} pending reply reminders."),
+    ("Você tem {0} lembretes pendentes.", "You have {0} pending reminders."),
+    ("Abra a lista de tarefas e Respostas para vê-los.", "Open To-Do and Replies to see them."),
+    ("Abra Respostas para vê-los.", "Open Replies to see them."),
 ];
 
 #[cfg(test)]

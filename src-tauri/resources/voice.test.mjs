@@ -101,6 +101,8 @@ assert(box.children.some((child) => child.textContent === "hello"), "translation
 api.renderBox(row, view, { translate: false });
 assert(!box.children.some((child) => child.textContent === "hello"), "translation hides when the setting is off");
 assert(row.querySelectorAll("[data-wr-voice]").length === 1, "updating the box does not duplicate it");
+const earlyButtons = box.children.filter((child) => child.tagName === "button");
+assert(earlyButtons.length === 1, "a transcript offers Summarize only");
 assert(box.style.cssText.includes("rgba(255,255,255,0.62)"), "a received note uses a translucent white panel");
 const sent = "true_123@c.us_ABC";
 assert(api.panelStyle(sent, null).includes("rgba(217,253,211,0.62)"), "a sent note falls back to translucent green");
@@ -109,6 +111,49 @@ assert(
   "a sampled bubble color replaces the fallback"
 );
 assert(api.parseColor("rgba(255, 255, 255, 0)").a === 0, "a transparent bubble color is recognized");
+
+globalThis.__WR_LANG = "en";
+api.renderBox(row, { id, status: "ready", text: "olá", summary: "- buy milk\n- call Sam" }, { translate: false });
+const summarized = row.querySelector("[data-wr-voice]");
+const add = summarized.children.find((child) => child.tagName === "button" && child.textContent === "Add to To-Do");
+assert(add, "a summary adds Add to To-Do");
+assert(summarized.querySelector("[data-wr-voice-text]").textContent === "olá", "the transcript is tagged");
+const summaryList = summarized.querySelector("[data-wr-voice-summary]");
+assert(
+  summaryList && summaryList.children.some((child) => child.textContent === "buy milk") && summaryList.tagName !== "button",
+  "the summary points are tagged separately from the button"
+);
+let captured = null;
+globalThis.__whatrustTodoFromVoice = (payload) => { captured = payload; };
+add.listeners.click.forEach((fn) => fn({ stopPropagation() {} }));
+assert(
+  captured && captured.id === id && captured.summary === "- buy milk\n- call Sam" && captured.transcript === "olá",
+  "Add to To-Do sends the summary and the voice note"
+);
+api.renderBox(row, { id, status: "ready", text: "olá", summary: "" }, { translate: true });
+assert(
+  !row.querySelector("[data-wr-voice]").children.some((child) => child.textContent === "Add to To-Do"),
+  "Add to To-Do waits for a summary"
+);
+delete globalThis.__WR_LANG;
+
+api.renderBox(row, {
+  id,
+  status: "ready",
+  text: "olá",
+  summary: "first\n- second\n\n1. third\n3 people\n1.5 liters",
+}, { translate: false });
+const transcript = box.children.find((child) => child.textContent === "olá");
+const card = box.children.find((child) => String(child.style.cssText || "").includes("rgba(255,196,120,0.9)"));
+assert(transcript && transcript !== card, "transcript stays outside the summary card");
+assert(!String(transcript.style.cssText || "").includes("font-weight:700") && transcript.style.fontWeight !== "700", "transcript is not bold");
+assert(card.style.cssText.includes("color:#3a2415") && card.style.cssText.includes("font-weight:700"), "summary card is apricot with dark bold text");
+assert(card.children[0].textContent === "Resumo", "summary card is labeled");
+const items = card.children.find((child) => child.tagName === "ul").children;
+assert(items.map((item) => item.textContent).join("|") === "first|second|third|3 people|1.5 liters", "summary lines become bullets with markers removed");
+assert(items.every((item) => item.style.cssText.includes("font-weight:700")), "summary points are bold");
+api.renderBox(row, { id, status: "ready", text: "olá", summary: " \n- \n" }, { translate: false });
+assert(!box.children.some((child) => String(child.style.cssText || "").includes("rgba(255,196,120,0.9)")), "a blank summary renders no card");
 
 let active = 0;
 let peak = 0;

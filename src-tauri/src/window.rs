@@ -294,6 +294,10 @@ pub(crate) fn build_account_window(
     let builder = builder.disable_drag_drop_handler();
 
     let builder = apply_isolation(builder, account, app);
+    // The store wry is about to use must already carry the master-key
+    // delegate. Doing it afterwards races WhatsApp's first crypto call.
+    #[cfg(target_os = "macos")]
+    crate::webcrypto::attach(account.store_uuid);
     let win = builder.build()?;
     crate::dlog::log("account window: WebView created");
     if !start_hidden {

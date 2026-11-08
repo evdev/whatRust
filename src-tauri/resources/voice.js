@@ -188,6 +188,9 @@
 
   var BOX_STYLE = "margin-top:6px;padding:8px 10px;border-radius:8px;font:13px/1.4 system-ui,sans-serif;white-space:pre-wrap;user-select:text;";
   var BUTTON_STYLE = "margin-top:6px;margin-right:8px;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-decoration:underline;cursor:pointer";
+  var SUMMARY_STYLE = "margin-top:6px;padding:6px 10px;border-radius:8px;background:rgba(255,196,120,0.9);color:#3a2415;font-weight:700;";
+  var SUMMARY_LIST_STYLE = "margin:2px 0 0;padding:0 0 0 18px;list-style:disc outside;color:#3a2415;font:inherit;font-weight:700;";
+  var SUMMARY_ITEM_STYLE = "margin:2px 0;padding:0;color:#3a2415;font-weight:700;";
   var PANEL_ALPHA = 0.62;
 
   function parseColor(value) {
@@ -269,6 +272,16 @@
     event.stopPropagation();
   }
 
+  function summaryPoints(value) {
+    var lines = String(value || "").split("\n");
+    var points = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].replace(/^\s*(?:[-*•–—]|\d{1,2}[.)])\s+/, "").trim();
+      if (line) points.push(line);
+    }
+    return points;
+  }
+
   function renderBox(row, view, prefs) {
     var doc = root.document;
     if (!row || !view || !view.id || !doc) return null;
@@ -299,8 +312,9 @@
     box.setAttribute("data-sig", signature);
     while (box.firstChild) box.removeChild(box.firstChild);
 
-    function addText(value, gap) {
+    function addText(value, gap, marker) {
       var node = doc.createElement("div");
+      if (marker) node.setAttribute(marker, "1");
       if (gap) node.style.marginTop = "4px";
       node.style.whiteSpace = "pre-wrap";
       node.textContent = value;
@@ -315,18 +329,54 @@
       });
     }
     if (view.status === "ready") {
-      addText(view.text && String(view.text).trim() ? view.text : L("Sem fala reconhecida.", "No speech recognized."));
+      addText(
+        view.text && String(view.text).trim() ? view.text : L("Sem fala reconhecida.", "No speech recognized."),
+        false,
+        "data-wr-voice-text"
+      );
       if (prefs && prefs.translate && view.translation) addText(view.translation, true);
       if (view.notice) addText(explain(view.notice), true);
-      if (view.summary) addText(view.summary, true);
+      addSummary(view.summary);
       addButton(
         view.summaryStatus === "loading" ? L("Resumindo…", "Summarizing…") : L("Resumir", "Summarize"),
         function () {
           if (typeof root.__whatrustVoiceSummarize === "function") root.__whatrustVoiceSummarize(view.id);
         }
       );
+      if (summaryPoints(view.summary).length) {
+        addButton(L("Adicionar à lista de tarefas", "Add to To-Do"), function () {
+          if (typeof root.__whatrustTodoFromVoice === "function") {
+            root.__whatrustTodoFromVoice({
+              id: view.id,
+              summary: view.summary,
+              transcript: view.text || "",
+            });
+          }
+        });
+      }
     }
     return box;
+
+    function addSummary(value) {
+      var points = summaryPoints(value);
+      if (!points.length) return;
+      var card = doc.createElement("div");
+      card.style.cssText = SUMMARY_STYLE;
+      var label = doc.createElement("div");
+      label.textContent = L("Resumo", "Summary");
+      card.appendChild(label);
+      var list = doc.createElement("ul");
+      list.setAttribute("data-wr-voice-summary", "1");
+      list.style.cssText = SUMMARY_LIST_STYLE;
+      for (var i = 0; i < points.length; i++) {
+        var item = doc.createElement("li");
+        item.style.cssText = SUMMARY_ITEM_STYLE;
+        item.textContent = points[i];
+        list.appendChild(item);
+      }
+      card.appendChild(list);
+      box.appendChild(card);
+    }
 
     function addButton(label, action) {
       var button = doc.createElement("button");

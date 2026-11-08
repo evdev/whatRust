@@ -29,6 +29,8 @@ mod tray;
 mod ui_health;
 mod unread;
 mod voice;
+#[cfg(target_os = "macos")]
+mod webcrypto;
 mod window;
 
 // Linux only: the capability files are the same on every OS, and a second
@@ -313,6 +315,11 @@ pub fn run() {
             // and the tray opens them as panels.
             #[cfg(target_os = "macos")]
             let open_hidden = open_hidden || s.menubar_only;
+
+            // Before any WKWebView exists: hand WebKit its master key from a
+            // local file so the login keychain is not consulted on launch.
+            #[cfg(target_os = "macos")]
+            webcrypto::prepare(handle);
 
             // Build windows while Tauri is still on its UI thread. On Windows a
             // WebView2 controller is created lazily for a hidden window, so the

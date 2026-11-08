@@ -4,7 +4,8 @@
 //! goes in `settings.json` and never reaches the WhatsApp webview. The macOS
 //! login keychain is not used: this app is ad-hoc signed, so that keychain
 //! cannot remember an "Always Allow" choice and asks for the login password
-//! on every launch. A missing key is `Ok(None)`, not an error.
+//! on every launch. WebKit's own master key is the same problem and is
+//! handled in `webcrypto`. A missing key is `Ok(None)`, not an error.
 
 use tauri::AppHandle;
 

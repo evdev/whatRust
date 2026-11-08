@@ -1,11 +1,12 @@
 /* Per-account to-do list inside web.whatsapp.com.
  *
- * The button sits under the account switcher, in the header's own flow (or on
- * the left rail, if that switcher is not there). Messages are captured from
- * the message menu. WhatsApp
- * redraws that menu from its own state, so an item added inside it may be
- * removed; a copy is then drawn against the menu's edge instead. The panel is
- * an overlay: WhatsApp's own nodes stay in the DOM.
+ * The button sits under the account switcher, in the same rail cell, so it
+ * cannot land beside it. Messages are captured from the message menu, and a
+ * summarized voice card can add that summary as a task while keeping the
+ * link to the voice message. WhatsApp redraws that menu from its own state,
+ * so an item added inside it may be removed; a copy is then drawn against
+ * the menu's edge instead. The panel is an overlay: WhatsApp's own nodes
+ * stay in the DOM.
  */
 (function () {
   "use strict";
@@ -190,6 +191,44 @@
     return "below";
   }
 
+  function markedText(node) {
+    var kids = node && node.children || [];
+    var lines = [];
+    for (var i = 0; i < kids.length; i++) {
+      var bit = kids[i] && kids[i].textContent ? String(kids[i].textContent).trim() : "";
+      if (bit) lines.push(bit);
+    }
+    if (lines.length) return lines.join("\n");
+    return String(node && node.textContent || "").trim();
+  }
+
+  // The voice card tags the transcript and the summary. Button labels live in
+  // the same box, so an untagged box that already has children contributes
+  // nothing. A plain text node, which is all older cards stored, still counts.
+  function voiceFrom(box) {
+    var text = "";
+    var summary = "";
+    var tagged = false;
+    walk(box, function (node) {
+      if (node === box) return;
+      if (attr(node, "data-wr-voice-text")) {
+        tagged = true;
+        text = markedText(node);
+      }
+      if (attr(node, "data-wr-voice-summary")) {
+        tagged = true;
+        summary = markedText(node);
+      }
+    });
+    if (!tagged) {
+      var kids = box.children || [];
+      if (kids.length) return "";
+      return String(box.textContent || "");
+    }
+    if (text && summary) return text + "\n" + summary;
+    return text || summary;
+  }
+
   function extractDom(row) {
     if (!row) return null;
     var id = attr(row, "data-id");
@@ -202,7 +241,7 @@
     walk(row, function (node) {
       if (!plain && attr(node, "data-pre-plain-text")) plain = attr(node, "data-pre-plain-text");
       if (!text && classOf(node).indexOf("selectable-text") !== -1 && node.textContent) text = String(node.textContent);
-      if (attr(node, "data-wr-voice") && node.textContent) voice = String(node.textContent);
+      if (attr(node, "data-wr-voice")) voice = voiceFrom(node);
       var icon = attr(node, "data-icon").toLowerCase();
       if (icon.indexOf("audio") !== -1 || icon.indexOf("ptt") !== -1) kind = "voice";
       else if (icon.indexOf("image") !== -1) kind = "image";
@@ -224,6 +263,73 @@
     };
   }
 
+  function isWatch(item) {
+    return !!item && (item.kind === "waiting" || item.kind === "owe");
+  }
+
+  function isTask(item) {
+    return !!item && !isWatch(item);
+  }
+
+  var SKIP_MESSAGE = {
+    protocol: 1,
+    e2e_notification: 1,
+    gp2: 1,
+    notification: 1,
+    notification_template: 1,
+    ciphertext: 1,
+    revoked: 1,
+    call_log: 1,
+    album: 1,
+    reaction: 1,
+  };
+
+  function markedAt(item) {
+    var created = item && item.created_at || 0;
+    var epoch = item && item.message && item.message.msg_epoch || 0;
+    return created > epoch ? created : epoch;
+  }
+
+  function sameMessage(item, signal) {
+    var msg = item && item.message || {};
+    if (!signal) return false;
+    if (signal.msg_id && msg.msg_id && signal.msg_id === msg.msg_id) return true;
+    if (signal.msg_token && msg.msg_token && signal.msg_token === msg.msg_token) return true;
+    if (signal.msg_id && msg.msg_token && messageToken(signal.msg_id) === msg.msg_token) return true;
+    return false;
+  }
+
+  function sameWatchChat(itemChat, signalChat, lookup) {
+    if (!itemChat || !signalChat) return false;
+    if (itemChat === signalChat) return true;
+    if (typeof lookup !== "function") return false;
+    var left = lookup(itemChat);
+    var right = lookup(signalChat);
+    return !!(left && right && left === right);
+  }
+
+  // A later message clears a watch only when it is newer than both the marked
+  // message and the moment it was marked. Live events also have to be recent,
+  // so opening a chat and loading its history does not clear a watch.
+  function clearsWatch(item, signal, lookup) {
+    if (!isWatch(item) || item.done || !signal) return false;
+    if (!signal.type || SKIP_MESSAGE[signal.type]) return false;
+    if (/@broadcast/.test(signal.chat_id || "")) return false;
+    var itemChat = item.message && item.message.chat_id;
+    if (!sameWatchChat(itemChat, signal.chat_id, lookup)) return false;
+    if (sameMessage(item, signal)) return false;
+    var at = signal.at_ms || 0;
+    if (!at || at <= markedAt(item)) return false;
+    if (signal.live) {
+      var now = signal.now || 0;
+      var age = now - at;
+      if (!now || age > 120000 || age < -15000) return false;
+    }
+    if (item.kind === "waiting") return !signal.from_me;
+    if (item.kind === "owe") return !!signal.from_me;
+    return false;
+  }
+
   function badgeFor(items, now, offsetMin) {
     var start = dayStart(now, offsetMin);
     var end = start + DAY;
@@ -233,7 +339,7 @@
     var anyDue = false;
     for (var i = 0; i < items.length; i++) {
       var item = items[i];
-      if (!item || item.done) continue;
+      if (!isTask(item) || item.done) continue;
       open += 1;
       var when = dueWhen(item, now);
       if (!when) continue;
@@ -244,6 +350,18 @@
     var count = overdue + today;
     if (!count && !anyDue) count = open;
     return { count: count, overdue: overdue };
+  }
+
+  function replyBadge(items) {
+    var open = 0;
+    var fired = false;
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      if (!isWatch(item) || item.done) continue;
+      open += 1;
+      if (item.fired && (item.remind_at || item.snooze_until)) fired = true;
+    }
+    return { count: open, overdue: fired };
   }
 
   function blobOf(item) {
@@ -281,7 +399,7 @@
     var out = [];
     for (var i = 0; i < items.length; i++) {
       var item = items[i];
-      if (!item) continue;
+      if (!isTask(item)) continue;
       if (mode === "done") {
         if (!item.done) continue;
       } else if (item.done) {
@@ -316,7 +434,7 @@
     var buckets = { overdue: [], today: [], upcoming: [], none: [] };
     for (var i = 0; i < items.length; i++) {
       var item = items[i];
-      if (!item || item.done) continue;
+      if (!item || item.done || !isTask(item)) continue;
       var key = sectionOf(item, now, offsetMin);
       if (!buckets[key]) key = "none";
       buckets[key].push(item);
@@ -329,8 +447,80 @@
     return out;
   }
 
-  function menuActions(existing) {
-    return existing ? ["open", "complete"] : ["add", "remind"];
+  // An open to-do keeps the marker. A finished to-do must not cover an open watch,
+  // or the reply disappears from the message.
+  function markerChoice(taskAny, taskOpen, watch) {
+    var item = taskOpen || watch || taskAny || null;
+    return { item: item, replies: !taskOpen && !!watch };
+  }
+
+  function widText(value) {
+    if (!value) return "";
+    if (typeof value === "string") return value;
+    if (typeof value._serialized === "string") return value._serialized;
+    return "";
+  }
+
+  // The message key's remote is the chat. `msg.chat` and from/to can point at
+  // the sender in a group, which would clear a different conversation.
+  function messageChatId(msg) {
+    if (!msg) return "";
+    var id = msg.id;
+    if (typeof id === "string") {
+      var parsed = chatFromId(id);
+      if (parsed) return parsed;
+    }
+    var chat = widText(id && id.remote);
+    if (chat) return chat;
+    if (msg.chat && msg.chat.id) chat = widText(msg.chat.id);
+    if (chat) return chat;
+    var fromMe = !!(id && id.fromMe);
+    return widText(fromMe ? msg.to : msg.from);
+  }
+
+  function menuActions(task, watch, fromMe) {
+    var rows = task ? ["open", "complete"] : ["add", "remind"];
+    if (watch) rows.push("reply-open", "reply-clear");
+    else if (fromMe) rows.push("waiting", "owe");
+    else rows.push("owe", "waiting");
+    return rows;
+  }
+
+  function filterWatches(items, mode, query) {
+    var q = String(query || "").trim().toLowerCase();
+    var out = [];
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      if (!isWatch(item)) continue;
+      if (mode === "cleared") {
+        if (!item.done) continue;
+      } else if (item.done) {
+        continue;
+      }
+      if (q && blobOf(item).indexOf(q) === -1) continue;
+      out.push(item);
+    }
+    return out;
+  }
+
+  function groupWatches(items) {
+    var waiting = [];
+    var owe = [];
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      if (!item || item.done) continue;
+      if (item.kind === "owe") owe.push(item);
+      else waiting.push(item);
+    }
+    function byMarked(a, b) {
+      return (b.created_at || 0) - (a.created_at || 0);
+    }
+    waiting.sort(byMarked);
+    owe.sort(byMarked);
+    var out = [];
+    if (waiting.length) out.push({ id: "waiting", items: waiting });
+    if (owe.length) out.push({ id: "owe", items: owe });
+    return out;
   }
 
   function isMenuRow(node) {
@@ -429,6 +619,8 @@
   function indexMessages(items) {
     var any = Object.create(null);
     var open = Object.create(null);
+    var watchAny = Object.create(null);
+    var watchOpen = Object.create(null);
     function put(map, item) {
       var msg = item && item.message;
       if (!msg) return;
@@ -436,15 +628,27 @@
       if (msg.msg_id) map[msg.msg_id] = item;
     }
     for (var i = 0; i < items.length; i++) {
-      if (items[i] && items[i].done) put(any, items[i]);
+      var doneItem = items[i];
+      if (!doneItem || !doneItem.done) continue;
+      put(isWatch(doneItem) ? watchAny : any, doneItem);
     }
     for (var j = 0; j < items.length; j++) {
-      if (items[j] && !items[j].done) {
-        put(any, items[j]);
-        put(open, items[j]);
+      var item = items[j];
+      if (!item || item.done) continue;
+      if (isWatch(item)) {
+        put(watchAny, item);
+        put(watchOpen, item);
+      } else {
+        put(any, item);
+        put(open, item);
       }
     }
-    return { any: any, open: open };
+    return { any: any, open: open, watches: { any: watchAny, open: watchOpen } };
+  }
+
+  function lookupMapped(map, extract) {
+    if (!extract || !map) return null;
+    return map[extract.msg_id] || map[extract.msg_token] || null;
   }
 
   if (root.__WHATRUST_TEST) {
@@ -465,6 +669,15 @@
       groupItems: groupItems,
       menuActions: menuActions,
       indexMessages: indexMessages,
+      isWatch: isWatch,
+      replyBadge: replyBadge,
+      filterWatches: filterWatches,
+      groupWatches: groupWatches,
+      clearsWatch: clearsWatch,
+      markerChoice: markerChoice,
+      messageChatId: messageChatId,
+      lookupMapped: lookupMapped,
+      isTask: isTask,
       isChevronTarget: isChevronTarget,
       menuScore: menuScore,
       findMenu: findMenu,
@@ -478,7 +691,9 @@
   var items = [];
   var tracked = Object.create(null);
   var openTracked = Object.create(null);
+  var watchOpen = Object.create(null);
   var open = false;
+  var page = "todo";
   var filterMode = "open";
   var query = "";
   var searchOpen = false;
@@ -492,9 +707,14 @@
   var clearBtn;
   var tabButton;
   var tabBadge;
+  var replyButton;
+  var replyBadgeEl;
   var fallback;
   var fallbackLabel;
   var fallbackBadge;
+  var replyFallback;
+  var replyFallbackLabel;
+  var replyFallbackBadge;
   var hover;
   var hoverTimer;
   var hoverRow;
@@ -546,11 +766,15 @@
     var indexed = indexMessages(items);
     tracked = indexed.any;
     openTracked = indexed.open;
+    watchOpen = indexed.watches.open;
   }
 
   function lookupExtract(extract) {
-    if (!extract) return null;
-    return openTracked[extract.msg_id] || openTracked[extract.msg_token] || null;
+    return lookupMapped(openTracked, extract);
+  }
+
+  function lookupWatch(extract) {
+    return lookupMapped(watchOpen, extract);
   }
 
   function defaultTitle(kind) {
@@ -615,7 +839,7 @@
     host.style.setProperty("--dim", dark ? "#8696a0" : "#667781");
     host.style.setProperty("--line", dark ? "#222d34" : "#e9edef");
     host.style.setProperty("--hover", dark ? "#202c33" : "#f0f2f5");
-    host.style.setProperty("--accent", "#1daa61");
+    host.style.setProperty("--accent", page === "replies" ? "#53bdeb" : "#1daa61");
     host.style.colorScheme = dark ? "dark" : "light";
   }
 
@@ -635,6 +859,7 @@
     ".search{display:none;margin:0 12px 8px;padding:8px 10px;border:0;border-radius:8px;background:var(--hover);width:calc(100% - 24px)}",
     ".search.show{display:block}",
     ".quick{display:flex;gap:8px;padding:8px 12px}",
+    ".quick.hide{display:none}",
     ".quick input{flex:1;min-width:0;border:1px solid var(--line);border-radius:10px;background:transparent;padding:8px 10px}",
     ".quick button{background:var(--accent);color:#042;font-weight:600;padding:0 12px;border-radius:10px;flex:none}",
     ".quick button:hover{filter:brightness(1.05)}",
@@ -664,6 +889,10 @@
     ".actions{display:none;gap:2px;flex:none}",
     "article:hover .actions,article:focus-within .actions,article.open .actions{display:flex}",
     ".actions button{color:var(--accent);font-size:12px;font-weight:600;padding:2px 4px}",
+    ".foot{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}",
+    ".foot button{color:var(--accent);font-size:12px;font-weight:600;padding:4px 8px}",
+    ".foot button.go{background:color-mix(in srgb, var(--accent) 16%, transparent)}",
+    ".foot button.go:hover{background:color-mix(in srgb, var(--accent) 28%, transparent)}",
     ".meta{color:var(--dim);font-size:12px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
     ".snippet{color:var(--dim);font-size:13px;margin:4px 0 0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap}",
     ".detail{display:none;margin-top:8px}",
@@ -672,7 +901,11 @@
     ".detail input,.detail textarea,.detail select{width:100%;border:1px solid var(--line);border-radius:8px;background:transparent;padding:6px 8px}",
     ".detail textarea{min-height:52px;resize:vertical}",
     ".presets{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}",
+    ".presets.times{display:grid;grid-template-columns:1fr 1fr}",
+    ".presets.times button{text-align:center}",
     ".presets button,.ghost{border:1px solid var(--line);border-radius:8px;padding:4px 8px}",
+    ".end{display:flex;gap:6px;margin-top:8px}",
+    ".end .danger{margin-inline-start:auto}",
     ".presets button[aria-pressed=true]{background:var(--accent);color:#042;font-weight:600}",
     ".danger{color:#d34545}",
     ".empty{color:var(--dim);padding:28px 8px;text-align:center}",
@@ -680,6 +913,7 @@
   ].join("");
 
   var ICON_TAB = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="m4 6 1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></svg>';
+  var ICON_REPLY = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6h12a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H10l-3 3v-3H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"/></svg>';
   var ICON_SEARCH = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>';
   var ICON_CLOSE = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>';
 
@@ -710,16 +944,34 @@
     button.addEventListener("click", function (event) {
       event.preventDefault();
       event.stopPropagation();
-      if (open) closePanel();
-      else openPanel();
+      togglePage("todo");
+    });
+    return button;
+  }
+
+  function buildReplyTab() {
+    var button = el("button");
+    button.type = "button";
+    button.id = "__whatrust_todo_replies";
+    button.innerHTML = ICON_REPLY;
+    replyBadgeEl = el("span");
+    replyBadgeEl.style.cssText = "position:absolute;top:-2px;right:-2px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:#53bdeb;color:#042;font:10px/16px system-ui;text-align:center;display:none";
+    button.appendChild(replyBadgeEl);
+    button.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      togglePage("replies");
     });
     return button;
   }
 
   function styleTab(button, mode) {
     button.dataset.mode = mode;
+    var reply = button.id === "__whatrust_todo_replies";
     if (mode === "switcher") {
-      button.style.cssText = "width:36px;height:36px;padding:0;border:1px solid #00806966;border-radius:50%;background:#00806922;color:inherit;display:flex;align-items:center;justify-content:center;cursor:pointer;flex:none;outline-offset:3px;position:relative";
+      var edge = reply ? "#53bdeb66" : "#00806966";
+      var wash = reply ? "#53bdeb22" : "#00806922";
+      button.style.cssText = "width:36px;height:36px;padding:0;border:1px solid " + edge + ";border-radius:50%;background:" + wash + ";color:inherit;display:flex;align-items:center;justify-content:center;cursor:pointer;flex:none;outline-offset:3px;position:relative";
     } else {
       button.style.cssText = "width:40px;height:40px;margin:4px auto;padding:0;border:0;border-radius:12px;background:transparent;color:inherit;position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer;flex:none";
     }
@@ -738,36 +990,60 @@
     fallback.addEventListener("click", function (event) {
       event.preventDefault();
       event.stopPropagation();
-      if (open) closePanel();
-      else openPanel();
+      togglePage("todo");
     });
     document.documentElement.appendChild(fallback);
+    replyFallback = el("button");
+    replyFallback.type = "button";
+    replyFallback.id = "__whatrust_todo_reply_fallback";
+    replyFallback.style.cssText = "position:fixed;left:12px;bottom:56px;z-index:100000;display:none;gap:6px;align-items:center;padding:8px 12px;border:0;border-radius:999px;background:#53bdeb;color:#042;font:13px system-ui;cursor:pointer";
+    replyFallbackLabel = el("span", L("Respostas", "Replies"));
+    replyFallbackBadge = el("span");
+    replyFallbackBadge.style.cssText = "min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:#fff;color:#042;font:10px/16px system-ui;text-align:center;display:none";
+    replyFallback.append(replyFallbackLabel, replyFallbackBadge);
+    replyFallback.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      togglePage("replies");
+    });
+    document.documentElement.appendChild(replyFallback);
   }
 
-  function paintBadge() {
-    if (!tabBadge && !fallbackBadge) return;
-    var info = badgeFor(items, Date.now(), tzOffset());
+  function paintCount(badges, info, dark, calm) {
     var text = info.count > 99 ? "99+" : info.count ? String(info.count) : "";
-    var dark = themeDark();
-    [tabBadge, fallbackBadge].forEach(function (badge) {
+    badges.forEach(function (badge) {
       if (!badge) return;
       badge.textContent = text;
       badge.style.display = text ? "inline-block" : "none";
-      badge.style.background = info.overdue ? "#d34545" : "#1daa61";
+      badge.style.background = info.overdue ? "#d34545" : (calm || "#1daa61");
       badge.style.color = info.overdue ? "#fff" : "#042";
       badge.style.boxShadow = "0 0 0 2px " + (dark ? "#111b21" : "#fff");
     });
-    if (fallbackLabel) fallbackLabel.textContent = L("Tarefas", "To-Do");
-    if (tabButton) {
-      var title = L("Lista de tarefas", "To-Do") + (text ? " (" + text + ")" : "");
-      tabButton.title = title;
-      tabButton.setAttribute("aria-label", title);
-      tabButton.setAttribute("aria-pressed", open ? "true" : "false");
-      tabButton.style.boxShadow = open ? "inset 0 0 0 2px #1daa61" : "none";
-      if (tabButton.dataset.mode !== "switcher") {
-        tabButton.style.background = open ? "color-mix(in srgb, currentColor 12%, transparent)" : "transparent";
-      }
+    return text;
+  }
+
+  function paintRailButton(button, title, active, color) {
+    if (!button) return;
+    button.title = title;
+    button.setAttribute("aria-label", title);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+    button.style.boxShadow = active ? "inset 0 0 0 2px " + (color || "#1daa61") : "none";
+    if (button.dataset.mode !== "switcher") {
+      button.style.background = active ? "color-mix(in srgb, currentColor 12%, transparent)" : "transparent";
     }
+  }
+
+  function paintBadge() {
+    if (!tabBadge && !fallbackBadge && !replyBadgeEl && !replyFallbackBadge) return;
+    var dark = themeDark();
+    var info = badgeFor(items, Date.now(), tzOffset());
+    var text = paintCount([tabBadge, fallbackBadge], info, dark);
+    var replies = replyBadge(items);
+    var replyText = paintCount([replyBadgeEl, replyFallbackBadge], replies, dark, "#53bdeb");
+    if (fallbackLabel) fallbackLabel.textContent = L("Tarefas", "To-Do");
+    if (replyFallbackLabel) replyFallbackLabel.textContent = L("Respostas", "Replies");
+    paintRailButton(tabButton, L("Lista de tarefas", "To-Do") + (text ? " (" + text + ")" : ""), open && page === "todo");
+    paintRailButton(replyButton, L("Respostas", "Replies") + (replyText ? " (" + replyText + ")" : ""), open && page === "replies", "#53bdeb");
   }
 
   function insertAfter(anchor, button) {
@@ -776,45 +1052,12 @@
     if (anchor.nextElementSibling !== button) anchor.parentNode.insertBefore(button, anchor.nextSibling);
   }
 
-  function canGrow(box) {
-    if (!box || !box.style || box === document.body || box === document.documentElement) return false;
+  function flexColumn(el) {
     try {
-      var max = parseFloat(getComputedStyle(box).maxHeight);
-      if (max && max < 96) return false;
-    } catch (e) {}
-    return true;
-  }
-
-  function releaseGrowth(box) {
-    if (!box || !box.dataset || box.dataset.wrTodoGrown !== "1") return;
-    box.style.minHeight = "";
-    box.style.alignItems = box.dataset.wrTodoAlign || "";
-    delete box.dataset.wrTodoGrown;
-    delete box.dataset.wrTodoAlign;
-  }
-
-  function growBox(box, stack) {
-    if (!canGrow(box)) return false;
-    if (box.dataset.wrTodoGrown !== "1") {
-      box.dataset.wrTodoAlign = box.style.alignItems || "";
-      box.dataset.wrTodoGrown = "1";
+      return String(getComputedStyle(el).flexDirection || "").indexOf("column") === 0;
+    } catch (e) {
+      return false;
     }
-    // Top-align the row so the switcher stays beside the other header icons
-    // and the extra height becomes a second row instead of a covering overlay.
-    box.style.alignItems = "flex-start";
-    var pad = 0;
-    var borderBox = false;
-    try {
-      var style = getComputedStyle(box);
-      borderBox = style.boxSizing === "border-box";
-      pad = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0)
-        + (parseFloat(style.borderTopWidth) || 0) + (parseFloat(style.borderBottomWidth) || 0);
-    } catch (e) {}
-    var stackRect = rectOf(stack);
-    var stackH = stackRect && stackRect.height > 40 ? stackRect.height : 76;
-    var needed = Math.ceil(stackH + (borderBox ? pad : 0));
-    box.style.minHeight = Math.max(needed, 96) + "px";
-    return true;
   }
 
   function dropOtherStacks(keep) {
@@ -825,77 +1068,112 @@
     }
   }
 
-  function unwrapStack(switcher) {
-    var stack = switcher.parentNode;
-    if (!stack || attr(stack, "data-wr-todo-stack") !== "1") return;
-    var box = stack.parentNode;
-    if (box) box.insertBefore(switcher, stack);
-    switcher.style.marginInlineStart = stack.style.marginInlineStart || "8px";
-    if (stack.parentNode) stack.parentNode.removeChild(stack);
-    releaseGrowth(box);
+  function paintedRect(el) {
+    var self = rectOf(el);
+    if (!self || self.width < 8 || self.height < 8 || self.width > 96 || self.height > 96) return null;
+    var top = self.top;
+    var bottom = self.bottom;
+    var left = self.left;
+    var right = self.right;
+    if (el && typeof el.querySelectorAll === "function") {
+      var list = el.querySelectorAll("svg, img, canvas");
+      for (var i = 0; i < list.length; i++) {
+        var r = rectOf(list[i]);
+        if (!r || r.width < 8 || r.height < 8 || r.width > 96 || r.height > 96) continue;
+        if (r.top < self.top - 20 || r.bottom > self.bottom + 36) continue;
+        if (r.left < self.left - 16 || r.right > self.right + 16) continue;
+        if (r.top < top) top = r.top;
+        if (r.bottom > bottom) bottom = r.bottom;
+        if (r.left < left) left = r.left;
+        if (r.right > right) right = r.right;
+      }
+    }
+    return { top: top, bottom: bottom, left: left, right: right, width: right - left, height: bottom - top };
   }
 
-  // Keep the button in normal flow, directly under the switcher, and make the
-  // header tall enough for that second row. A header that cannot grow gets the
-  // button beside the switcher, never a fixed overlay on the search field.
-  function stackUnder(button, switcher) {
+  function iconBlob(node) {
+    return (attr(node, "data-icon") + " " + attr(node, "data-testid") + " " + attr(node, "aria-label") + " " + attr(node, "title")).toLowerCase();
+  }
+
+  // The flower draws past Meta AI's box, so the button rectangle alone still
+  // leaves it sitting on the switcher. Measure the icon, then keep a full gap.
+  function metaClearance(stack, switcher) {
+    var switchRect = rectOf(switcher);
+    if (!switchRect || switchRect.height < 8) return 0;
+    var scope = stack && stack.parentNode;
+    var header = switcher.closest ? switcher.closest("header, nav") : null;
+    var scopes = [];
+    if (scope) scopes.push(scope);
+    if (header && scopes.indexOf(header) === -1) scopes.push(header);
+    var best = null;
+    var bestScore = 1e15;
+    function consider(node) {
+      if (!node || node === switcher || node === stack) return;
+      if (stack && stack.contains && stack.contains(node)) return;
+      var named = iconBlob(node).indexOf("meta") !== -1 || isMetaButton(node);
+      var r = paintedRect(node);
+      if (!r) return;
+      var midX = (r.left + r.right) / 2;
+      var switchMid = (switchRect.left + switchRect.right) / 2;
+      if (Math.abs(midX - switchMid) > 40) return;
+      if (r.top > switchRect.top + 6) return;
+      if (!named && switchRect.top - r.bottom > 36) return;
+      var score = (named ? 0 : 400) + Math.abs(midX - switchMid) + Math.max(0, switchRect.top - r.bottom);
+      if (score < bestScore) {
+        bestScore = score;
+        best = r;
+      }
+    }
+    for (var s = 0; s < scopes.length; s++) {
+      walk(scopes[s], function (node) {
+        if (node !== scopes[s]) consider(node);
+      });
+    }
+    var prev = stack && stack.previousElementSibling;
+    var prevRect = prev && paintedRect(prev);
+    if (prevRect && Math.abs(((prevRect.left + prevRect.right) / 2) - ((switchRect.left + switchRect.right) / 2)) < 40 && prevRect.top < switchRect.top + 6) {
+      if (!best || prevRect.bottom > best.bottom) best = prevRect;
+    }
+    if (!best) return 0;
+    var needed = Math.ceil(best.bottom + 28 - switchRect.top);
+    if (needed < 8) return 0;
+    return Math.min(needed, 96);
+  }
+
+  // One rail cell. The nav is a wrapping row of narrow icons, so a second
+  // 36px circle would sit beside the switcher and spill into the chat list.
+  // A full-width column keeps the checklist underneath it.
+  function stackUnder(buttons, switcher) {
     var parent = switcher.parentNode;
     if (!parent) return;
-    button.dataset.pin = "";
-    button.style.position = "relative";
-    button.style.zIndex = "";
-    button.style.margin = "0";
-    button.style.display = "flex";
     var stacked = attr(parent, "data-wr-todo-stack") === "1";
     var box = stacked ? parent.parentNode : parent;
-    var before = rectOf(box);
-    if (!canGrow(box)) {
-      if (stacked) unwrapStack(switcher);
-      insertAfter(switcher, button);
-      dropOtherStacks(null);
-      return;
-    }
     var stack = stacked ? parent : null;
     if (!stack) {
       stack = document.createElement("span");
       stack.setAttribute("data-wr-todo-stack", "1");
-      stack.style.cssText = "display:inline-flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:4px;flex:0 0 auto;align-self:flex-start;margin-inline-start:" + (switcher.style.marginInlineStart || "8px");
-      switcher.style.margin = "0";
       parent.insertBefore(stack, switcher);
       stack.appendChild(switcher);
     }
-    if (switcher.nextElementSibling !== button) stack.appendChild(button);
-    if (!growBox(box, stack) || stackCoversNext(box, before, button)) {
-      unwrapStack(switcher);
-      insertAfter(switcher, button);
-      dropOtherStacks(null);
-      return;
+    switcher.style.margin = "0";
+    var cursor = switcher;
+    for (var i = 0; i < buttons.length; i++) {
+      var button = buttons[i];
+      if (!button) continue;
+      button.dataset.pin = "";
+      button.style.position = "relative";
+      button.style.zIndex = "";
+      button.style.margin = "0";
+      button.style.display = "flex";
+      button.style.alignSelf = "center";
+      if (cursor.nextElementSibling !== button) cursor.parentNode.insertBefore(button, cursor.nextSibling);
+      cursor = button;
     }
+    var column = flexColumn(box);
+    stack.style.cssText = "display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:6px;box-sizing:border-box;width:100%;max-width:100%;align-self:center;position:relative;z-index:2;margin:0;flex:" + (column ? "0 0 auto" : "0 0 100%");
+    var shift = metaClearance(stack, switcher);
+    if (shift) stack.style.marginTop = shift + "px";
     dropOtherStacks(stack);
-  }
-
-  // A fixed-size header can accept a taller min-height and still paint on top
-  // of the search row. If growing it overlaps the next row, or the button
-  // still hangs out of it, the button goes beside the switcher instead.
-  function stackCoversNext(box, before, button) {
-    var after = rectOf(box);
-    var buttonRect = rectOf(button);
-    if (buttonRect && after && buttonRect.bottom > after.bottom + 2) return true;
-    var next = box && box.nextElementSibling;
-    var nextRect = next && rectOf(next);
-    if (!before || !after || !nextRect || after.height <= before.height + 4) return false;
-    var overlap = Math.min(after.bottom, nextRect.bottom) - Math.max(after.top, nextRect.top);
-    return overlap > 12;
-  }
-
-  function placementFor(switcher) {
-    var parent = switcher.parentNode;
-    var dir = "";
-    var rect = parent ? rectOf(parent) : null;
-    try {
-      if (parent) dir = getComputedStyle(parent).flexDirection || "";
-    } catch (e) {}
-    return anchorPlacement("switcher", dir, rect ? rect.width : 0, rect ? rect.height : 0);
   }
 
   function mountRail() {
@@ -911,7 +1189,9 @@
     } else switcherWait = 0;
     if (!choice) {
       if (tabButton && tabButton.parentNode) tabButton.parentNode.removeChild(tabButton);
+      if (replyButton && replyButton.parentNode) replyButton.parentNode.removeChild(replyButton);
       fallback.style.display = "inline-flex";
+      if (replyFallback) replyFallback.style.display = "inline-flex";
       if (!railWarned) {
         railWarned = true;
         crumb("todo: nav-rail fallback");
@@ -920,18 +1200,15 @@
     }
     railWarned = false;
     fallback.style.display = "none";
+    if (replyFallback) replyFallback.style.display = "none";
     if (!tabButton || !tabButton.isConnected) tabButton = buildTab();
+    if (!replyButton || !replyButton.isConnected) replyButton = buildReplyTab();
     styleTab(tabButton, choice.mode);
-    var stacked = choice.el.parentNode && attr(choice.el.parentNode, "data-wr-todo-stack");
-    var how = choice.el.id === "__whatrust_accounts" ? placementFor(choice.el) : "after";
-    if (choice.el.id === "__whatrust_accounts" && (stacked || how === "below")) stackUnder(tabButton, choice.el);
+    styleTab(replyButton, choice.mode);
+    if (choice.el.id === "__whatrust_accounts") stackUnder([tabButton, replyButton], choice.el);
     else {
       insertAfter(choice.el, tabButton);
-      var parentRect = choice.el.parentNode && rectOf(choice.el.parentNode);
-      if (choice.el.id === "__whatrust_accounts" && parentRect && parentRect.width < 96) {
-        choice.el.style.margin = "4px auto";
-        tabButton.style.margin = "4px auto";
-      }
+      insertAfter(tabButton, replyButton);
     }
     paintBadge();
   }
@@ -990,6 +1267,7 @@
     form.append(quickEl, add);
     form.addEventListener("submit", function (event) {
       event.preventDefault();
+      if (page === "replies") return;
       var text = quickEl.value.trim();
       if (!text) return;
       invoke("todo_add", {
@@ -1027,7 +1305,7 @@
     clearBtn.type = "button";
     clearBtn.className = "clear";
     clearBtn.addEventListener("click", function () {
-      invoke("todo_clear_done").then(applyState).catch(saveFailed);
+      invoke("todo_clear_done", page === "replies" ? { kind: "waiting" } : {}).then(applyState).catch(saveFailed);
     });
     tabs.appendChild(clearBtn);
     listEl = el("div");
@@ -1044,7 +1322,9 @@
     if (!shadow) return;
     applyTheme();
     var title = shadow.querySelector("[data-role=title]");
-    if (title) title.textContent = L("Lista de tarefas", "To-Do");
+    if (title) title.textContent = page === "replies" ? L("Respostas", "Replies") : L("Lista de tarefas", "To-Do");
+    var quick = shadow.querySelector(".quick");
+    if (quick) quick.classList.toggle("hide", page === "replies");
     var searchBtn = shadow.querySelector("[data-role=search]");
     if (searchBtn) {
       var searchLabel = L("Buscar", "Search");
@@ -1068,19 +1348,58 @@
       searchEl.classList.toggle("show", searchOpen);
     }
     var openCount = 0;
-    for (var i = 0; i < items.length; i++) if (items[i] && !items[i].done) openCount += 1;
+    for (var i = 0; i < items.length; i++) {
+      var counted = items[i];
+      if (!counted || counted.done) continue;
+      if (page === "replies" ? isWatch(counted) : isTask(counted)) openCount += 1;
+    }
     if (countEl) countEl.textContent = openCount ? String(openCount) : "";
-    shadow.querySelectorAll(".tabs button[data-mode]").forEach(function (button) {
-      var mode = button.dataset.mode;
-      button.textContent = mode === "open" ? L("Abertas", "Open")
-        : mode === "today" ? L("Hoje", "Today")
-        : mode === "upcoming" ? L("Em breve", "Upcoming")
-        : L("Concluídas", "Done");
-      button.setAttribute("aria-selected", String(mode === filterMode));
-    });
+    syncTabs();
     if (clearBtn) {
-      clearBtn.textContent = L("Limpar concluídas", "Clear completed");
-      clearBtn.classList.toggle("show", filterMode === "done");
+      clearBtn.textContent = page === "replies" ? L("Limpar resolvidas", "Clear cleared") : L("Limpar concluídas", "Clear completed");
+      clearBtn.classList.toggle("show", page === "replies" ? filterMode === "cleared" : filterMode === "done");
+    }
+  }
+
+  function syncTabs() {
+    var tabs = shadow.querySelector(".tabs");
+    if (!tabs || !clearBtn) return;
+    var modes = page === "replies"
+      ? [["open", L("Abertas", "Open")], ["cleared", L("Resolvidas", "Cleared")]]
+      : [["open", L("Abertas", "Open")], ["today", L("Hoje", "Today")], ["upcoming", L("Em breve", "Upcoming")], ["done", L("Concluídas", "Done")]];
+    var buttons = [];
+    var node = tabs.firstChild;
+    while (node) {
+      if (node.getAttribute && node.getAttribute("data-mode")) buttons.push(node);
+      node = node.nextSibling;
+    }
+    var same = buttons.length === modes.length;
+    for (var i = 0; same && i < modes.length; i++) {
+      if (buttons[i].dataset.mode !== modes[i][0]) same = false;
+    }
+    if (!same) {
+      buttons.forEach(function (button) {
+        if (button.parentNode) button.parentNode.removeChild(button);
+      });
+      modes.forEach(function (entry) {
+        var button = el("button", entry[1]);
+        button.type = "button";
+        button.dataset.mode = entry[0];
+        button.setAttribute("role", "tab");
+        button.addEventListener("click", function () {
+          filterMode = entry[0];
+          renderList();
+        });
+        tabs.insertBefore(button, clearBtn);
+      });
+    }
+    var current = tabs.querySelectorAll("button[data-mode]");
+    for (var n = 0; n < current.length; n++) {
+      var mode = current[n].dataset.mode;
+      var label = "";
+      for (var m = 0; m < modes.length; m++) if (modes[m][0] === mode) label = modes[m][1];
+      current[n].textContent = label;
+      current[n].setAttribute("aria-selected", String(mode === filterMode));
     }
   }
 
@@ -1133,7 +1452,21 @@
     host.style.height = Math.max(120, limit - top) + "px";
   }
 
-  function openPanel(id) {
+  function togglePage(next) {
+    if (open && page === next) closePanel();
+    else showPage(next, "");
+  }
+
+  function showPage(next, id) {
+    var switching = page !== next;
+    page = next;
+    if (switching) {
+      filterMode = "open";
+      query = "";
+      searchOpen = false;
+      if (searchEl) searchEl.value = "";
+      expandedId = "";
+    }
     stopMenuWatch();
     buildPanel();
     open = true;
@@ -1142,7 +1475,8 @@
     placePanel();
     if (id) {
       var item = items.filter(function (entry) { return entry.id === id; })[0];
-      filterMode = item && item.done ? "done" : "open";
+      if (page === "replies") filterMode = item && item.done ? "cleared" : "open";
+      else filterMode = item && item.done ? "done" : "open";
       query = "";
       searchOpen = false;
       if (searchEl) searchEl.value = "";
@@ -1152,10 +1486,18 @@
     renderList();
     paintBadge();
     hideCapture();
-    if (id) {
+    if (id && shadow) {
       var node = shadow.querySelector('[data-todo-id="' + cssEscape(id) + '"]');
       if (node && node.scrollIntoView) node.scrollIntoView({ block: "nearest" });
     }
+  }
+
+  function openPanel(id) {
+    showPage("todo", id || "");
+  }
+
+  function openReplies(id) {
+    showPage("replies", id || "");
   }
 
   function closePanel() {
@@ -1240,6 +1582,8 @@
     if (id === "overdue") return L("Atrasadas", "Overdue");
     if (id === "today") return L("Hoje", "Today");
     if (id === "upcoming") return L("Em breve", "Upcoming");
+    if (id === "waiting") return L("Esperando resposta", "Waiting on them");
+    if (id === "owe") return L("Devo uma resposta", "You owe a reply");
     return L("Sem data", "No date");
   }
 
@@ -1268,6 +1612,13 @@
 
   function emptyCopy(mode, searching) {
     if (searching) return { title: L("Nenhum resultado.", "No matches."), hint: "" };
+    if (page === "replies") {
+      if (mode === "cleared") return { title: L("Nada resolvido.", "Nothing cleared."), hint: "" };
+      return {
+        title: L("Nada em aberto.", "Nothing waiting."),
+        hint: L("Clique com o botão direito em uma mensagem e escolha Esperando resposta ou Devo uma resposta.", "Right-click a message and choose Waiting on them or I owe a reply."),
+      };
+    }
     if (mode === "today") return { title: L("Nada para hoje.", "Nothing due today."), hint: "" };
     if (mode === "upcoming") return { title: L("Nada agendado.", "Nothing scheduled."), hint: "" };
     if (mode === "done") return { title: L("Nenhuma tarefa concluída.", "No completed tasks."), hint: "" };
@@ -1277,9 +1628,25 @@
     };
   }
 
+  function appendEmpty(copy) {
+    var empty = el("p");
+    empty.className = "empty";
+    empty.appendChild(document.createTextNode(copy.title));
+    if (copy.hint) {
+      var hint = el("span", copy.hint);
+      hint.className = "hint";
+      empty.appendChild(hint);
+    }
+    listEl.appendChild(empty);
+  }
+
   function renderList() {
     if (!listEl) return;
     renderChrome();
+    if (page === "replies") {
+      renderReplyList();
+      return;
+    }
     var shown = filterItems(items, filterMode, query, Date.now(), tzOffset());
     if (filterMode === "done") {
       shown = shown.slice().sort(function (a, b) {
@@ -1288,16 +1655,7 @@
     } else shown = sortItems(shown);
     listEl.replaceChildren();
     if (!shown.length) {
-      var copy = emptyCopy(filterMode, !!String(query || "").trim());
-      var empty = el("p");
-      empty.className = "empty";
-      empty.appendChild(document.createTextNode(copy.title));
-      if (copy.hint) {
-        var hint = el("span", copy.hint);
-        hint.className = "hint";
-        empty.appendChild(hint);
-      }
-      listEl.appendChild(empty);
+      appendEmpty(emptyCopy(filterMode, !!String(query || "").trim()));
       return;
     }
     if (filterMode === "open" && !String(query || "").trim()) {
@@ -1310,6 +1668,215 @@
       return;
     }
     shown.forEach(function (item) { listEl.appendChild(renderCard(item)); });
+  }
+
+  function renderReplyList() {
+    var shown = filterWatches(items, filterMode, query);
+    if (filterMode === "cleared") {
+      shown = shown.slice().sort(function (a, b) {
+        return (b.completed_at || b.created_at || 0) - (a.completed_at || a.created_at || 0);
+      });
+    }
+    listEl.replaceChildren();
+    if (!shown.length) {
+      appendEmpty(emptyCopy(filterMode, !!String(query || "").trim()));
+      return;
+    }
+    if (filterMode === "open" && !String(query || "").trim()) {
+      groupWatches(shown).forEach(function (group) {
+        listEl.appendChild(el("h2", sectionLabel(group.id)));
+        group.items.forEach(function (item) { listEl.appendChild(renderWatchCard(item)); });
+      });
+      return;
+    }
+    shown.forEach(function (item) { listEl.appendChild(renderWatchCard(item)); });
+  }
+
+  function inTwoDays() {
+    var date = new Date();
+    date.setDate(date.getDate() + 2);
+    date.setHours(9, 0, 0, 0);
+    return date.getTime();
+  }
+
+  function replyPresets() {
+    return [
+      [L("1 h", "1 h"), function () { return Date.now() + 60 * 60000; }],
+      [L("Noite", "Evening"), evening],
+      [L("Amanhã 9h", "Tomorrow 9am"), tomorrowMorning],
+      [L("Em 2 dias", "In 2 days"), inTwoDays],
+    ];
+  }
+
+  function remindChip(item) {
+    var now = Date.now();
+    var when = item.snooze_until && item.snooze_until > now ? item.snooze_until : (item.remind_at || 0);
+    if (!when) return "";
+    if (item.fired && when <= now) return L("Agora", "Now");
+    var start = dayStart(now, tzOffset());
+    if (when < start) return L("Atrasado", "Late");
+    try {
+      if (when < start + DAY) return new Date(when).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+      return new Date(when).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function watchQuote(item) {
+    var msg = item.message || {};
+    var chat = String(msg.chat_name || "").trim();
+    var text = String(msg.snippet || item.title || "").trim();
+    if (!text || text === chat) return "";
+    return text;
+  }
+
+  function watchDoneLabel(item, done) {
+    if (done) return L("Reabrir", "Reopen");
+    if (item.kind === "owe") return L("Já respondi", "I replied");
+    return L("Eles responderam", "They replied");
+  }
+
+  function renderWatchCard(item) {
+    var card = el("article");
+    card.dataset.todoId = item.id;
+    card.className = "watch" + (item.done ? " done" : "") + (item.id === expandedId ? " open" : "");
+    var head = el("div");
+    head.className = "head";
+    var check = el("button", item.done ? "✓" : "");
+    check.type = "button";
+    check.className = "check";
+    check.title = watchDoneLabel(item, item.done);
+    check.setAttribute("aria-label", check.title);
+    check.addEventListener("click", function () {
+      var was = !!item.done;
+      invoke("todo_toggle_done", { id: item.id, done: !was }).then(function (snapshot) {
+        applyState(snapshot);
+        showToast(was ? L("Reaberta.", "Reopened.") : watchDoneLabel(item, false) + ".", {
+          label: L("Desfazer", "Undo"),
+          fn: function () { invoke("todo_toggle_done", { id: item.id, done: was }).then(applyState).catch(saveFailed); },
+        });
+      }).catch(saveFailed);
+    });
+    var body = el("div");
+    body.className = "body";
+    var line = el("div");
+    line.className = "line";
+    var msg = item.message || {};
+    var chat = String(msg.chat_name || "").trim() || item.title || L("Sem título", "Untitled");
+    var name = el("div", chat);
+    name.className = "name";
+    line.appendChild(name);
+    var flat = filterMode !== "open" || !!String(query || "").trim();
+    if (flat) {
+      var kindChip = el("span", item.kind === "owe" ? L("Devo resposta", "You owe") : L("Esperando", "Waiting"));
+      kindChip.className = "chip";
+      line.appendChild(kindChip);
+    }
+    var chip = remindChip(item);
+    if (chip) {
+      var chipEl = el("span", chip);
+      chipEl.className = "chip" + (item.fired && !item.done ? " late" : "");
+      line.appendChild(chipEl);
+    }
+    body.appendChild(line);
+    var quote = watchQuote(item);
+    if (quote) {
+      var snippet = el("div", quote);
+      snippet.className = "snippet";
+      body.appendChild(snippet);
+    }
+    var foot = el("div");
+    foot.className = "foot";
+    if (item.message) {
+      var jump = el("button", L("Abrir conversa", "Open chat"));
+      jump.type = "button";
+      jump.className = "go";
+      jump.addEventListener("click", function () { jumpTo(item); });
+      foot.appendChild(jump);
+    }
+    if (!item.done) {
+      var snooze = el("button", L("Adiar 1 h", "Snooze 1h"));
+      snooze.type = "button";
+      snooze.addEventListener("click", function () {
+        invoke("todo_snooze", { id: item.id, until_ms: Date.now() + 60 * 60000 }).then(applyState).catch(saveFailed);
+      });
+      foot.appendChild(snooze);
+    }
+    if (foot.childNodes.length) body.appendChild(foot);
+    if (item.id === expandedId) body.appendChild(renderWatchDetail(item));
+    head.append(check, body);
+    card.appendChild(head);
+    card.addEventListener("click", function (event) {
+      var target = event.target;
+      if (target && target.closest && target.closest("button, input, textarea, select, a, .detail")) return;
+      expandedId = expandedId === item.id ? "" : item.id;
+      renderList();
+    });
+    return card;
+  }
+
+  function renderWatchDetail(item) {
+    var detail = el("div");
+    detail.className = "detail";
+    var noteLabel = el("span", L("Nota", "Note"));
+    noteLabel.className = "lbl";
+    var note = el("textarea");
+    note.value = item.note || "";
+    note.addEventListener("input", function () {
+      queuePatch(item.id, { note: note.value });
+    });
+    var remindLabel = el("span", L("Lembrete", "Reminder"));
+    remindLabel.className = "lbl";
+    var presets = el("div");
+    presets.className = "presets times";
+    replyPresets().forEach(function (preset) {
+      var button = el("button", preset[0]);
+      button.type = "button";
+      button.addEventListener("click", function () {
+        patch(item.id, { remind_at: preset[1]() }).catch(saveFailed);
+      });
+      presets.appendChild(button);
+    });
+    var when = el("input");
+    when.type = "datetime-local";
+    when.value = toLocalInput(item.snooze_until || item.remind_at);
+    when.addEventListener("change", function () {
+      var ms = new Date(when.value).getTime();
+      if (!ms) return;
+      patch(item.id, { remind_at: ms }).catch(saveFailed);
+    });
+    detail.append(noteLabel, note, remindLabel, presets, when);
+    var end = el("div");
+    end.className = "end";
+    if (item.remind_at || item.snooze_until) {
+      var clear = el("button", L("Sem lembrete", "No reminder"));
+      clear.type = "button";
+      clear.className = "ghost";
+      clear.addEventListener("click", function () {
+        patch(item.id, { clear_remind: true }).catch(saveFailed);
+      });
+      end.appendChild(clear);
+    }
+    var del = el("button", L("Excluir", "Delete"));
+    del.type = "button";
+    del.className = "ghost danger";
+    del.addEventListener("click", function () {
+      var draft = draftFrom(item);
+      invoke("todo_delete", { id: item.id }).then(function (snapshot) {
+        if (expandedId === item.id) expandedId = "";
+        applyState(snapshot);
+        showToast(L("Removida.", "Removed."), {
+          label: L("Desfazer", "Undo"),
+          fn: function () {
+            invoke("todo_add", { draft: draft, tz_offset_minutes: tzOffset() }).then(applyState).catch(saveFailed);
+          },
+        });
+      }).catch(saveFailed);
+    });
+    end.appendChild(del);
+    detail.appendChild(end);
+    return detail;
   }
 
   function renderCard(item) {
@@ -1533,7 +2100,158 @@
     if (item.due_at) draft.due_at = item.due_at;
     if (item.remind_at) draft.remind_at = item.remind_at;
     if (item.message) draft.message = item.message;
+    if (isWatch(item)) draft.kind = item.kind;
     return draft;
+  }
+
+  var clearQueue = [];
+  var clearing = Object.create(null);
+  var catchupChatAt = Object.create(null);
+  var wppWatching = false;
+
+  function isLockedError(err) {
+    var msg = err && typeof err === "object" && err.message ? String(err.message) : String(err || "");
+    return msg.indexOf("locked") !== -1;
+  }
+
+  function clearWatch(item, manual) {
+    if (!item || item.done || clearing[item.id]) return;
+    clearing[item.id] = true;
+    invoke("todo_toggle_done", { id: item.id, done: true }).then(function (snapshot) {
+      delete clearing[item.id];
+      applyState(snapshot);
+      var chat = (item.message && item.message.chat_name) || L("essa conversa", "this chat");
+      var text = manual
+        ? L("Marcada como resolvida.", "Marked as cleared.")
+        : (item.kind === "owe" ? L("Você respondeu em ", "You replied in ") : L("Responderam em ", "Replied: ")) + chat;
+      showToast(text, {
+        label: L("Desfazer", "Undo"),
+        fn: function () {
+          invoke("todo_toggle_done", { id: item.id, done: false }).then(applyState).catch(function (err) {
+            if (!isLockedError(err)) saveFailed();
+          });
+        },
+      });
+    }).catch(function (err) {
+      delete clearing[item.id];
+      if (isLockedError(err)) {
+        if (clearQueue.indexOf(item.id) === -1) clearQueue.push(item.id);
+        return;
+      }
+      if (manual) saveFailed();
+    });
+  }
+
+  function flushClears() {
+    if (!clearQueue.length) return;
+    var ids = clearQueue.slice();
+    clearQueue = [];
+    ids.forEach(function (id) {
+      var item = null;
+      for (var i = 0; i < items.length; i++) if (items[i] && items[i].id === id) item = items[i];
+      if (item && !item.done && isWatch(item)) clearWatch(item, false);
+    });
+  }
+
+  function lookupChat(id) {
+    var wpp = root.WPP;
+    if (!id || !wpp || !wpp.chat || typeof wpp.chat.get !== "function") return "";
+    try {
+      var chat = wpp.chat.get(id);
+      if (!chat || typeof chat.then === "function") return "";
+      var cid = chat.id;
+      if (!cid) return "";
+      return typeof cid === "string" ? cid : (cid._serialized || "");
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function signalFromWpp(msg, live) {
+    if (!msg) return null;
+    var id = msg.id;
+    var serialized = "";
+    if (typeof id === "string") serialized = id;
+    else if (id && typeof id._serialized === "string") serialized = id._serialized;
+    var fromMe = !!(id && id.fromMe) || serialized.indexOf("true_") === 0;
+    var at = Number(msg.t || 0);
+    if (at > 0 && at < 1e12) at *= 1000;
+    return {
+      chat_id: messageChatId(msg),
+      from_me: fromMe,
+      at_ms: at,
+      msg_id: serialized,
+      msg_token: messageToken(serialized),
+      type: msg.type || (msg.attributes && msg.attributes.type) || "",
+      live: !!live,
+      now: Date.now(),
+    };
+  }
+
+  function applySignal(signal) {
+    if (!signal) return;
+    var hit = [];
+    for (var i = 0; i < items.length; i++) {
+      if (clearsWatch(items[i], signal, lookupChat)) hit.push(items[i]);
+    }
+    hit.forEach(function (item) { clearWatch(item, false); });
+  }
+
+  function runCatchup() {
+    var wpp = root.WPP;
+    if (!wpp || !wpp.isReady || !wpp.chat || typeof wpp.chat.getMessages !== "function") return;
+    var now = Date.now();
+    var seen = Object.create(null);
+    items.forEach(function (item) {
+      if (!isWatch(item) || item.done) return;
+      var raw = item.message && item.message.chat_id;
+      if (!raw) return;
+      var id = lookupChat(raw) || raw;
+      if (seen[id]) return;
+      if (now - (catchupChatAt[id] || 0) < 60000) return;
+      seen[id] = true;
+      catchupChatAt[id] = now;
+      Promise.resolve(wpp.chat.getMessages(id, { count: 30 })).then(function (list) {
+        var msgs = list || [];
+        for (var n = 0; n < msgs.length; n++) {
+          var signal = signalFromWpp(msgs[n], false);
+          if (signal) applySignal(signal);
+        }
+      }).catch(function () {});
+    });
+  }
+
+  function armReplyWatch() {
+    (function tick() {
+      var wpp = root.WPP;
+      if (!wpp || !wpp.isReady || typeof wpp.on !== "function") {
+        setTimeout(tick, 500);
+        return;
+      }
+      if (!wppWatching) {
+        wppWatching = true;
+        try {
+          wpp.on("chat.new_message", function (msg) {
+            var signal = signalFromWpp(msg, true);
+            if (!signal) return;
+            // Opening a chat replays older messages through this event. Those
+            // stay off the live rule, but they should still reach catch-up,
+            // which clears from the timestamp alone.
+            var age = signal.now - signal.at_ms;
+            if (signal.at_ms && (age > 120000 || age < -15000)) {
+              runCatchup();
+              return;
+            }
+            applySignal(signal);
+          });
+        } catch (e) {
+          wppWatching = false;
+          setTimeout(tick, 1000);
+          return;
+        }
+      }
+      runCatchup();
+    })();
   }
 
   function applyState(snapshot) {
@@ -1546,11 +2264,15 @@
     if (open && !typing) renderList();
     var nextAlarms = snapshot.alarms || [];
     if (alarmIds(nextAlarms) !== alarmIds(lastAlarms)) showAlarms(nextAlarms, false);
+    flushClears();
+    runCatchup();
     return snapshot;
   }
 
   function alarmIds(list) {
-    return (list || []).map(function (alarm) { return alarm && alarm.id; }).join("\n");
+    return (list || []).map(function (alarm) {
+      return alarm ? (alarm.id || "") + ":" + (alarm.kind || "") : "";
+    }).join("\n");
   }
 
   var refreshTries = 0;
@@ -1612,7 +2334,7 @@
     var captureShadow = captureHost.attachShadow({ mode: "open" });
     captureHost._shadow = captureShadow;
     var style = el("style");
-    style.textContent = ".card{background:#111b21;color:#fff;border-radius:14px;padding:12px 14px;font:14px/1.4 system-ui;box-shadow:0 8px 24px #0006}.task{font-weight:600;margin:2px 0 8px}.sub{color:#8696a0;font-size:12px;margin-top:-6px;margin-bottom:8px}.row{display:flex;flex-wrap:wrap;gap:6px}button,input{font:inherit}button{border:0;border-radius:8px;padding:6px 8px;background:#2a3942;color:#fff;cursor:pointer}button.primary{background:#1daa61;color:#042}input{margin-top:8px;width:100%;box-sizing:border-box;border:0;border-radius:8px;padding:6px 8px;background:#2a3942;color:#fff}";
+    style.textContent = ".card{background:#111b21;color:#fff;border-radius:14px;padding:12px 14px;font:14px/1.4 system-ui;box-shadow:0 8px 24px #0006}.task{font-weight:600;margin:2px 0 8px}.sub{color:#8696a0;font-size:12px;margin-top:-6px;margin-bottom:8px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.row{display:flex;flex-wrap:wrap;gap:6px}.row+.row{margin-top:8px}button,input{font:inherit}button{border:0;border-radius:8px;padding:6px 8px;background:#2a3942;color:#fff;cursor:pointer}button.primary{background:#1daa61;color:#042}button.primary.reply{background:#53bdeb;color:#042}input{margin-top:8px;width:100%;box-sizing:border-box;border:0;border-radius:8px;padding:6px 8px;background:#2a3942;color:#fff}";
     captureShadow.appendChild(style);
     captureHost.addEventListener("mouseenter", function () { clearTimeout(captureTimer); });
     captureHost.addEventListener("mouseleave", scheduleCaptureHide);
@@ -1624,7 +2346,7 @@
     captureTimer = setTimeout(hideCapture, 9000);
   }
 
-  function showCapture(item, emphasize) {
+  function showCapture(item, emphasize, restoreKind) {
     if (!item) return;
     ensureCapture();
     var captureShadow = captureHost._shadow;
@@ -1632,40 +2354,57 @@
     if (old) old.parentNode.removeChild(old);
     var card = el("div");
     card.className = "card";
-    var heading = el("div", emphasize
+    var watch = isWatch(item);
+    var heading = el("div", watch
+      ? L("Avisar se continuar em aberto?", "Check back if this is still open?")
+      : emphasize
       ? L("Quando devemos lembrar?", "When should we remind you?")
       : L("Adicionada à lista de tarefas.", "Added to the to-do list."));
     var task = el("div", item.title || "");
     task.className = "task";
-    card.append(heading, task);
     var msg = item.message;
-    if (msg && (msg.chat_name || msg.sender)) {
-      var sub = el("div", [msg.chat_name, msg.sender].filter(Boolean).join(" · "));
+    if (watch && msg && msg.chat_name) task.textContent = msg.chat_name;
+    card.append(heading, task);
+    var quote = watch ? watchQuote(item) : "";
+    if (quote) {
+      var sub = el("div", quote);
       sub.className = "sub";
       card.appendChild(sub);
+    } else if (!watch && msg && (msg.chat_name || msg.sender)) {
+      var meta = el("div", [msg.chat_name, msg.sender].filter(Boolean).join(" · "));
+      meta.className = "sub";
+      card.appendChild(meta);
     }
     var row = el("div");
     row.className = "row";
-    function act(label, primary, fn) {
+    var tail = el("div");
+    tail.className = "row";
+    function act(parent, label, primary, fn) {
       var button = el("button", label);
       button.type = "button";
-      if (primary) button.className = "primary";
+      if (primary) button.className = watch ? "primary reply" : "primary";
       button.addEventListener("click", function () { fn(); });
-      row.appendChild(button);
+      parent.appendChild(button);
       return button;
     }
-    act(L("Desfazer", "Undo"), false, function () {
+    act(watch ? tail : row, L("Desfazer", "Undo"), false, function () {
+      if (restoreKind) {
+        var done = restoreKind === item.kind ? Promise.resolve() : patch(item.id, { kind: restoreKind });
+        done.then(hideCapture).catch(saveFailed);
+        return;
+      }
       invoke("todo_delete", { id: item.id }).then(function (snapshot) {
         applyState(snapshot);
         hideCapture();
       }).catch(saveFailed);
     });
-    [
+    var presets = watch ? replyPresets() : [
       [L("1 h", "1 h"), function () { return Date.now() + 60 * 60000; }],
       [L("Noite", "Evening"), evening],
       [L("Amanhã 9h", "Tomorrow 9am"), tomorrowMorning],
-    ].forEach(function (preset) {
-      act(preset[0], false, function () {
+    ];
+    presets.forEach(function (preset) {
+      act(row, preset[0], false, function () {
         patch(item.id, { remind_at: preset[1]() }).then(function () {
           hideCapture();
           showToast(L("Lembrete definido.", "Reminder set."));
@@ -1683,7 +2422,7 @@
         showToast(L("Lembrete definido.", "Reminder set."));
       }).catch(saveFailed);
     });
-    act(L("Escolher…", "Pick…"), false, function () {
+    act(watch ? tail : row, L("Escolher…", "Pick…"), false, function () {
       pick.style.display = "block";
       clearTimeout(captureTimer);
       if (typeof pick.showPicker === "function") {
@@ -1691,11 +2430,19 @@
       }
       pick.focus();
     });
-    act(L("Editar", "Edit"), true, function () {
+    if (watch) {
+      act(tail, L("Sem lembrete", "No reminder"), false, function () {
+        if (item.remind_at || item.snooze_until) patch(item.id, { clear_remind: true }).then(hideCapture).catch(saveFailed);
+        else hideCapture();
+      });
+    }
+    act(watch ? tail : row, L("Editar", "Edit"), true, function () {
       hideCapture();
-      openPanel(item.id);
+      if (watch) openReplies(item.id);
+      else openPanel(item.id);
     });
     card.append(row, pick);
+    if (watch) card.appendChild(tail);
     captureShadow.appendChild(card);
     captureHost.style.display = "block";
     scheduleCaptureHide();
@@ -1715,8 +2462,10 @@
       snippet: extract.snippet || "",
       msg_timestamp: extract.msg_timestamp || null,
       kind: extract.kind || "other",
+      msg_epoch: extract.msg_epoch || null,
     };
-    var title = (msg.snippet || "").split("\n")[0].trim() || defaultTitle(msg.kind);
+    var explicit = opts && opts.title ? String(opts.title).replace(/\s+/g, " ").trim() : "";
+    var title = explicit || (msg.snippet || "").split("\n")[0].trim() || defaultTitle(msg.kind);
     invoke("todo_add", {
       draft: { title: title.slice(0, 300), message: msg },
       tz_offset_minutes: tzOffset(),
@@ -1735,6 +2484,52 @@
     });
   }
 
+  function findOpenWatch(list, extract) {
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i];
+      if (!isWatch(item) || item.done) continue;
+      var msg = item.message || {};
+      if (extract.msg_token && msg.msg_token === extract.msg_token) return item;
+      if (extract.msg_id && msg.msg_id === extract.msg_id) return item;
+    }
+    return null;
+  }
+
+  function addWatch(extract, kind) {
+    if (!extract) return;
+    if (!extract.chat_id) {
+      showToast(L("Não foi possível marcar essa mensagem.", "Could not mark that message."));
+      return;
+    }
+    var previous = findOpenWatch(items, extract);
+    var before = Object.create(null);
+    items.forEach(function (item) { before[item.id] = true; });
+    var msg = {
+      msg_id: extract.msg_id,
+      msg_token: extract.msg_token,
+      chat_id: extract.chat_id,
+      chat_name: extract.chat_name || activeChatName(),
+      sender: extract.sender || "",
+      snippet: extract.snippet || "",
+      msg_timestamp: extract.msg_timestamp || null,
+      kind: extract.kind || "other",
+      msg_epoch: extract.msg_epoch || null,
+    };
+    var title = (msg.snippet || "").split("\n")[0].trim() || defaultTitle(msg.kind);
+    invoke("todo_add", {
+      draft: { title: title.slice(0, 300), message: msg, kind: kind },
+      tz_offset_minutes: tzOffset(),
+    }).then(function (snapshot) {
+      applyState(snapshot);
+      var added = (snapshot.items || []).filter(function (item) { return !before[item.id]; })[0];
+      var watch = added || findOpenWatch(snapshot.items || [], extract);
+      if (watch) showCapture(watch, false, previous ? previous.kind : "");
+      else showToast(kind === "owe" ? L("Devo uma resposta.", "You owe a reply.") : L("Esperando resposta.", "Waiting on them."));
+    }).catch(function () {
+      showToast(L("Não foi possível marcar essa mensagem.", "Could not mark that message."));
+    });
+  }
+
   function enrich(extract) {
     var wpp = root.WPP;
     if (!extract || !wpp || !wpp.isReady || !wpp.chat || typeof wpp.chat.getMessageById !== "function" || !extract.msg_id) {
@@ -1750,10 +2545,12 @@
       else if (type === "chat" && extract.kind === "other") extract.kind = "text";
       var body = msg.body || msg.caption || (msg.attributes && (msg.attributes.body || msg.attributes.caption)) || "";
       if (body && !extract.snippet) extract.snippet = String(body).slice(0, 1000);
-      var remote = msg.id && (msg.id.remote || msg.id.from);
-      var serializedRemote = remote && (remote._serialized || remote);
-      if (!extract.chat_id && typeof serializedRemote === "string") extract.chat_id = serializedRemote;
+      var chatId = messageChatId(msg);
+      if (chatId) extract.chat_id = chatId;
       if (!extract.chat_name && msg.chat && msg.chat.name) extract.chat_name = String(msg.chat.name).slice(0, 160);
+      var sent = Number(msg.t || (msg.attributes && msg.attributes.t) || 0);
+      if (sent > 0 && sent < 1e12) sent *= 1000;
+      if (sent > 0) extract.msg_epoch = sent;
       var serialized = "";
       if (typeof msg.id === "string") serialized = msg.id;
       else if (msg.id && typeof msg.id._serialized === "string") serialized = msg.id._serialized;
@@ -1768,13 +2565,42 @@
     if (action === "add") return L("Adicionar à lista de tarefas", "Add to To-Do");
     if (action === "remind") return L("Lembrar desta mensagem…", "Remind me about this…");
     if (action === "open") return L("Abrir na lista de tarefas", "Open in To-Do");
+    if (action === "waiting") return L("Esperando resposta", "Waiting on them");
+    if (action === "owe") return L("Devo uma resposta", "I owe a reply");
+    if (action === "reply-open") return L("Abrir em Respostas", "Open in Replies");
+    if (action === "reply-clear") return L("Marcar como resolvida", "Mark cleared");
     return L("Concluir tarefa", "Mark done");
+  }
+
+  function menuIcon(action) {
+    var path = '<path d="M12 5v14M5 12h14"/>';
+    if (action === "remind") path = '<circle cx="12" cy="13" r="7"/><path d="M12 10v3.5l2 1.5M9 5.5a4 4 0 0 1 6 0"/>';
+    else if (action === "waiting" || action === "reply-open") path = '<path d="M6 6h12a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H10l-3 3v-3H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"/>' + (action === "waiting" ? '<circle cx="9" cy="12" r=".9" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r=".9" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r=".9" fill="currentColor" stroke="none"/>' : "");
+    else if (action === "owe") path = '<path d="M8 7h9a3 3 0 0 1 0 6H8"/><path d="M11 10 8 13l3 3"/>';
+    else if (action === "complete" || action === "reply-clear") path = '<circle cx="12" cy="12" r="8"/><path d="m8.5 12.2 2.4 2.4 4.6-5"/>';
+    else if (action === "open") path = '<path d="M9 7h10M9 12h10M9 17h10"/><path d="m4 7 1 1 2-2M4 12l1 1 2-2M4 17l1 1 2-2"/>';
+    return '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + path + "</svg>";
+  }
+
+  function pendingMenuActions(extract) {
+    return menuActions(lookupExtract(extract), lookupWatch(extract), fromMeId(extract && extract.msg_id));
+  }
+
+  function fromMeId(id) {
+    return typeof id === "string" && id.indexOf("true_") === 0;
   }
 
   function runMenuAction(action, extract, existing) {
     if (action === "add") enrich(extract).then(function (next) { addExtract(next, null); });
     else if (action === "remind") enrich(extract).then(function (next) { addExtract(next, { remind: true }); });
-    else if (action === "open" && existing) openPanel(existing.id);
+    else if (action === "waiting" || action === "owe") enrich(extract).then(function (next) { addWatch(next, action); });
+    else if (action === "reply-open") {
+      var openWatch = lookupWatch(extract);
+      if (openWatch) openReplies(openWatch.id);
+    } else if (action === "reply-clear") {
+      var clearable = lookupWatch(extract);
+      if (clearable) clearWatch(clearable, true);
+    } else if (action === "open" && existing) openPanel(existing.id);
     else if (action === "complete" && existing) completeItem(existing.id);
     stopMenuWatch();
   }
@@ -1794,68 +2620,75 @@
     return rows.length ? rows[0] : null;
   }
 
-  function writeLabel(node, label) {
-    var target = null;
-    var best = -1;
-    walk(node, function (elNode) {
-      var kids = elNode.children || [];
-      if (kids.length) return;
-      var text = String(elNode.textContent || "").trim();
-      if (text.length >= best) {
-        target = elNode;
-        best = text.length;
-      }
-    });
-    walk(node, function (elNode) {
-      if (elNode === target || !elNode.childNodes) return;
-      for (var i = elNode.childNodes.length - 1; i >= 0; i--) {
-        if (elNode.childNodes[i].nodeType === 3) elNode.removeChild(elNode.childNodes[i]);
-      }
-    });
-    if (target) target.textContent = label;
-    else node.textContent = label;
+  function menuInk(menu, sample) {
+    var source = sample || menu;
+    try {
+      var color = getComputedStyle(source).color;
+      if (color && color !== "transparent" && color.indexOf("0, 0, 0, 0") === -1) return color;
+    } catch (e) {}
+    return themeDark() ? "#e9edef" : "#111b21";
   }
 
-  function makeMenuNode(menu, label, action) {
+  function pinStyle(node, css) {
+    var parts = css.split(";");
+    for (var i = 0; i < parts.length; i++) {
+      var bit = parts[i].trim();
+      if (!bit) continue;
+      var cut = bit.indexOf(":");
+      if (cut < 1) continue;
+      node.style.setProperty(bit.slice(0, cut).trim(), bit.slice(cut + 1).trim(), "important");
+    }
+  }
+
+  // Incoming rows keep their words in a shadow tree or a collapsed span, and
+  // their stylesheet clips any text that is not in that slot. Copy the row's
+  // role only, then draw an icon and a label that the menu CSS cannot hide.
+  function makeMenuNode(menu, label, actionName) {
     var sample = sampleRow(menu);
-    var node;
-    var cloned = false;
+    var node = null;
     if (sample && sample.cloneNode) {
-      try {
-        node = sample.cloneNode(true);
-        cloned = true;
-      } catch (e) {
-        node = null;
-      }
+      try { node = sample.cloneNode(false); } catch (e) { node = null; }
     }
-    if (cloned && node) {
-      if (node.removeAttribute) node.removeAttribute("id");
-      var icons = [];
-      walk(node, function (elNode) {
-        if (tagIs(elNode, "svg") || tagIs(elNode, "img") || attr(elNode, "data-icon")) icons.push(elNode);
-      });
-      for (var i = 0; i < icons.length; i++) {
-        if (icons[i].parentNode) icons[i].parentNode.removeChild(icons[i]);
-      }
-      writeLabel(node, label);
-      if (String(node.textContent || "").replace(/\s+/g, " ").trim() !== label) node.textContent = label;
-    } else {
-      var tag = String(menu.tagName || "").toLowerCase() === "ul" ? "li" : "button";
-      node = el(tag, label);
-      node.style.cssText = "display:block;width:100%;text-align:start;padding:10px 16px;cursor:pointer;background:transparent;border:0;color:inherit;font:inherit";
+    if (!node) {
+      var tag = String(menu.tagName || "").toLowerCase() === "ul" ? "li" : "div";
+      node = el(tag);
     }
+    if (node.removeAttribute) {
+      node.removeAttribute("id");
+      node.removeAttribute("style");
+      node.removeAttribute("data-animate-dropdown-item");
+    }
+    if ("className" in node) node.className = "";
+    var color = menuInk(menu, sample);
+    var icon = document.createElement("span");
+    icon.setAttribute("data-wr-todo-icon", "1");
+    pinStyle(icon, "display:inline-flex;flex:0 0 24px;width:24px;height:24px;min-width:24px;align-items:center;justify-content:center;overflow:visible");
+    icon.innerHTML = menuIcon(actionName);
+    var text = document.createElement("span");
+    text.setAttribute("data-wr-todo-label", "1");
+    text.textContent = label;
+    pinStyle(text, "display:block;flex:1 1 auto;width:auto;min-width:140px;max-width:none;height:auto;white-space:nowrap;overflow:visible;visibility:visible;opacity:1;position:static;clip:auto;font-size:14.5px;font-weight:400;line-height:20px;text-align:start;color:" + color + ";-webkit-text-fill-color:" + color);
+    while (node.firstChild) node.removeChild(node.firstChild);
+    node.appendChild(icon);
+    node.appendChild(text);
     node.setAttribute("data-wr-todo-menu", "1");
-    if (node.style) node.style.cursor = "pointer";
-    node.addEventListener("mousedown", function (event) {
-      event.preventDefault();
-      event.stopPropagation();
-    }, true);
-    node.addEventListener("click", function (event) {
-      event.preventDefault();
-      event.stopPropagation();
-      action();
-    }, true);
+    node.setAttribute("data-wr-todo-action", actionName);
+    node.setAttribute("aria-label", label);
+    pinStyle(node, "display:flex;flex-direction:row;align-items:center;gap:12px;width:100%;min-width:180px;max-width:none;height:auto;min-height:40px;box-sizing:border-box;padding:8px 16px;cursor:pointer;background:transparent;border:0;overflow:visible;opacity:1;visibility:visible;position:static;color:" + color + ";-webkit-text-fill-color:" + color + ";font-size:14.5px");
     return node;
+  }
+
+  function runMenuNode(node, event) {
+    if (!node || node.getAttribute("data-wr-fired") === "1") return;
+    var action = node.getAttribute("data-wr-todo-action");
+    if (!action || !pending || !pending.extract) return;
+    var extract = pending.extract;
+    node.setAttribute("data-wr-fired", "1");
+    if (event) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    runMenuAction(action, extract, lookupExtract(extract));
   }
 
   function countOurs(menu) {
@@ -1883,14 +2716,11 @@
   function injectMenu(menu, extract) {
     if (!menu || !extract) return;
     stripOurs(menu);
-    var existing = lookupExtract(extract);
     var sample = sampleRow(menu);
     var parent = sample && sample.parentNode ? sample.parentNode : menu;
     var anchor = sample || null;
-    menuActions(existing).forEach(function (action) {
-      var node = makeMenuNode(menu, menuLabel(action), function () {
-        runMenuAction(action, extract, existing);
-      });
+    pendingMenuActions(extract).forEach(function (action) {
+      var node = makeMenuNode(menu, menuLabel(action), action);
       if (anchor && anchor.parentNode === parent) parent.insertBefore(node, anchor);
       else parent.appendChild(node);
     });
@@ -1925,15 +2755,14 @@
 
   function fillCompanion(existing, extract) {
     companion.replaceChildren();
-    menuActions(existing).forEach(function (action) {
-      var button = el("button", menuLabel(action));
+    pendingMenuActions(extract).forEach(function (action) {
+      var button = el("button");
       button.type = "button";
-      button.style.cssText = "display:block;width:100%;text-align:start;padding:10px 14px;border:0;border-top:1px solid #8696a033;background:transparent;color:inherit;font:14px system-ui;cursor:pointer";
-      button.addEventListener("click", function (event) {
-        event.preventDefault();
-        event.stopPropagation();
-        runMenuAction(action, extract, existing);
-      });
+      button.style.cssText = "display:flex;align-items:center;gap:10px;width:100%;text-align:start;padding:10px 14px;border:0;border-top:1px solid #8696a033;background:transparent;color:inherit;font:14px system-ui;cursor:pointer";
+      button.innerHTML = menuIcon(action);
+      button.appendChild(document.createTextNode(menuLabel(action)));
+      button.setAttribute("data-wr-todo-menu", "1");
+      button.setAttribute("data-wr-todo-action", action);
       companion.appendChild(button);
     });
   }
@@ -1941,7 +2770,8 @@
   function showCompanion(menu, extract) {
     ensureCompanion();
     var existing = lookupExtract(extract);
-    var key = existing ? "open:" + existing.id : "add:" + (extract.msg_token || extract.msg_id || "");
+    var watch = lookupWatch(extract);
+    var key = (existing ? "task:" + existing.id : "add") + ":" + (watch ? watch.id + ":" + watch.kind : "new") + ":" + (extract.msg_token || extract.msg_id || "");
     if (companionKey !== key) {
       companionKey = key;
       fillCompanion(existing, extract);
@@ -1993,7 +2823,8 @@
     ensureCompanion();
     var extract = pending.extract;
     var existing = lookupExtract(extract);
-    var key = "point:" + (existing ? existing.id : (extract.msg_token || extract.msg_id || ""));
+    var watch = lookupWatch(extract);
+    var key = "point:" + (existing ? existing.id : "add") + ":" + (watch ? watch.id + ":" + watch.kind : "new") + ":" + (extract.msg_token || extract.msg_id || "");
     if (companionKey !== key) {
       companionKey = key;
       fillCompanion(existing, extract);
@@ -2024,12 +2855,13 @@
     }
     menuFound = true;
     var ours = countOurs(menu);
-    if (ours.visible < 2 && menuInjects < 2) {
+    var want = pendingMenuActions(pending.extract).length;
+    if (ours.visible < want && menuInjects < 3) {
       menuInjects += 1;
       injectMenu(menu, pending.extract);
       ours = countOurs(menu);
     }
-    if (ours.visible >= 2) hideCompanion();
+    if (ours.visible >= want) hideCompanion();
     else showCompanion(menu, pending.extract);
   }
 
@@ -2202,35 +3034,56 @@
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i];
       var token = messageToken(attr(row, "data-id"));
-      var item = tracked[attr(row, "data-id")] || tracked[token];
+      var rowId = attr(row, "data-id");
+      var choice = markerChoice(
+        tracked[rowId] || tracked[token],
+        openTracked[rowId] || openTracked[token],
+        watchOpen[rowId] || watchOpen[token]
+      );
+      var item = choice.item;
+      var replyOnly = choice.replies;
       var badge = directBadge(row);
       if (!item) {
         if (badge && badge.parentNode) badge.parentNode.removeChild(badge);
         continue;
       }
-      var mark = item.done ? "✓" : "•";
-      var tone = item.fired && !item.done ? "#d34545" : "#1daa61";
+      var mark = item.done ? "done" : replyOnly ? (item.kind === "owe" ? "owe" : "waiting") : "task";
+      var tone = item.fired && !item.done ? "#d34545" : replyOnly ? "#53bdeb" : "#1daa61";
+      var label = replyOnly
+        ? (item.kind === "owe" ? L("Devo uma resposta", "I owe a reply") : L("Esperando resposta", "Waiting on them"))
+        : (item.done ? L("Tarefa concluída", "Completed task") : L("Tarefa", "Task"));
       if (!badge) {
-        badge = el("button", mark);
+        badge = el("button");
         badge.type = "button";
         badge.setAttribute("data-wr-todo-badge", item.id);
-        badge.style.cssText = "position:absolute;left:2px;top:2px;z-index:3;width:18px;height:18px;border:0;border-radius:50%;background:" + tone + ";color:#042;font:12px system-ui;cursor:pointer;padding:0";
+        badge.style.cssText = "position:absolute;left:2px;top:2px;z-index:3;width:18px;height:18px;border:0;border-radius:50%;background:" + tone + ";color:#042;font:12px/18px system-ui;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0";
         (function (node) {
           node.addEventListener("click", function (event) {
             event.preventDefault();
             event.stopPropagation();
-            openPanel(node.getAttribute("data-wr-todo-badge"));
+            var id = node.getAttribute("data-wr-todo-badge");
+            if (node.getAttribute("data-wr-todo-page") === "replies") openReplies(id);
+            else openPanel(id);
           });
         })(badge);
         try {
           if (getComputedStyle(row).position === "static") row.style.position = "relative";
         } catch (e) {}
         row.appendChild(badge);
-      } else if (badge.textContent !== mark) {
-        badge.textContent = mark;
       }
+      if (badge.getAttribute("data-wr-mark") !== mark) {
+        badge.setAttribute("data-wr-mark", mark);
+        badge.innerHTML = mark === "waiting"
+          ? '<svg viewBox="0 0 18 18" width="14" height="14" aria-hidden="true"><circle cx="4.2" cy="9" r="1.25" fill="#042"/><circle cx="9" cy="9" r="1.25" fill="#042"/><circle cx="13.8" cy="9" r="1.25" fill="#042"/></svg>'
+          : mark === "owe"
+          ? '<svg viewBox="0 0 18 18" width="13" height="13" fill="none" stroke="#042" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6.5h6.2a2.4 2.4 0 0 1 0 4.8H7"/><path d="M8.6 9.2 6 11.8l2.6 2.6"/></svg>'
+          : mark === "done" ? "✓" : "•";
+      }
+      badge.title = label;
+      badge.setAttribute("aria-label", label);
       badge.style.background = tone;
       if (attr(badge, "data-wr-todo-badge") !== item.id) badge.setAttribute("data-wr-todo-badge", item.id);
+      badge.setAttribute("data-wr-todo-page", replyOnly ? "replies" : "todo");
       seen.push(badge);
     }
     var marks = main.querySelectorAll("[data-wr-todo-badge]");
@@ -2320,7 +3173,7 @@
       alarmHost.style.cssText = "position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:100002;display:none;width:min(440px,calc(100vw - 24px))";
       alarmShadow = alarmHost.attachShadow({ mode: "open" });
       var style = el("style");
-      style.textContent = ".card{background:#111b21;color:#fff;border-radius:12px;padding:12px;margin:0 0 8px;font:14px system-ui;box-shadow:0 8px 24px #0006}.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}button{border:0;border-radius:8px;padding:6px 8px;background:#2a3942;color:#fff;cursor:pointer}button.primary{background:#1daa61;color:#042}";
+      style.textContent = ".card{background:#111b21;color:#fff;border-radius:12px;padding:12px;margin:0 0 8px;font:14px/1.4 system-ui;box-shadow:0 8px 24px #0006}.sub{color:#8696a0;margin-top:4px}.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}button{border:0;border-radius:8px;padding:6px 8px;background:#2a3942;color:#fff;cursor:pointer}.row.watch button{flex:1 1 calc(50% - 8px);text-align:center}button.primary{background:#1daa61;color:#042}button.primary.reply{background:#53bdeb;color:#042}.row.watch button.primary{flex:1 1 100%}";
       alarmShadow.appendChild(style);
       document.documentElement.appendChild(alarmHost);
     }
@@ -2340,39 +3193,101 @@
     lastAlarms.forEach(function (alarm) {
       var card = el("div");
       card.className = "card";
-      var title = el("div", alarm.title || L("Lembrete", "Reminder"));
+      var match = items.filter(function (item) { return item.id === alarm.id; })[0];
+      var watchAlarm = (match && isWatch(match)) || alarm.kind === "waiting" || alarm.kind === "owe";
+      var heading = alarm.title || L("Lembrete", "Reminder");
+      if (alarm.kind === "waiting") heading = L("Ainda sem resposta", "Still waiting") + (alarm.chat_name ? ": " + alarm.chat_name : "");
+      if (alarm.kind === "owe") heading = L("Você ainda deve uma resposta", "You still owe a reply") + (alarm.chat_name ? ": " + alarm.chat_name : "");
+      var title = el("div", heading);
+      var detail = null;
+      if (watchAlarm && alarm.title && alarm.title !== heading) {
+        detail = el("div", alarm.title);
+        detail.className = "sub";
+      }
       var row = el("div");
-      row.className = "row";
+      row.className = watchAlarm ? "row watch" : "row";
       function act(label, primary, fn) {
         var button = el("button", label);
         button.type = "button";
-        if (primary) button.className = "primary";
+        if (primary === "reply") button.className = "primary reply";
+        else if (primary) button.className = "primary";
         button.addEventListener("click", fn);
         row.appendChild(button);
       }
-      act(L("10 min", "10 min"), false, function () {
-        invoke("todo_snooze", { id: alarm.id, until_ms: Date.now() + 10 * 60000 }).then(applyState).catch(saveFailed);
-      });
-      act(L("1 h", "1 h"), false, function () {
-        invoke("todo_snooze", { id: alarm.id, until_ms: Date.now() + 60 * 60000 }).then(applyState).catch(saveFailed);
-      });
-      act(L("Amanhã 9h", "Tomorrow 9am"), false, function () {
-        invoke("todo_snooze", { id: alarm.id, until_ms: tomorrowMorning() }).then(applyState).catch(saveFailed);
-      });
-      act(L("Concluir", "Done"), true, function () {
-        invoke("todo_toggle_done", { id: alarm.id, done: true }).then(applyState).catch(saveFailed);
-      });
-      act(L("Dispensar", "Dismiss"), false, function () {
-        invoke("todo_dismiss_alarm", { id: alarm.id }).then(applyState).catch(saveFailed);
-      });
-      var match = items.filter(function (item) { return item.id === alarm.id; })[0];
-      if (match && match.message) {
-        act(L("Abrir", "Open"), false, function () { jumpTo(match); });
+      if (watchAlarm) {
+        if (match && match.message) act(L("Abrir conversa", "Open chat"), "reply", function () { jumpTo(match); });
+        else if (alarm.chat_id) act(L("Abrir conversa", "Open chat"), "reply", function () { openBottom(alarm.chat_id); });
+        act(L("1 h", "1 h"), false, function () {
+          invoke("todo_snooze", { id: alarm.id, until_ms: Date.now() + 60 * 60000 }).then(applyState).catch(saveFailed);
+        });
+        act(L("Amanhã 9h", "Tomorrow 9am"), false, function () {
+          invoke("todo_snooze", { id: alarm.id, until_ms: tomorrowMorning() }).then(applyState).catch(saveFailed);
+        });
+        act(alarm.kind === "owe" ? L("Já respondi", "I replied") : L("Eles responderam", "They replied"), false, function () {
+          invoke("todo_toggle_done", { id: alarm.id, done: true }).then(applyState).catch(saveFailed);
+        });
+        act(L("Dispensar", "Dismiss"), false, function () {
+          invoke("todo_dismiss_alarm", { id: alarm.id }).then(applyState).catch(saveFailed);
+        });
+      } else {
+        act(L("10 min", "10 min"), false, function () {
+          invoke("todo_snooze", { id: alarm.id, until_ms: Date.now() + 10 * 60000 }).then(applyState).catch(saveFailed);
+        });
+        act(L("1 h", "1 h"), false, function () {
+          invoke("todo_snooze", { id: alarm.id, until_ms: Date.now() + 60 * 60000 }).then(applyState).catch(saveFailed);
+        });
+        act(L("Amanhã 9h", "Tomorrow 9am"), false, function () {
+          invoke("todo_snooze", { id: alarm.id, until_ms: tomorrowMorning() }).then(applyState).catch(saveFailed);
+        });
+        act(L("Concluir", "Done"), true, function () {
+          invoke("todo_toggle_done", { id: alarm.id, done: true }).then(applyState).catch(saveFailed);
+        });
+        act(L("Dispensar", "Dismiss"), false, function () {
+          invoke("todo_dismiss_alarm", { id: alarm.id }).then(applyState).catch(saveFailed);
+        });
+        if (match && match.message) {
+          act(L("Abrir", "Open"), false, function () { jumpTo(match); });
+        }
       }
-      card.append(title, row);
+      if (detail) card.append(title, detail, row);
+      else card.append(title, row);
       alarmShadow.appendChild(card);
     });
   }
+
+  root.__whatrustTodoFromVoice = function (payload) {
+    var id = payload && payload.id;
+    if (!id || !messageToken(id)) return;
+    var summary = String(payload.summary || "").replace(/\s+/g, " ").trim();
+    if (!summary) return;
+    var row = null;
+    if (root.document && root.document.querySelectorAll) {
+      var found = root.document.querySelectorAll('[data-id="' + cssEscape(id) + '"]');
+      if (found && found.length) row = found[0];
+    }
+    var extract = row ? extractDom(row) : null;
+    if (!extract) {
+      extract = {
+        msg_id: id,
+        msg_token: messageToken(id),
+        chat_id: chatFromId(id) || null,
+        chat_name: "",
+        sender: "",
+        snippet: "",
+        msg_timestamp: null,
+        kind: "voice",
+      };
+    }
+    extract.kind = "voice";
+    var spoken = String(payload.transcript || "").replace(/\u0000/g, "").trim();
+    if (spoken) extract.snippet = spoken.slice(0, 1000);
+    enrich(extract).then(function (next) {
+      if (!next) return;
+      if (spoken) next.snippet = spoken.slice(0, 1000);
+      next.kind = "voice";
+      addExtract(next, { title: summary });
+    });
+  };
 
   root.__whatrustTodoState = applyState;
   root.__whatrustTodoAlarm = function (payload) {
@@ -2392,6 +3307,19 @@
     paintBadge();
     if (open) renderList();
   };
+
+  // Window capture runs before WhatsApp's own menu handler, which removes the
+  // row on pointerdown for incoming messages and swallows the click.
+  window.addEventListener("pointerdown", function (event) {
+    var path = typeof event.composedPath === "function" ? event.composedPath() : null;
+    if (!path || !path.length) path = event.target ? [event.target] : [];
+    for (var i = 0; i < path.length; i++) {
+      var node = path[i];
+      if (!node || !node.getAttribute || node.getAttribute("data-wr-todo-menu") !== "1") continue;
+      runMenuNode(node, event);
+      return;
+    }
+  }, true);
 
   document.addEventListener("pointerdown", function (event) {
     if (!companion || companion.style.display === "none") return;
@@ -2453,6 +3381,7 @@
     var rail = findRail(document);
     if (!rail || !rail.contains(event.target)) return;
     if (tabButton && tabButton.contains(event.target)) return;
+    if (replyButton && replyButton.contains(event.target)) return;
     closePanel();
   }, true);
 
@@ -2481,6 +3410,7 @@
     root.addEventListener("resize", schedule);
     schedule();
     refresh();
+    armReplyWatch();
     crumb("todo: injected");
   }
 
@@ -2488,10 +3418,16 @@
   else arm();
 
   document.addEventListener("visibilitychange", function () {
-    if (!document.hidden) refresh();
+    if (!document.hidden) {
+      refresh();
+      runCatchup();
+    }
   });
 
   // The badge is a local-time idea, so it goes stale across midnight even when
   // nothing else changes. The message markers do not depend on the clock.
   setInterval(paintBadge, 60_000);
+  // A reply can land without a fresh event the live rule will accept. Catch-up
+  // is already limited to one fetch per chat a minute.
+  setInterval(runCatchup, 60_000);
 })();
