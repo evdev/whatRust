@@ -651,6 +651,134 @@
     return map[extract.msg_id] || map[extract.msg_token] || null;
   }
 
+  // How far the rail stack must drop so its top sits clear of Meta AI.
+  // `top` is the switcher's current top. A positive margin is one we already
+  // applied, so a later measure does not add it again. `floor` is the top of
+  // the next rail icon the stack must not cover.
+  function clearanceFor(top, metaBottom, margin, stackHeight, floor) {
+    if (metaBottom == null || !isFinite(metaBottom) || !isFinite(top)) return 0;
+    var current = margin > 0 ? margin : 0;
+    var naturalTop = top - current;
+    var needed = Math.ceil(metaBottom + 20 - naturalTop);
+    if (needed < 4) return 0;
+    var limit = 240;
+    if (floor != null && isFinite(floor) && stackHeight > 0) {
+      var maxShift = Math.floor(floor - stackHeight - naturalTop);
+      if (maxShift < 4) return 0;
+      if (maxShift < limit) limit = maxShift;
+    }
+    return needed > limit ? limit : needed;
+  }
+
+  function alignedTo(rect, anchor, slop) {
+    if (!rect || !anchor) return false;
+    var mid = (rect.left + rect.right) / 2;
+    var anchorMid = (anchor.left + anchor.right) / 2;
+    return Math.abs(mid - anchorMid) <= slop;
+  }
+
+  // Meta AI counts even when its box starts below the switcher. The flower is
+  // drawn on top of that box, which is the overlap on the rail.
+  function pickClearance(switchRect, stackHeight, margin, rects) {
+    if (!switchRect || !rects) return { shift: 0, meta: null };
+    var current = margin > 0 ? margin : 0;
+    var naturalTop = switchRect.top - current;
+    var metaBottom = null;
+    var chosen = null;
+    var i;
+    for (i = 0; i < rects.length; i++) {
+      var meta = rects[i];
+      if (!meta.meta || !alignedTo(meta, switchRect, 56)) continue;
+      if (metaBottom == null || meta.bottom > metaBottom) {
+        metaBottom = meta.bottom;
+        chosen = meta;
+      }
+    }
+    if (metaBottom == null) {
+      for (i = 0; i < rects.length; i++) {
+        var hit = rects[i];
+        if (hit.meta || !alignedTo(hit, switchRect, 40)) continue;
+        if (hit.bottom > naturalTop + 4 && hit.top < switchRect.bottom - 4) {
+          if (metaBottom == null || hit.bottom > metaBottom) {
+            metaBottom = hit.bottom;
+            chosen = hit;
+          }
+        }
+      }
+    }
+    var floor = null;
+    if (metaBottom != null) {
+      for (i = 0; i < rects.length; i++) {
+        var below = rects[i];
+        if (below.meta || !alignedTo(below, switchRect, 40)) continue;
+        if (below.top < metaBottom + 8) continue;
+        if (floor == null || below.top < floor) floor = below.top;
+      }
+    }
+    return {
+      shift: clearanceFor(switchRect.top, metaBottom, margin, stackHeight, floor == null ? null : floor - 8),
+      meta: chosen,
+    };
+  }
+
+  // "dark", "light", or null when the color is missing or fully transparent.
+  // A transparent black background has luminance 0, so it must not count as dark.
+  function themeFromColor(color) {
+    if (color == null) return null;
+    var text = String(color).replace(/\s+/g, " ").trim().toLowerCase();
+    if (!text || text === "transparent") return null;
+    if (text === "white") return "light";
+    if (text === "black") return "dark";
+    var r;
+    var g;
+    var b;
+    var hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.exec(text);
+    if (hex) {
+      var h = hex[1];
+      if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+      r = parseInt(h.slice(0, 2), 16);
+      g = parseInt(h.slice(2, 4), 16);
+      b = parseInt(h.slice(4, 6), 16);
+    } else {
+      var parts = text.match(/[\d.]+/g);
+      if (!parts || parts.length < 3) return null;
+      if (parts.length >= 4 && +parts[3] === 0) return null;
+      r = +parts[0];
+      g = +parts[1];
+      b = +parts[2];
+    }
+    var lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    return lum < 140 ? "dark" : "light";
+  }
+
+  function themePalette(dark) {
+    if (dark) {
+      return {
+        panel: { bg: "#111b21", fg: "#e9edef", dim: "#8696a0", line: "#222d34", hover: "#202c33" },
+        popup: { bg: "#233138", fg: "#e9edef", dim: "#8696a0", btn: "#2a3942", btnFg: "#ffffff", link: "#7dffb3", border: "0" },
+        hover: { bg: "#111b21cc", fg: "#d1d7db", edge: "#ffffff22" },
+        badgeRing: "#111b21",
+      };
+    }
+    return {
+      panel: { bg: "#ffffff", fg: "#111b21", dim: "#667781", line: "#e9edef", hover: "#f0f2f5" },
+      popup: { bg: "#ffffff", fg: "#111b21", dim: "#667781", btn: "#f0f2f5", btnFg: "#111b21", link: "#008069", border: "1px solid #e9edef" },
+      hover: { bg: "#ffffffcc", fg: "#3b4a54", edge: "#00000022" },
+      badgeRing: "#fff",
+    };
+  }
+
+  function popupCss() {
+    return [
+      ".card{background:var(--bg);color:var(--fg);border:var(--stroke);box-shadow:0 8px 24px #0006}",
+      ".sub{color:var(--dim)}",
+      "button{background:var(--btn);color:var(--btn-fg)}",
+      "button.primary{background:#1daa61;color:#042}",
+      "button.primary.reply{background:#53bdeb;color:#042}",
+      "input{background:var(--btn);color:var(--fg)}",
+    ].join("");
+  }
+
   if (root.__WHATRUST_TEST) {
     root.__whatrustTodoApi = {
       messageToken: messageToken,
@@ -677,10 +805,15 @@
       markerChoice: markerChoice,
       messageChatId: messageChatId,
       lookupMapped: lookupMapped,
+      clearanceFor: clearanceFor,
+      pickClearance: pickClearance,
       isTask: isTask,
       isChevronTarget: isChevronTarget,
       menuScore: menuScore,
       findMenu: findMenu,
+      themeFromColor: themeFromColor,
+      themePalette: themePalette,
+      popupCss: popupCss,
     };
     return;
   }
@@ -735,6 +868,10 @@
   var menuMissLogged = false;
   var companion;
   var companionKey = "";
+  var themeAppObserver = null;
+  var themeAppNode = null;
+  var themeTimer = 0;
+  var themeKnown = null;
   var captureHost;
   var captureTimer = 0;
   var railWarned = false;
@@ -818,29 +955,106 @@
     return String(text).replace(/\s+/g, " ").trim().slice(0, 160);
   }
 
-  function themeDark() {
-    var app = document.getElementById("app") || document.body;
-    var color = "";
+  function styleOf(node, prop) {
+    if (!node) return "";
     try {
-      color = app ? getComputedStyle(app).backgroundColor : "";
-    } catch (e) {}
-    var parts = color && color.match(/[\d.]+/g);
-    if (parts && parts.length >= 3) {
-      return 0.2126 * +parts[0] + 0.7152 * +parts[1] + 0.0722 * +parts[2] < 140;
+      return getComputedStyle(node)[prop] || "";
+    } catch (e) {
+      return "";
     }
-    return root.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches;
+  }
+
+  // Light header text means WhatsApp is in dark mode. Same cutoff as the account controls.
+  function themeFromInk(color) {
+    var tone = themeFromColor(color);
+    if (tone === "light") return "dark";
+    if (tone === "dark") return "light";
+    return null;
+  }
+
+  function chatListHeader() {
+    var side = document.getElementById("side") || document.getElementById("pane-side");
+    if (side && side.querySelector) {
+      var inner = side.querySelector("header");
+      if (inner) return inner;
+    }
+    var app = document.getElementById("app");
+    if (!app || !app.querySelectorAll) return null;
+    var headers = app.querySelectorAll("header,[role=banner]");
+    for (var i = 0; i < headers.length; i++) {
+      if (headers[i].closest && headers[i].closest("#main")) continue;
+      return headers[i];
+    }
+    return null;
+  }
+
+  function themeDark() {
+    var ids = ["app", "side", "pane-side"];
+    for (var i = 0; i < ids.length; i++) {
+      var tone = themeFromColor(styleOf(document.getElementById(ids[i]), "backgroundColor"));
+      if (tone) return tone === "dark";
+    }
+    var bodyTone = themeFromColor(styleOf(document.body, "backgroundColor"));
+    if (bodyTone) return bodyTone === "dark";
+    var ink = themeFromInk(styleOf(chatListHeader(), "color"));
+    if (ink) return ink === "dark";
+    return !!(root.matchMedia && root.matchMedia("(prefers-color-scheme: dark)").matches);
+  }
+
+  function applyPopupVars(node, colors, dark) {
+    if (!node) return;
+    node.style.setProperty("--bg", colors.popup.bg);
+    node.style.setProperty("--fg", colors.popup.fg);
+    node.style.setProperty("--dim", colors.popup.dim);
+    node.style.setProperty("--btn", colors.popup.btn);
+    node.style.setProperty("--btn-fg", colors.popup.btnFg);
+    node.style.setProperty("--link", colors.popup.link);
+    node.style.setProperty("--stroke", colors.popup.border);
+    node.style.colorScheme = dark ? "dark" : "light";
+  }
+
+  function paintHoverColors() {
+    if (!hover) return;
+    var colors = themePalette(themeDark());
+    hover.style.background = colors.hover.bg;
+    hover.style.color = colors.hover.fg;
+    hover.style.border = "1px solid " + colors.hover.edge;
+  }
+
+  function paintTheme() {
+    var dark = themeDark();
+    var colors = themePalette(dark);
+    if (host) {
+      host.style.setProperty("--bg", colors.panel.bg);
+      host.style.setProperty("--fg", colors.panel.fg);
+      host.style.setProperty("--dim", colors.panel.dim);
+      host.style.setProperty("--line", colors.panel.line);
+      host.style.setProperty("--hover", colors.panel.hover);
+      host.style.setProperty("--accent", page === "replies" ? "#53bdeb" : "#1daa61");
+      host.style.colorScheme = dark ? "dark" : "light";
+    }
+    applyPopupVars(captureHost, colors, dark);
+    applyPopupVars(alarmHost, colors, dark);
+    if (toastHost) {
+      toastHost.style.background = colors.popup.bg;
+      toastHost.style.color = colors.popup.fg;
+      toastHost.style.border = colors.popup.border;
+      toastHost.style.colorScheme = dark ? "dark" : "light";
+      var undo = toastHost.querySelector("[data-role=undo]");
+      if (undo) undo.style.color = colors.popup.link;
+    }
+    if (hover && hover.style.display !== "none") paintHoverColors();
+    if (companion && companion.style.display !== "none") {
+      companion.style.background = colors.popup.bg;
+      companion.style.color = colors.popup.fg;
+      companion.style.border = colors.popup.border;
+      companion.style.colorScheme = dark ? "dark" : "light";
+    }
+    paintBadge();
   }
 
   function applyTheme() {
-    if (!host) return;
-    var dark = themeDark();
-    host.style.setProperty("--bg", dark ? "#111b21" : "#ffffff");
-    host.style.setProperty("--fg", dark ? "#e9edef" : "#111b21");
-    host.style.setProperty("--dim", dark ? "#8696a0" : "#667781");
-    host.style.setProperty("--line", dark ? "#222d34" : "#e9edef");
-    host.style.setProperty("--hover", dark ? "#202c33" : "#f0f2f5");
-    host.style.setProperty("--accent", page === "replies" ? "#53bdeb" : "#1daa61");
-    host.style.colorScheme = dark ? "dark" : "light";
+    paintTheme();
   }
 
   var PANEL_CSS = [
@@ -1017,7 +1231,7 @@
       badge.style.display = text ? "inline-block" : "none";
       badge.style.background = info.overdue ? "#d34545" : (calm || "#1daa61");
       badge.style.color = info.overdue ? "#fff" : "#042";
-      badge.style.boxShadow = "0 0 0 2px " + (dark ? "#111b21" : "#fff");
+      badge.style.boxShadow = "0 0 0 2px " + themePalette(!!dark).badgeRing;
     });
     return text;
   }
@@ -1091,53 +1305,129 @@
     return { top: top, bottom: bottom, left: left, right: right, width: right - left, height: bottom - top };
   }
 
-  function iconBlob(node) {
-    return (attr(node, "data-icon") + " " + attr(node, "data-testid") + " " + attr(node, "aria-label") + " " + attr(node, "title")).toLowerCase();
+  var railMeta = null;
+
+  function ownMeta(node) {
+    var label = (attr(node, "aria-label") + " " + attr(node, "title")).toLowerCase();
+    if (/meta\s*ai|meta\s*ia|ia da meta/.test(label)) return true;
+    var icon = (attr(node, "data-icon") + " " + attr(node, "data-testid")).toLowerCase();
+    if (icon.indexOf("meta") !== -1) return true;
+    if (tagIs(node, "button") || attr(node, "role") === "button") {
+      var text = (node.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+      if (text.length > 0 && text.length < 40 && /meta\s*ai|meta\s*ia|ia da meta/.test(text)) return true;
+    }
+    return false;
   }
 
-  // The flower draws past Meta AI's box, so the button rectangle alone still
-  // leaves it sitting on the switcher. Measure the icon, then keep a full gap.
+  // The flower paints past the control, so include that art. Skip icons that
+  // belong to our own stack when Meta AI's node is the parent.
+  function metaVisual(node, ignore) {
+    if (!node || node === ignore || (ignore && ignore.contains && ignore.contains(node))) return null;
+    var self = rectOf(node);
+    var top = 1e15;
+    var bottom = -1e15;
+    var left = 1e15;
+    var right = -1e15;
+    var have = false;
+    var holdsUs = ignore && node.contains && node.contains(ignore);
+    if (!holdsUs && self && self.width >= 8 && self.height >= 8 && self.width <= 96 && self.height <= 120) {
+      top = self.top;
+      bottom = self.bottom;
+      left = self.left;
+      right = self.right;
+      have = true;
+    }
+    var list = node.querySelectorAll ? node.querySelectorAll("svg, img, canvas") : [];
+    for (var i = 0; i < list.length; i++) {
+      if (ignore && ignore.contains && ignore.contains(list[i])) continue;
+      var art = rectOf(list[i]);
+      if (!art || art.width < 8 || art.height < 8 || art.width > 96 || art.height > 96) continue;
+      if (have && (art.top < top - 32 || art.bottom > bottom + 64 || art.left < left - 24 || art.right > right + 24)) continue;
+      if (art.top < top) top = art.top;
+      if (art.bottom > bottom) bottom = art.bottom;
+      if (art.left < left) left = art.left;
+      if (art.right > right) right = art.right;
+      have = true;
+    }
+    if (!have || !(right > left) || !(bottom > top)) return null;
+    if (right - left > 120 || bottom - top > 160) return null;
+    return { top: top, bottom: bottom + 4, left: left, right: right };
+  }
+
+  function railColumn(switcher) {
+    var node = switcher && switcher.parentElement;
+    for (var i = 0; node && i < 10; i++) {
+      var rect = rectOf(node);
+      if (rect && rect.width >= 40 && rect.width <= 120 && rect.height >= 200 && rect.width * 3 <= rect.height) return node;
+      node = node.parentElement;
+    }
+    return findRail(document) || (switcher && switcher.closest && switcher.closest("header, nav")) || (switcher && switcher.parentElement);
+  }
+
   function metaClearance(stack, switcher) {
+    railMeta = null;
     var switchRect = rectOf(switcher);
     if (!switchRect || switchRect.height < 8) return 0;
-    var scope = stack && stack.parentNode;
-    var header = switcher.closest ? switcher.closest("header, nav") : null;
-    var scopes = [];
-    if (scope) scopes.push(scope);
-    if (header && scopes.indexOf(header) === -1) scopes.push(header);
-    var best = null;
-    var bestScore = 1e15;
-    function consider(node) {
-      if (!node || node === switcher || node === stack) return;
-      if (stack && stack.contains && stack.contains(node)) return;
-      var named = iconBlob(node).indexOf("meta") !== -1 || isMetaButton(node);
-      var r = paintedRect(node);
-      if (!r) return;
-      var midX = (r.left + r.right) / 2;
-      var switchMid = (switchRect.left + switchRect.right) / 2;
-      if (Math.abs(midX - switchMid) > 40) return;
-      if (r.top > switchRect.top + 6) return;
-      if (!named && switchRect.top - r.bottom > 36) return;
-      var score = (named ? 0 : 400) + Math.abs(midX - switchMid) + Math.max(0, switchRect.top - r.bottom);
-      if (score < bestScore) {
-        bestScore = score;
-        best = r;
-      }
-    }
-    for (var s = 0; s < scopes.length; s++) {
-      walk(scopes[s], function (node) {
-        if (node !== scopes[s]) consider(node);
+    var margin = stack && stack.style ? parseFloat(stack.style.marginTop) || 0 : 0;
+    var stackRect = rectOf(stack);
+    var height = stackRect && stackRect.height > switchRect.height ? stackRect.height : switchRect.height;
+    var scope = railColumn(switcher);
+    var rects = [];
+    if (scope) {
+      walk(scope, function (node) {
+        if (!node || node === stack || node === switcher) return;
+        if (stack && stack.contains && stack.contains(node)) return;
+        if (attr(node, "id").indexOf("__whatrust") === 0) return;
+        if (ownMeta(node)) {
+          var visual = metaVisual(node, stack);
+          if (visual) rects.push({ top: visual.top, bottom: visual.bottom, left: visual.left, right: visual.right, meta: true });
+          return;
+        }
+        if (!(tagIs(node, "button") || attr(node, "role") === "button")) return;
+        var box = paintedRect(node);
+        if (!box) return;
+        rects.push({ top: box.top, bottom: box.bottom, left: box.left, right: box.right, meta: false });
       });
     }
-    var prev = stack && stack.previousElementSibling;
-    var prevRect = prev && paintedRect(prev);
-    if (prevRect && Math.abs(((prevRect.left + prevRect.right) / 2) - ((switchRect.left + switchRect.right) / 2)) < 40 && prevRect.top < switchRect.top + 6) {
-      if (!best || prevRect.bottom > best.bottom) best = prevRect;
+    var picked = pickClearance(switchRect, height, margin, rects);
+    railMeta = picked.meta;
+    return picked.shift;
+  }
+
+  function coversMeta(rect) {
+    if (!railMeta || !rect || rect.width < 8 || rect.height < 8) return false;
+    var left = Math.max(rect.left, railMeta.left);
+    var right = Math.min(rect.right, railMeta.right);
+    return right - left > 12 && rect.top < railMeta.bottom - 4 && rect.bottom > railMeta.top + 4;
+  }
+
+  // Drop a fixed whatRust layer that sits on the rail flower. The rail stack
+  // itself moves with margin; this is the notification card and the other overlays.
+  function nudgeOffMeta(el) {
+    if (!el || !el.style || el.style.display === "none") return;
+    var rect = rectOf(el);
+    if (!coversMeta(rect)) return;
+    var next = Math.ceil(railMeta.bottom + 20);
+    if (rect.top >= next - 1) return;
+    el.style.top = next + "px";
+    el.style.bottom = "auto";
+  }
+
+  function nudgeRailOverlays() {
+    var rootNode = document.documentElement;
+    if (rootNode && rootNode.style) {
+      if (railMeta) rootNode.style.setProperty("--wr-meta-bottom", Math.ceil(railMeta.bottom + 20) + "px");
+      else rootNode.style.removeProperty("--wr-meta-bottom");
     }
-    if (!best) return 0;
-    var needed = Math.ceil(best.bottom + 28 - switchRect.top);
-    if (needed < 8) return 0;
-    return Math.min(needed, 96);
+    nudgeOffMeta(alarmHost);
+    nudgeOffMeta(toastHost);
+    nudgeOffMeta(captureHost);
+    nudgeOffMeta(host);
+    nudgeOffMeta(fallback);
+    nudgeOffMeta(replyFallback);
+    if (!document.querySelectorAll) return;
+    var notes = document.querySelectorAll("[data-whatrust='downloads']");
+    for (var i = 0; i < notes.length; i++) nudgeOffMeta(notes[i]);
   }
 
   // One rail cell. The nav is a wrapping row of narrow icons, so a second
@@ -1170,9 +1460,12 @@
       cursor = button;
     }
     var column = flexColumn(box);
+    var held = parseFloat(stack.style.marginTop) || 0;
     stack.style.cssText = "display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:6px;box-sizing:border-box;width:100%;max-width:100%;align-self:center;position:relative;z-index:2;margin:0;flex:" + (column ? "0 0 auto" : "0 0 100%");
+    if (held) stack.style.marginTop = held + "px";
     var shift = metaClearance(stack, switcher);
     if (shift) stack.style.marginTop = shift + "px";
+    else stack.style.marginTop = "";
     dropOtherStacks(stack);
   }
 
@@ -1188,6 +1481,7 @@
       }
     } else switcherWait = 0;
     if (!choice) {
+      railMeta = null;
       if (tabButton && tabButton.parentNode) tabButton.parentNode.removeChild(tabButton);
       if (replyButton && replyButton.parentNode) replyButton.parentNode.removeChild(replyButton);
       fallback.style.display = "inline-flex";
@@ -1210,6 +1504,7 @@
       insertAfter(choice.el, tabButton);
       insertAfter(tabButton, replyButton);
     }
+    nudgeRailOverlays();
     paintBadge();
   }
 
@@ -1445,6 +1740,10 @@
     var hr = header && rectOf(header);
     if (hr && hr.bottom > top + 8 && hr.bottom < limit - 80 && hr.left < rect.left + rect.width && hr.right > rect.left) {
       top = hr.bottom;
+    }
+    if (railMeta && rect.left < railMeta.right - 12 && rect.left + rect.width > railMeta.left + 12) {
+      var cleared = Math.ceil(railMeta.bottom + 20);
+      if (top < cleared && cleared < limit - 120) top = cleared;
     }
     host.style.left = Math.max(0, rect.left) + "px";
     host.style.top = top + "px";
@@ -2290,7 +2589,7 @@
   function showToast(text, action) {
     if (!toastHost) {
       toastHost = document.createElement("div");
-      toastHost.style.cssText = "position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:100005;display:none;gap:8px;align-items:center;padding:10px 14px;border-radius:12px;background:#111b21;color:#fff;font:14px system-ui;box-shadow:0 8px 24px #0006;max-width:min(440px,calc(100vw - 24px))";
+      toastHost.style.cssText = "position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:100005;display:none;gap:8px;align-items:center;padding:10px 14px;border-radius:12px;font:14px system-ui;box-shadow:0 8px 24px #0006;max-width:min(440px,calc(100vw - 24px));box-sizing:border-box";
       document.documentElement.appendChild(toastHost);
     }
     toastHost.replaceChildren();
@@ -2309,7 +2608,8 @@
     if (buttonAction && buttonAction.label) {
       var undo = el("button", buttonAction.label);
       undo.type = "button";
-      undo.style.cssText = "border:0;background:transparent;color:#7dffb3;cursor:pointer;font:inherit";
+      undo.dataset.role = "undo";
+      undo.style.cssText = "border:0;background:transparent;cursor:pointer;font:inherit";
       undo.addEventListener("click", function () {
         if (buttonAction.fn) buttonAction.fn();
         toastHost.style.display = "none";
@@ -2317,6 +2617,7 @@
       toastHost.appendChild(undo);
     }
     toastHost.style.display = "flex";
+    paintTheme();
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { toastHost.style.display = "none"; }, 5000);
   }
@@ -2334,7 +2635,7 @@
     var captureShadow = captureHost.attachShadow({ mode: "open" });
     captureHost._shadow = captureShadow;
     var style = el("style");
-    style.textContent = ".card{background:#111b21;color:#fff;border-radius:14px;padding:12px 14px;font:14px/1.4 system-ui;box-shadow:0 8px 24px #0006}.task{font-weight:600;margin:2px 0 8px}.sub{color:#8696a0;font-size:12px;margin-top:-6px;margin-bottom:8px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.row{display:flex;flex-wrap:wrap;gap:6px}.row+.row{margin-top:8px}button,input{font:inherit}button{border:0;border-radius:8px;padding:6px 8px;background:#2a3942;color:#fff;cursor:pointer}button.primary{background:#1daa61;color:#042}button.primary.reply{background:#53bdeb;color:#042}input{margin-top:8px;width:100%;box-sizing:border-box;border:0;border-radius:8px;padding:6px 8px;background:#2a3942;color:#fff}";
+    style.textContent = popupCss() + ".card{border-radius:14px;padding:12px 14px;font:14px/1.4 system-ui}.task{font-weight:600;margin:2px 0 8px}.sub{font-size:12px;margin-top:-6px;margin-bottom:8px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.row{display:flex;flex-wrap:wrap;gap:6px}.row+.row{margin-top:8px}button,input{font:inherit}button{border:0;border-radius:8px;padding:6px 8px;cursor:pointer}input{margin-top:8px;width:100%;box-sizing:border-box;border:0;border-radius:8px;padding:6px 8px}";
     captureShadow.appendChild(style);
     captureHost.addEventListener("mouseenter", function () { clearTimeout(captureTimer); });
     captureHost.addEventListener("mouseleave", scheduleCaptureHide);
@@ -2349,6 +2650,7 @@
   function showCapture(item, emphasize, restoreKind) {
     if (!item) return;
     ensureCapture();
+    paintTheme();
     var captureShadow = captureHost._shadow;
     var old = captureShadow.querySelector(".card");
     if (old) old.parentNode.removeChild(old);
@@ -2790,13 +3092,23 @@
     companion.style.left = Math.max(8, Math.min(rect.left, viewW - width - 8)) + "px";
     companion.style.top = top + "px";
     companion.style.borderRadius = above ? "12px 12px 0 0" : "0 0 12px 12px";
-    var bg = themeDark() ? "#233138" : "#ffffff";
-    try {
-      var color = getComputedStyle(menu).backgroundColor;
-      if (color && color !== "transparent" && color.indexOf("0, 0, 0, 0") === -1) bg = color;
-    } catch (e) {}
+    paintCompanion(menu);
+  }
+
+  function paintCompanion(menu) {
+    if (!companion) return;
+    var colors = themePalette(themeDark());
+    var bg = colors.popup.bg;
+    if (menu) {
+      try {
+        var color = getComputedStyle(menu).backgroundColor;
+        if (themeFromColor(color)) bg = color;
+      } catch (e) {}
+    }
     companion.style.background = bg;
-    companion.style.color = themeDark() ? "#e9edef" : "#111b21";
+    companion.style.color = colors.popup.fg;
+    companion.style.border = colors.popup.border;
+    companion.style.colorScheme = themeDark() ? "dark" : "light";
   }
 
   function locateMenu() {
@@ -2837,8 +3149,7 @@
     companion.style.left = Math.max(8, Math.min(pending.x, viewW - 248)) + "px";
     companion.style.top = Math.max(8, Math.min(pending.y, viewH - height - 8)) + "px";
     companion.style.borderRadius = "12px";
-    companion.style.background = themeDark() ? "#233138" : "#ffffff";
-    companion.style.color = themeDark() ? "#e9edef" : "#111b21";
+    paintCompanion(null);
   }
 
   function syncMenu() {
@@ -3003,12 +3314,9 @@
       hover._item = lookupExtract(extract);
       hover.textContent = hover._item ? "✓" : "+";
       hover.title = hover._item ? L("Abrir na lista de tarefas", "Open in To-Do") : L("Adicionar à lista de tarefas", "Add to To-Do");
-      var dark = themeDark();
-      hover.style.background = dark ? "#111b21cc" : "#ffffffcc";
-      hover.style.color = dark ? "#d1d7db" : "#3b4a54";
-      hover.style.border = "1px solid " + (dark ? "#ffffff22" : "#00000022");
     }
     hover.style.display = "block";
+    paintHoverColors();
     if (rect.height < 72) {
       hover.style.left = Math.max(8, rect.left + 8) + "px";
       hover.style.top = Math.max(8, rect.top + (rect.height - 22) / 2) + "px";
@@ -3173,10 +3481,11 @@
       alarmHost.style.cssText = "position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:100002;display:none;width:min(440px,calc(100vw - 24px))";
       alarmShadow = alarmHost.attachShadow({ mode: "open" });
       var style = el("style");
-      style.textContent = ".card{background:#111b21;color:#fff;border-radius:12px;padding:12px;margin:0 0 8px;font:14px/1.4 system-ui;box-shadow:0 8px 24px #0006}.sub{color:#8696a0;margin-top:4px}.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}button{border:0;border-radius:8px;padding:6px 8px;background:#2a3942;color:#fff;cursor:pointer}.row.watch button{flex:1 1 calc(50% - 8px);text-align:center}button.primary{background:#1daa61;color:#042}button.primary.reply{background:#53bdeb;color:#042}.row.watch button.primary{flex:1 1 100%}";
+      style.textContent = popupCss() + ".card{border-radius:12px;padding:12px;margin:0 0 8px;font:14px/1.4 system-ui}.sub{margin-top:4px}.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}button{border:0;border-radius:8px;padding:6px 8px;cursor:pointer}.row.watch button{flex:1 1 calc(50% - 8px);text-align:center}.row.watch button.primary{flex:1 1 100%}";
       alarmShadow.appendChild(style);
       document.documentElement.appendChild(alarmHost);
     }
+    paintTheme();
     var cards = alarmShadow.querySelectorAll(".card");
     for (var c = 0; c < cards.length; c++) cards[c].parentNode.removeChild(cards[c]);
     if (!lastAlarms.length) {
@@ -3184,6 +3493,7 @@
       return;
     }
     alarmHost.style.display = "block";
+    nudgeOffMeta(alarmHost);
     if (summary && lastAlarms.length > 1) {
       var intro = el("div");
       intro.className = "card";
@@ -3391,10 +3701,53 @@
     scheduled = true;
     setTimeout(function () {
       scheduled = false;
+      bindThemeApp();
       mountRail();
       paintMarkers();
       if (open) placePanel();
     }, 200);
+  }
+
+  function bindThemeApp() {
+    var app = document.getElementById("app");
+    if (app === themeAppNode) return;
+    if (themeAppObserver) {
+      themeAppObserver.disconnect();
+      themeAppObserver = null;
+    }
+    themeAppNode = app;
+    if (app && typeof MutationObserver === "function") {
+      themeAppObserver = new MutationObserver(scheduleTheme);
+      themeAppObserver.observe(app, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
+    }
+    scheduleTheme();
+  }
+
+  function scheduleTheme() {
+    if (themeTimer) return;
+    themeTimer = setTimeout(function () {
+      themeTimer = 0;
+      var dark = themeDark();
+      if (dark === themeKnown) return;
+      themeKnown = dark;
+      paintTheme();
+    }, 200);
+  }
+
+  function armThemeWatch() {
+    if (typeof MutationObserver === "function") {
+      var observer = new MutationObserver(scheduleTheme);
+      var filter = ["class", "style", "data-theme"];
+      if (document.documentElement) observer.observe(document.documentElement, { attributes: true, attributeFilter: filter });
+      if (document.body) observer.observe(document.body, { attributes: true, attributeFilter: filter });
+    }
+    if (root.matchMedia) {
+      var media = root.matchMedia("(prefers-color-scheme: dark)");
+      if (media.addEventListener) media.addEventListener("change", scheduleTheme);
+      else if (media.addListener) media.addListener(scheduleTheme);
+    }
+    bindThemeApp();
+    scheduleTheme();
   }
 
   function arm() {
@@ -3409,6 +3762,7 @@
     }, true);
     root.addEventListener("resize", schedule);
     schedule();
+    armThemeWatch();
     refresh();
     armReplyWatch();
     crumb("todo: injected");

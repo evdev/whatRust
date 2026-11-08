@@ -193,6 +193,22 @@ assert(api.anchorPlacement("switcher", "row", 420, 59) === "below", "a horizonta
 assert(api.anchorPlacement("switcher", "column", 420, 400) === "after", "a vertical stack already places it below");
 assert(api.anchorPlacement("rail", "row", 420, 59) === "after", "the rail fallback stays in flow");
 
+const switchBox = { top: 332, bottom: 375, left: 17, right: 59, height: 43 };
+const onFlower = api.pickClearance(switchBox, 141, 0, [
+  { top: 348, bottom: 390, left: 17, right: 59, meta: true },
+  { top: 648, bottom: 670, left: 20, right: 52, meta: false },
+]);
+assert(onFlower.shift === 78, "Meta AI below the switcher's top still pushes the stack down");
+assert(onFlower.meta && onFlower.meta.bottom === 390, "the clearance remembers the Meta AI box");
+assert(
+  api.pickClearance(switchBox, 141, 0, [{ top: 700, bottom: 740, left: 400, right: 460, meta: true }]).shift === 0,
+  "Ask Meta AI in the conversation pane is left where it is"
+);
+assert(api.clearanceFor(332, 375, 0, 141, 640) === 63, "the stack drops to a gap under the flower");
+assert(api.clearanceFor(400, 375, 0, 141, 640) === 0, "a stack already below Meta AI stays put");
+assert(api.clearanceFor(393, 375, 61, 141, 640) === 63, "measuring after a shift does not add the margin twice");
+assert(api.clearanceFor(332, 600, 0, 141, 692) === 219, "the drop stops before the next rail icon");
+
 const openItem = { id: "a", title: "send file", note: "", done: false, due_at: now - day, priority: "high", created_at: 2, message: { sender: "Ada", chat_name: "Ada", snippet: "file" } };
 const todayItem = { id: "b", title: "today", note: "note", done: false, due_at: now, priority: "low", created_at: 3, remind_at: now + 2 * day };
 const laterItem = { id: "c", title: "later", note: "", done: false, due_at: now + 3 * day, priority: "normal", created_at: 1 };
@@ -332,6 +348,27 @@ smaller.appendChild(item(100));
 smaller.appendChild(item(140));
 tree.appendChild(smaller);
 assert(api.findMenu(tree, { x: 120, y: 110 }) === menu, "the menu under the click wins over a smaller menu farther away");
+
+assert(api.themeFromColor("rgba(0, 0, 0, 0)") === null, "transparent black is not a dark background");
+assert(api.themeFromColor("transparent") === null, "the transparent keyword is not a sample");
+assert(api.themeFromColor("rgb(0, 0, 0)") === "dark", "opaque black is dark");
+assert(api.themeFromColor("#111b21") === "dark", "the WhatsApp dark background is dark");
+assert(api.themeFromColor("white") === "light", "white is light");
+assert(api.themeFromColor("#ffffff") === "light", "hex white is light");
+
+const darkPalette = api.themePalette(true);
+const lightPalette = api.themePalette(false);
+assert(darkPalette.panel.bg === "#111b21" && darkPalette.panel.fg === "#e9edef" && darkPalette.panel.dim === "#8696a0" && darkPalette.panel.hover === "#202c33", "the dark list keeps WhatsApp's panel colors");
+assert(lightPalette.panel.bg === "#ffffff" && lightPalette.panel.fg === "#111b21" && lightPalette.panel.dim === "#667781" && lightPalette.panel.hover === "#f0f2f5", "the light list keeps WhatsApp's panel colors");
+assert(darkPalette.popup.bg === "#233138" && darkPalette.popup.btn === "#2a3942" && darkPalette.popup.link === "#7dffb3", "dark popups use the elevated WhatsApp surface");
+assert(lightPalette.popup.bg === "#ffffff" && lightPalette.popup.fg === "#111b21" && lightPalette.popup.btn === "#f0f2f5" && lightPalette.popup.link === "#008069", "light popups use a readable undo color");
+assert(lightPalette.popup.border === "1px solid #e9edef", "a light popup keeps a visible edge");
+assert(darkPalette.hover.bg === "#111b21cc" && lightPalette.hover.bg === "#ffffffcc", "the hover chip keeps its translucent wash");
+
+const popup = api.popupCss();
+assert(popup.indexOf("var(--bg)") !== -1 && popup.indexOf("var(--btn)") !== -1, "popup styles follow the theme variables");
+assert(popup.indexOf("#111b21") === -1, "popup styles do not hardcode the dark panel background");
+assert(popup.indexOf("button.primary{background:#1daa61;color:#042}") !== -1, "primary buttons stay green in both modes");
 
 if (failures) {
   console.error(`\n${failures} failed`);
