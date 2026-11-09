@@ -4,6 +4,20 @@
   // Interface language, injected by Rust and re-set live on a language change.
   function L(pt, en) { return window.__WR_LANG === "en" ? en : pt; }
 
+  // A held Web Lock stops Chromium from freezing the page after it has been
+  // hidden for a while, which is what dropped the socket. It does not touch
+  // focus or presence: WhatsApp still marks the computer unavailable when
+  // you leave it alone.
+  function holdSyncLock() {
+    try {
+      if (!navigator.locks || typeof navigator.locks.request !== "function") return;
+      navigator.locks.request("whatrust-sync", { mode: "shared" }, function () {
+        return new Promise(function () {});
+      }).catch(function () { setTimeout(holdSyncLock, 5000); });
+    } catch (e) {}
+  }
+  holdSyncLock();
+
   // A rejected command used to vanish here without a trace, which is how every
   // notify/set_unread call being refused by the IPC permission check went
   // unnoticed (issues #3, #32). Warn once per command in the page console

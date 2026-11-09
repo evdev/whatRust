@@ -3,7 +3,7 @@
 //! The panel is the account's window (`wa-<id>`), restyled: one webview
 //! per account, one session per store, one notification per message. A
 //! dismissed panel is a hidden window whose page keeps running: account
-//! windows set the WKWebView inactive-scheduling policy to `throttle`
+//! windows set the WKWebView inactive-scheduling policy to `disabled`
 //! (macOS 14+, Tauri's `background_throttling`), so WhatsApp's socket stays
 //! up while nothing is on screen. The geometry captured before the first
 //! restyle is replayed when the window goes back to normal.
@@ -89,7 +89,9 @@ mod imp {
     static LAST_HIDE: Mutex<Option<Instant>> = Mutex::new(None);
     /// Whether menu-bar-only mode was on when we last looked (toggle detection).
     static ONLY_MODE: AtomicBool = AtomicBool::new(false);
-    /// App Nap shield, held only while menu-bar-only mode is on.
+    /// App Nap shield. Held for the life of the process so a hidden or idle
+    /// window keeps syncing. `UserInitiatedAllowingIdleSystemSleep` still lets
+    /// the Mac sleep.
     static KEEP_ALIVE: Mutex<Option<ActivityPtr>> = Mutex::new(None);
 
     /// NSProcessInfoActivity as a raw pointer: the objc2 object is not `Send`
@@ -481,11 +483,9 @@ mod imp {
     }
 
     /// Hold a `UserInitiatedAllowingIdleSystemSleep` activity so App Nap
-    /// does not slow the app's own timers (the unread fallback, tray menu
-    /// rebuilds) while menu-bar-only mode runs. The webviews stay alive via
-    /// `background_throttling`; this only covers the Rust side. Held ONLY
-    /// while menu-bar-only mode is on: a window app keeps the default power
-    /// policy.
+    /// does not suspend the process after the windows have been hidden or
+    /// left unused. The webviews stay scheduled via `background_throttling`;
+    /// this covers the rest of the process. The Mac can still idle-sleep.
     pub fn set_keep_alive(on: bool) {
         let Ok(mut slot) = KEEP_ALIVE.lock() else {
             return;
@@ -495,7 +495,7 @@ mod imp {
                 return;
             }
             use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
-            let reason = NSString::from_str("whatRust keeps its menu-bar sessions connected");
+            let reason = NSString::from_str("whatRust keeps WhatsApp syncing while idle");
             let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
                 NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
                 &reason,

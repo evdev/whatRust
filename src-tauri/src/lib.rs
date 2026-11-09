@@ -308,6 +308,9 @@ pub fn run() {
                 if s.menubar_only {
                     menubar::enter_only(handle);
                 }
+                // App Nap would suspend a hidden or idle window and drop
+                // WhatsApp's socket. Held before any webview exists.
+                menubar::set_keep_alive(true);
             }
 
             // In menu-bar-only mode every account window starts hidden: the

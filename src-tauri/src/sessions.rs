@@ -112,6 +112,7 @@ pub fn initialize(app: &AppHandle, hidden: bool) -> tauri::Result<Window> {
     install_menu(app, &w)?;
     let shell = WebviewBuilder::new("shell-main", WebviewUrl::App("shell.html".into()))
         .initialization_script(crate::i18n::init_script())
+        .additional_browser_args(crate::window::WEBVIEW2_SYNC_ARGS)
         .data_directory(app.path().app_data_dir()?.join("management"))
         .on_navigation(crate::integration::local_url);
     w.add_child(
@@ -677,6 +678,7 @@ pub fn open_panel(app: &AppHandle, parent: Option<&str>) -> tauri::Result<()> {
             WebviewBuilder::new("settings", WebviewUrl::App("index.html".into()))
                 .initialization_script(crate::i18n::init_script())
                 .initialization_script(format!(r#"document.addEventListener("DOMContentLoaded",function(){{{theme_script}}},{{once:true}})"#))
+                .additional_browser_args(crate::window::WEBVIEW2_SYNC_ARGS)
                 .data_directory(app.path().app_data_dir()?.join("management"))
                 .on_navigation(crate::integration::local_url),
             tauri::LogicalPosition::new(0., 0.),

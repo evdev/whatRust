@@ -263,6 +263,9 @@ fn show_lock_window_inner(app: &AppHandle) {
         return;
     }
     let built = WebviewWindowBuilder::new(app, "lock", WebviewUrl::App("lock.html".into()))
+        // Same WebView2 user-data folder as the default account, so the browser
+        // arguments have to match or the second environment fails to start.
+        .additional_browser_args(crate::window::WEBVIEW2_SYNC_ARGS)
         .initialization_script(crate::i18n::init_script())
         .title(tr("whatRust — Bloqueado"))
         .inner_size(420.0, 540.0)

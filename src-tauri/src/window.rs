@@ -61,6 +61,29 @@ fn safari_ua(macos_major: u64) -> String {
 
 const BRIDGE_JS: &str = include_str!("../resources/bridge.js");
 
+/// WebView2 arguments that keep a minimized or hidden WhatsApp page on its
+/// normal timer cadence. Chromium otherwise clamps timers to one a second,
+/// then to one a minute after about five minutes, and the socket goes quiet.
+///
+/// This replaces wry's defaults, so the smart-screen flags and the autoplay
+/// policy wry would have passed are included here. One `--disable-features`
+/// list: Chromium keeps the last copy of that switch and drops the earlier one.
+pub(crate) const WEBVIEW2_SYNC_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,IntensiveWakeUpThrottling,CalculateNativeWinOcclusion --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --autoplay-policy=no-user-gesture-required";
+
+/// WebKit feature ids whose default slows timers the longer a hidden page sits
+/// unused. The public id drops a trailing `Enabled`.
+#[cfg(any(target_os = "linux", test))]
+fn suspends_hidden_sync(id: &str) -> bool {
+    matches!(
+        id,
+        "HiddenPageDOMTimerThrottling"
+            | "HiddenPageDOMTimerThrottlingEnabled"
+            | "HiddenPageDOMTimerThrottlingAutoIncreases"
+            | "PageVisibilityBasedProcessSuppression"
+            | "PageVisibilityBasedProcessSuppressionEnabled"
+    )
+}
+
 /// Tell open WhatsApp pages whether to show the source-device icon.
 /// `device.js` installs `window.__whatrustDevicePrefs`.
 pub(crate) fn push_device_icons(app: &AppHandle, enabled: bool) {
@@ -101,12 +124,12 @@ macro_rules! account_webview {
     ($builder:expr, $app:ident, $label:ident) => {
         $builder
             .user_agent(&user_agent())
-            // Keep the page running while hidden or minimized: WebKit suspends an
-            // inactive WKWebView, which drops WhatsApp's socket after a few
-            // minutes in the tray (and between menu-bar panels). `Throttle`
-            // still clamps timers, but the page stays alive. Only macOS 14+
-            // honours it; elsewhere it is ignored.
-            .background_throttling(BackgroundThrottlingPolicy::Throttle)
+            // Keep WhatsApp syncing while the window is hidden, minimized, or
+            // left alone. WebKit's default suspends an inactive WKWebView, and
+            // `Throttle` still lengthens timers the longer the page stays
+            // unused, until the socket's heartbeat no longer fires. `Disabled`
+            // leaves scheduling alone. Only macOS 14+ honours it.
+            .background_throttling(BackgroundThrottlingPolicy::Disabled)
             .initialization_script(crate::i18n::init_script())
             .initialization_script(if cfg!(windows) {
                 format!("window.__WHATRUST_WINDOWS__=true;window.__whatrustNotificationEpoch={};window.__whatrustLocked={};",$app.state::<crate::notify::Recent>().epoch(),!crate::lock::is_unlocked($app))
@@ -273,7 +296,9 @@ pub(crate) fn build_account_window(
         .inner_size(1100.0, 800.0)
         .min_inner_size(560.0, 480.0)
         .icon(icon)?;
-    let builder = account_webview!(builder, app, label).visible(!start_hidden);
+    let builder = account_webview!(builder, app, label)
+        .additional_browser_args(WEBVIEW2_SYNC_ARGS)
+        .visible(!start_hidden);
 
     // macOS: WKWebView can deliver Finder drops directly to WhatsApp's own drop
     // zone. Tauri's handler consumes them before the page sees a drag event, then
@@ -343,7 +368,9 @@ pub(crate) fn build_account_view(
         &label,
         WebviewUrl::External("https://web.whatsapp.com/".parse().expect("valid url")),
     );
-    let mut builder = account_webview!(builder, app, label).disable_drag_drop_handler();
+    let mut builder = account_webview!(builder, app, label)
+        .additional_browser_args(WEBVIEW2_SYNC_ARGS)
+        .disable_drag_drop_handler();
     if account.id != "default" {
         builder = builder.data_directory(accounts::profile_dir(app, &account.id)?);
     }
@@ -1202,6 +1229,7 @@ fn enable_webview_media(win: &WebviewWindow) {
                 // video sending and calling ("please update your browser").
                 // Turning quirks off lets CHROME_UA through unmodified.
                 settings.set_property("enable-site-specific-quirks", false);
+                disable_hidden_timer_throttling(&settings);
                 // Opt-in inspector for live diagnosis: run `WHATRUST_DEVTOOLS=1
                 // whatrust` and right-click > Inspect Element.
                 if std::env::var_os("WHATRUST_DEVTOOLS").is_some() {
@@ -1239,7 +1267,113 @@ fn enable_webview_media(win: &WebviewWindow) {
     {
         // wry already installs a WKUIDelegate that auto-grants requestMediaCapturePermission;
         // mic/camera are gated only by the Info.plist usage-description keys (see src-tauri/Info.plist).
-        let _ = win;
+        // `background_throttling(Disabled)` covers a webview that WebKit treats as
+        // inactive. A minimized or ordered-out window can still be "in a window"
+        // and then hit the older hidden-page timer stretch, which grows the
+        // longer the page is unused. Turn that off too when this WebKit has it.
+        disable_hidden_timer_throttling_macos(win);
+    }
+}
+
+/// Stop WebKit from lengthening timers on a hidden page (WebKitGTK ≥ 2.42).
+#[cfg(target_os = "linux")]
+fn disable_hidden_timer_throttling(settings: &webkit2gtk::Settings) {
+    use std::ffi::{c_char, c_void, CStr};
+    use webkit2gtk::glib::translate::ToGlibPtr;
+
+    #[repr(C)]
+    struct FeatureList {
+        _private: [u8; 0],
+    }
+
+    extern "C" {
+        fn webkit_settings_get_all_features() -> *mut FeatureList;
+        fn webkit_feature_list_get_length(list: *mut FeatureList) -> usize;
+        fn webkit_feature_list_get(list: *mut FeatureList, index: usize) -> *mut c_void;
+        fn webkit_feature_list_unref(list: *mut FeatureList);
+        fn webkit_feature_get_identifier(feature: *mut c_void) -> *const c_char;
+        fn webkit_settings_set_feature_enabled(
+            settings: *mut c_void,
+            feature: *mut c_void,
+            enabled: i32,
+        );
+    }
+
+    unsafe {
+        let list = webkit_settings_get_all_features();
+        if list.is_null() {
+            return;
+        }
+        let stash = settings.to_glib_none();
+        let settings_ptr = stash.0 as *mut c_void;
+        let mut turned_off = 0u32;
+        for index in 0..webkit_feature_list_get_length(list) {
+            let feature = webkit_feature_list_get(list, index);
+            if feature.is_null() {
+                continue;
+            }
+            let id_ptr = webkit_feature_get_identifier(feature);
+            if id_ptr.is_null() {
+                continue;
+            }
+            let id = CStr::from_ptr(id_ptr).to_string_lossy();
+            if suspends_hidden_sync(&id) {
+                webkit_settings_set_feature_enabled(settings_ptr, feature, 0);
+                turned_off += 1;
+            }
+        }
+        webkit_feature_list_unref(list);
+        if turned_off > 0 {
+            crate::dlog::log(&format!(
+                "webview: hidden-page timer throttling off ({turned_off})"
+            ));
+        } else {
+            crate::dlog::log("webview: hidden-page timer features not found");
+        }
+    }
+}
+
+/// Stop WKWebView from lengthening timers while the window is hidden or minimized.
+#[cfg(target_os = "macos")]
+fn disable_hidden_timer_throttling_macos(win: &WebviewWindow) {
+    use objc2::runtime::{AnyObject, Bool, Sel};
+    use objc2::{msg_send, sel};
+    let _ = win.with_webview(|webview| unsafe {
+        let view = webview.inner() as *mut AnyObject;
+        if view.is_null() {
+            return;
+        }
+        let config: *mut AnyObject = msg_send![view, configuration];
+        if config.is_null() {
+            return;
+        }
+        let prefs: *mut AnyObject = msg_send![config, preferences];
+        if prefs.is_null() {
+            return;
+        }
+        turn_off_pref(prefs, sel!(_setHiddenPageDOMTimerThrottlingEnabled:));
+        turn_off_pref(prefs, sel!(_setHiddenPageDOMTimerThrottlingAutoIncreases:));
+        turn_off_pref(
+            prefs,
+            sel!(_setPageVisibilityBasedProcessSuppressionEnabled:),
+        );
+    });
+
+    unsafe fn turn_off_pref(prefs: *mut AnyObject, selector: Sel) {
+        let responds: Bool = msg_send![prefs, respondsToSelector: selector];
+        if !responds.as_bool() {
+            return;
+        }
+        // Each selector takes a BOOL and returns void. The three names are
+        // spelled out so the message send matches the selector we probed.
+        if selector == sel!(_setHiddenPageDOMTimerThrottlingEnabled:) {
+            let _: () = msg_send![prefs, _setHiddenPageDOMTimerThrottlingEnabled: Bool::NO];
+        } else if selector == sel!(_setHiddenPageDOMTimerThrottlingAutoIncreases:) {
+            let _: () = msg_send![prefs, _setHiddenPageDOMTimerThrottlingAutoIncreases: Bool::NO];
+        } else if selector == sel!(_setPageVisibilityBasedProcessSuppressionEnabled:) {
+            let _: () =
+                msg_send![prefs, _setPageVisibilityBasedProcessSuppressionEnabled: Bool::NO];
+        }
     }
 }
 
@@ -1627,10 +1761,37 @@ mod tests {
     use super::{
         base64_encode, drop_ack_failed, drop_msg_begin, drop_msg_chunk_prefix_parts,
         drop_msg_commit, drop_msg_end, ensure_download_destination, is_whatsapp_origin, mime_for,
-        plan_drop, run_drop_queue, safari_ua, stream_chunks, summarize_skips, toggle_decision,
-        DropSkips, StreamAbort, ToggleAct, CHUNKS_PER_EVAL, DROP_CHUNK_BYTES,
-        DROP_MSG_CHUNK_SUFFIX_PARTS, MAX_DROP_FILES,
+        plan_drop, run_drop_queue, safari_ua, stream_chunks, summarize_skips, suspends_hidden_sync,
+        toggle_decision, DropSkips, StreamAbort, ToggleAct, CHUNKS_PER_EVAL, DROP_CHUNK_BYTES,
+        DROP_MSG_CHUNK_SUFFIX_PARTS, MAX_DROP_FILES, WEBVIEW2_SYNC_ARGS,
     };
+
+    #[test]
+    fn hidden_page_timer_features_are_the_ones_that_stop_sync() {
+        assert!(suspends_hidden_sync("HiddenPageDOMTimerThrottling"));
+        assert!(suspends_hidden_sync("HiddenPageDOMTimerThrottlingEnabled"));
+        assert!(suspends_hidden_sync(
+            "HiddenPageDOMTimerThrottlingAutoIncreases"
+        ));
+        assert!(suspends_hidden_sync(
+            "PageVisibilityBasedProcessSuppression"
+        ));
+        assert!(!suspends_hidden_sync("HiddenPageCSSAnimationSuspension"));
+        assert!(!suspends_hidden_sync(""));
+    }
+
+    #[test]
+    fn webview2_sync_args_keep_wry_defaults_and_one_feature_list() {
+        assert_eq!(WEBVIEW2_SYNC_ARGS.matches("--disable-features=").count(), 1);
+        assert!(WEBVIEW2_SYNC_ARGS.contains("msWebOOUI"));
+        assert!(WEBVIEW2_SYNC_ARGS.contains("msPdfOOUI"));
+        assert!(WEBVIEW2_SYNC_ARGS.contains("msSmartScreenProtection"));
+        assert!(WEBVIEW2_SYNC_ARGS.contains("IntensiveWakeUpThrottling"));
+        assert!(WEBVIEW2_SYNC_ARGS.contains("--disable-background-timer-throttling"));
+        assert!(WEBVIEW2_SYNC_ARGS.contains("--disable-backgrounding-occluded-windows"));
+        assert!(WEBVIEW2_SYNC_ARGS.contains("--disable-renderer-backgrounding"));
+        assert!(WEBVIEW2_SYNC_ARGS.contains("--autoplay-policy=no-user-gesture-required"));
+    }
 
     #[test]
     fn per_window_drop_worker_preserves_os_event_order() {

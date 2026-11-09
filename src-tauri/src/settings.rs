@@ -349,8 +349,10 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
             let _ = h.set_activation_policy(policy);
         });
 
-        // Hold the App Nap shield only while menu-bar-only mode is on.
-        crate::menubar::set_keep_alive(menubar_only);
+        // App Nap would suspend the process after the windows have been hidden
+        // or left idle, and WhatsApp's socket would die with it. The activity
+        // allows the Mac to sleep; it only stops the app itself from being napped.
+        crate::menubar::set_keep_alive(true);
     }
 
     #[cfg(desktop)]
