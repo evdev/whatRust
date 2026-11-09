@@ -1012,6 +1012,515 @@ pub fn clip(text: &str) -> &str {
     &text[..end]
 }
 
+#[derive(Clone, Copy)]
+pub struct ChatTurn<'a> {
+    pub role: &'a str,
+    pub content: &'a str,
+}
+
+pub struct TurnJob<'a> {
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub key: &'a str,
+    pub system: &'a str,
+    pub turns: &'a [ChatTurn<'a>],
+    pub max_tokens: u32,
+}
+
+/// One completion that can include earlier assistant and user turns.
+///
+/// The key stays in a header. `turns` must start as a user message; consecutive
+/// turns with the same role are joined so Gemini and Anthropic accept them.
+pub fn build_turns(job: &TurnJob<'_>) -> Result<Outbound, &'static str> {
+    if job.key.is_empty() || job.model.is_empty() || job.turns.is_empty() {
+        return Err("llm");
+    }
+    let turns = joined_turns(job.turns);
+    if turns.first().is_none_or(|turn| turn.0 != "user") {
+        return Err("llm");
+    }
+    match job.provider {
+        OPENROUTER => Ok(Outbound {
+            url: "https://openrouter.ai/api/v1/chat/completions".into(),
+            headers: vec![
+                ("Authorization".into(), format!("Bearer {}", job.key)),
+                ("Content-Type".into(), "application/json".into()),
+            ],
+            body: json!({
+                "model": job.model,
+                "max_tokens": job.max_tokens,
+                "messages": openrouter_messages(job.system, &turns)
+            })
+            .to_string(),
+        }),
+        GEMINI => Ok(Outbound {
+            url: format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                path_encode(job.model)
+            ),
+            headers: vec![
+                ("x-goog-api-key".into(), job.key.into()),
+                ("Content-Type".into(), "application/json".into()),
+            ],
+            body: json!({
+                "systemInstruction": {"parts": [{"text": job.system}]},
+                "contents": gemini_contents(&turns),
+                "generationConfig": {"maxOutputTokens": job.max_tokens}
+            })
+            .to_string(),
+        }),
+        ANTHROPIC => Ok(Outbound {
+            url: "https://api.anthropic.com/v1/messages".into(),
+            headers: vec![
+                ("x-api-key".into(), job.key.into()),
+                ("anthropic-version".into(), "2023-06-01".into()),
+                ("Content-Type".into(), "application/json".into()),
+            ],
+            body: json!({
+                "model": job.model,
+                "max_tokens": job.max_tokens,
+                "system": job.system,
+                "messages": anthropic_messages(&turns)
+            })
+            .to_string(),
+        }),
+        _ => Err("llm"),
+    }
+}
+
+pub async fn complete_turns(job: TurnJob<'_>) -> Result<String, &'static str> {
+    let provider = job.provider.to_string();
+    let outbound = build_turns(&job)?;
+    let body = tauri::async_runtime::spawn_blocking(move || post(outbound))
+        .await
+        .map_err(|_| "llm")??;
+    parse(&provider, &body)
+}
+
+fn joined_turns(turns: &[ChatTurn<'_>]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for turn in turns {
+        let role = if turn.role == "assistant" {
+            "assistant"
+        } else {
+            "user"
+        };
+        if let Some(last) = out.last_mut() {
+            if last.0 == role {
+                last.1.push('\n');
+                last.1.push_str(turn.content);
+                continue;
+            }
+        }
+        out.push((role.to_string(), turn.content.to_string()));
+    }
+    out
+}
+
+fn openrouter_messages(system: &str, turns: &[(String, String)]) -> Vec<Value> {
+    let mut messages = vec![json!({"role": "system", "content": system})];
+    for (role, content) in turns {
+        messages.push(json!({"role": role, "content": content}));
+    }
+    messages
+}
+
+fn gemini_contents(turns: &[(String, String)]) -> Vec<Value> {
+    turns
+        .iter()
+        .map(|(role, content)| {
+            json!({
+                "role": if role == "assistant" { "model" } else { "user" },
+                "parts": [{"text": content}]
+            })
+        })
+        .collect()
+}
+
+fn anthropic_messages(turns: &[(String, String)]) -> Vec<Value> {
+    turns
+        .iter()
+        .map(|(role, content)| json!({"role": role, "content": content}))
+        .collect()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CliBackend {
+    Claude,
+    Grok,
+    Codex,
+}
+
+impl CliBackend {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "claude_cli" => Some(Self::Claude),
+            "grok_cli" => Some(Self::Grok),
+            "codex_cli" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+}
+
+pub struct CliPlan {
+    pub args: Vec<String>,
+    pub strip_env: &'static [&'static str],
+}
+
+/// Arguments for one headless completion. The chat text is never placed here;
+/// the caller writes it to the child's stdin.
+pub fn cli_plan(
+    backend: CliBackend,
+    model: &str,
+    system_file: &std::path::Path,
+    system_text: &str,
+    schema: &str,
+    schema_file: &std::path::Path,
+    cwd: &std::path::Path,
+) -> CliPlan {
+    let model = model.trim();
+    match backend {
+        CliBackend::Claude => {
+            let mut args = vec![
+                "--restricted".into(),
+                "-p".into(),
+                "--output-format".into(),
+                "json".into(),
+                "--json-schema".into(),
+                schema.into(),
+                "--system-prompt-file".into(),
+                system_file.display().to_string(),
+                "--tools".into(),
+                String::new(),
+                "--disallowedTools".into(),
+                "*".into(),
+                "--max-turns".into(),
+                "1".into(),
+            ];
+            if !model.is_empty() {
+                args.push("--model".into());
+                args.push(model.into());
+            }
+            CliPlan {
+                args,
+                strip_env: &["ANTHROPIC_API_KEY"],
+            }
+        }
+        CliBackend::Grok => {
+            // The conversation stays in the prompt file. `-p` would put it in
+            // the process list, and a tool-less run cannot open that file itself.
+            let mut args = vec![
+                "--no-auto-update".into(),
+                "--permission-mode".into(),
+                "dontAsk".into(),
+                "--tools".into(),
+                String::new(),
+                "--max-turns".into(),
+                "1".into(),
+                "--no-memory".into(),
+                "--disable-web-search".into(),
+                "--output-format".into(),
+                "json".into(),
+                "--cwd".into(),
+                cwd.display().to_string(),
+                "--system-prompt-override".into(),
+                system_text.into(),
+                "--prompt-file".into(),
+                cwd.join("prompt.txt").display().to_string(),
+            ];
+            if !model.is_empty() {
+                args.push("-m".into());
+                args.push(model.into());
+            }
+            CliPlan {
+                args,
+                strip_env: &["XAI_API_KEY"],
+            }
+        }
+        CliBackend::Codex => {
+            let mut args = vec![
+                "exec".into(),
+                "--json".into(),
+                "--output-schema".into(),
+                schema_file.display().to_string(),
+                "--ephemeral".into(),
+                "--ignore-user-config".into(),
+                "--skip-git-repo-check".into(),
+            ];
+            if !model.is_empty() {
+                args.push("--model".into());
+                args.push(model.into());
+            }
+            CliPlan {
+                args,
+                strip_env: &["OPENAI_API_KEY", "CODEX_API_KEY"],
+            }
+        }
+    }
+}
+
+/// Flags that must appear in the installed CLI's help before it is launched.
+pub fn safety_gaps(backend: CliBackend, help: &str) -> Vec<&'static str> {
+    let need: &[&str] = match backend {
+        CliBackend::Claude => &[
+            "--restricted",
+            "--print",
+            "--json-schema",
+            "--system-prompt-file",
+            "--tools",
+            "--disallowedTools",
+            "--max-turns",
+        ],
+        CliBackend::Grok => &[
+            "--no-auto-update",
+            "--permission-mode",
+            "--tools",
+            "--max-turns",
+            "--output-format",
+            "--system-prompt-override",
+            "--prompt-file",
+        ],
+        CliBackend::Codex => &[
+            "exec",
+            "--json",
+            "--output-schema",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--skip-git-repo-check",
+        ],
+    };
+    need.iter()
+        .copied()
+        .filter(|flag| !help_has(help, flag))
+        .collect()
+}
+
+fn help_has(help: &str, flag: &str) -> bool {
+    if flag == "--print" {
+        return help.contains("--print") || help.contains(" -p");
+    }
+    if flag == "--single" {
+        return help.contains("--single") || help.contains(" -p");
+    }
+    if flag == "--disallowedTools" {
+        return help.contains("--disallowedTools") || help.contains("--disallowed-tools");
+    }
+    if flag == "exec" {
+        return help.split_whitespace().any(|word| word == "exec");
+    }
+    help.contains(flag)
+}
+
+pub fn help_args(backend: CliBackend) -> Vec<String> {
+    match backend {
+        CliBackend::Codex => vec!["exec".into(), "--help".into()],
+        _ => vec!["--help".into()],
+    }
+}
+
+/// Pull the model's JSON decision out of an API body, a Claude JSON result, or Codex JSONL.
+pub fn decision_text(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(found) = decision_in_document(trimmed) {
+        return found;
+    }
+    let mut last = String::new();
+    for line in trimmed.lines() {
+        if let Some(found) = decision_in_document(line.trim()) {
+            last = found;
+        }
+    }
+    if !last.is_empty() {
+        return last;
+    }
+    extract_object(trimmed).unwrap_or_default()
+}
+
+fn decision_in_document(text: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    decision_in_value(&value)
+}
+
+fn decision_in_value(value: &Value) -> Option<String> {
+    if value.get("action").is_some() {
+        return Some(value.to_string());
+    }
+    for pointer in [
+        "/structured_output",
+        "/result",
+        "/message/content",
+        "/item/text",
+        "/text",
+    ] {
+        if let Some(child) = value.pointer(pointer) {
+            if let Some(found) = decision_from_child(child) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn decision_from_child(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => decision_in_document(text).or_else(|| extract_object(text)),
+        Value::Object(_) => decision_in_value(value),
+        _ => None,
+    }
+}
+
+fn extract_object(text: &str) -> Option<String> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let slice = &text[start..=end];
+    serde_json::from_str::<Value>(slice).ok()?;
+    Some(slice.to_string())
+}
+
+fn help_is_known(program: &std::path::Path, backend: CliBackend) -> bool {
+    help_cache()
+        .iter()
+        .any(|(path, kind)| path == program && *kind == backend)
+}
+
+fn remember_help(program: &std::path::Path, backend: CliBackend) {
+    let mut cache = help_cache();
+    if cache
+        .iter()
+        .any(|(path, kind)| path == program && *kind == backend)
+    {
+        return;
+    }
+    cache.push((program.to_path_buf(), backend));
+}
+
+fn help_cache() -> std::sync::MutexGuard<'static, Vec<(std::path::PathBuf, CliBackend)>> {
+    HELP_CACHE.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+static HELP_CACHE: std::sync::Mutex<Vec<(std::path::PathBuf, CliBackend)>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub async fn run_cli(
+    program: &std::path::Path,
+    backend: CliBackend,
+    plan: CliPlan,
+    stdin_text: &str,
+    cwd: &std::path::Path,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<String, String> {
+    if !program.is_absolute() || !program.is_file() {
+        return Err("cli_missing".into());
+    }
+    let program = program.to_path_buf();
+    if !help_is_known(&program, backend) {
+        let help_program = program.clone();
+        let help_cwd = cwd.to_path_buf();
+        let help = tauri::async_runtime::spawn_blocking(move || {
+            run_capturing(
+                &help_program,
+                &help_args(backend),
+                "",
+                &help_cwd,
+                &[],
+                15,
+                None,
+            )
+        })
+        .await
+        .map_err(|err| err.to_string())?;
+        let help = help?;
+        let gaps = safety_gaps(backend, &help);
+        if !gaps.is_empty() {
+            return Err(format!("cli_flags:{}", gaps.join(",")));
+        }
+        remember_help(&program, backend);
+    }
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
+    let owned_stdin = stdin_text.to_string();
+    let cwd = cwd.to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        run_capturing(
+            &program,
+            &plan.args,
+            &owned_stdin,
+            &cwd,
+            plan.strip_env,
+            90,
+            Some(cancel),
+        )
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+fn run_capturing(
+    program: &std::path::Path,
+    args: &[String],
+    stdin_text: &str,
+    cwd: &std::path::Path,
+    strip_env: &[&str],
+    timeout_secs: u64,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for name in strip_env {
+        command.env_remove(name);
+    }
+    let mut child = command.spawn().map_err(|err| err.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(stdin_text.as_bytes());
+    }
+    let started = Instant::now();
+    let limit = Duration::from_secs(timeout_secs);
+    let status = loop {
+        if cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("cancelled".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() > limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("timeout".into());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(30)),
+            Err(err) => return Err(err.to_string()),
+        }
+    };
+    let mut output = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf.truncate(1_000_000);
+        output = String::from_utf8_lossy(&buf).into_owned();
+    }
+    if !status.success() && output.trim().is_empty() {
+        return Err(format!("exit:{}", status.code().unwrap_or(1)));
+    }
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1332,7 +1841,7 @@ mod tests {
 
         let quota = explain_http(429, r#"{"error":{"message":"Quota exceeded"}}"#, "");
         assert_eq!(quota.kind, FailKind::Quota);
-        assert!(quota.blocks_save() == false);
+        assert!(!quota.blocks_save());
         assert!(auth.blocks_save());
     }
 
@@ -1350,5 +1859,149 @@ mod tests {
             r#"{"id":"claude-sonnet-5-5","display_name":"Claude Sonnet 5.5","created_at":"2026-09-01T00:00:00Z"}"#,
         )];
         assert_eq!(main_anthropic_models(&models)[0].id, "claude-sonnet-5-5");
+    }
+
+    #[test]
+    fn turn_requests_keep_the_key_out_of_the_body() {
+        let key = "sk-test-KEY-123";
+        let turns = [ChatTurn {
+            role: "user",
+            content: "hello",
+        }];
+        for provider in [OPENROUTER, GEMINI, ANTHROPIC] {
+            let outbound = build_turns(&TurnJob {
+                provider,
+                model: "model-a",
+                key,
+                system: "system",
+                turns: &turns,
+                max_tokens: 64,
+            })
+            .unwrap();
+            assert!(!outbound.body.contains(key), "{provider}");
+            if provider == GEMINI {
+                assert!(outbound.body.contains("\"role\":\"user\""));
+            }
+        }
+        let mixed = [
+            ChatTurn {
+                role: "user",
+                content: "one",
+            },
+            ChatTurn {
+                role: "assistant",
+                content: "two",
+            },
+            ChatTurn {
+                role: "user",
+                content: "three",
+            },
+        ];
+        let outbound = build_turns(&TurnJob {
+            provider: GEMINI,
+            model: "gemini-2.5-flash",
+            key,
+            system: "system",
+            turns: &mixed,
+            max_tokens: 64,
+        })
+        .unwrap();
+        assert!(outbound.body.contains("\"role\":\"model\""));
+        assert!(!outbound.body.contains("\"role\":\"assistant\""));
+    }
+
+    #[test]
+    fn cli_plans_keep_the_chat_off_the_command_line() {
+        let dir = std::env::temp_dir().join("whatrust-cli-plan");
+        let secret = "SECRET_CHAT_LINE";
+        for backend in [CliBackend::Claude, CliBackend::Grok, CliBackend::Codex] {
+            let plan = cli_plan(
+                backend,
+                "",
+                &dir.join("system.md"),
+                "system rules",
+                "{}",
+                &dir.join("schema.json"),
+                &dir,
+            );
+            assert!(
+                plan.args.iter().all(|arg| !arg.contains(secret)),
+                "{backend:?} {args:?}",
+                args = plan.args
+            );
+            assert!(!plan.args.iter().any(|arg| arg == "--always-approve"));
+            assert!(!plan.args.iter().any(|arg| arg.contains("workspace-write")));
+            assert!(!plan
+                .args
+                .iter()
+                .any(|arg| arg.contains("danger-full-access")));
+        }
+        let claude = cli_plan(
+            CliBackend::Claude,
+            "",
+            &dir.join("system.md"),
+            "system",
+            "{}",
+            &dir.join("schema.json"),
+            &dir,
+        );
+        assert!(!claude.args.iter().any(|arg| arg == "--bare"));
+        assert!(claude.args.iter().any(|arg| arg == "--restricted"));
+        assert_eq!(claude.strip_env, ["ANTHROPIC_API_KEY"]);
+        let grok = cli_plan(
+            CliBackend::Grok,
+            "grok-2",
+            &dir.join("system.md"),
+            "system",
+            "{}",
+            &dir.join("schema.json"),
+            &dir,
+        );
+        assert!(grok.args.iter().any(|arg| arg == "--prompt-file"));
+        assert_eq!(grok.strip_env, ["XAI_API_KEY"]);
+        let codex = cli_plan(
+            CliBackend::Codex,
+            "",
+            &dir.join("system.md"),
+            "system",
+            "{}",
+            &dir.join("schema.json"),
+            &dir,
+        );
+        assert_eq!(codex.args[0], "exec");
+        assert!(codex.strip_env.contains(&"OPENAI_API_KEY"));
+        assert!(codex.strip_env.contains(&"CODEX_API_KEY"));
+    }
+
+    #[test]
+    fn a_cli_without_the_safety_flags_is_refused() {
+        assert!(safety_gaps(CliBackend::Claude, "usage: claude").contains(&"--restricted"));
+        assert!(safety_gaps(
+            CliBackend::Claude,
+            "--restricted --print --json-schema --system-prompt-file --tools --disallowed-tools --max-turns"
+        )
+        .is_empty());
+        assert!(safety_gaps(CliBackend::Grok, "--no-auto-update").contains(&"--prompt-file"));
+        assert!(safety_gaps(
+            CliBackend::Codex,
+            "exec --json --output-schema --ephemeral --ignore-user-config --skip-git-repo-check"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn decision_text_reads_wrapped_and_jsonl_results() {
+        assert!(
+            decision_text(r#"{"structured_output":{"action":"skip","asked_if_ai":false}}"#)
+                .contains("\"action\":\"skip\"")
+        );
+        let jsonl =
+            "{\"type\":\"item\"}\n{\"item\":{\"text\":\"{\\\"action\\\":\\\"reply\\\"}\"}}\n";
+        // A non-object string is ignored. The raw object below is kept.
+        assert!(
+            decision_text("notes {\"action\":\"reply\",\"asked_if_ai\":true} trailing")
+                .contains("reply")
+        );
+        assert!(decision_text(jsonl).is_empty() || decision_text(jsonl).contains("action"));
     }
 }

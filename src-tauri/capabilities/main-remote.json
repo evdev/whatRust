@@ -31,7 +31,16 @@
     "allow-todo-delete",
     "allow-todo-snooze",
     "allow-todo-dismiss-alarm",
-    "allow-todo-clear-done"
+    "allow-todo-clear-done",
+    "allow-autoreply-state",
+    "allow-autoreply-set-chat",
+    "allow-autoreply-get-chat-doc",
+    "allow-autoreply-save-chat-doc",
+    "allow-autoreply-reset-chat-doc",
+    "allow-autoreply-open-chat-doc",
+    "allow-autoreply-turn",
+    "allow-autoreply-record-sent",
+    "allow-autoreply-pause-self"
   ],
   "webviews": [
     "wa-*"

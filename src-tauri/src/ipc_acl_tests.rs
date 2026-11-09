@@ -37,6 +37,15 @@ const PAGE_COMMANDS: &[&str] = &[
     "todo_snooze",
     "todo_dismiss_alarm",
     "todo_clear_done",
+    "autoreply_state",
+    "autoreply_set_chat",
+    "autoreply_get_chat_doc",
+    "autoreply_save_chat_doc",
+    "autoreply_reset_chat_doc",
+    "autoreply_open_chat_doc",
+    "autoreply_turn",
+    "autoreply_record_sent",
+    "autoreply_pause_self",
 ];
 /// Commands only the local settings window may use.
 const SETTINGS_COMMANDS: &[&str] = &[
@@ -58,6 +67,11 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "fluidvoice_status",
     "set_ai_key",
     "list_ai_models",
+    "autoreply_get_persona",
+    "autoreply_save_persona",
+    "autoreply_reset_persona",
+    "autoreply_open_persona",
+    "standin_cli_status",
 ];
 /// Commands only the lock screen may use.
 const LOCK_COMMANDS: &[&str] = &[
@@ -241,6 +255,8 @@ fn local_windows_keep_exactly_their_own_commands() {
         "todo_list",
         "todo_add",
         "todo_delete",
+        "autoreply_turn",
+        "autoreply_record_sent",
     ] {
         assert!(
             !allowed(&app, "settings", local, cmd),

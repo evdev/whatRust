@@ -8,7 +8,10 @@ commands.allow = [
   "notify", "set_unread", "dlog", "switcher_accounts", "switch_account",
   "voice_prefs", "voice_lookup", "transcribe_voice", "summarize_voice",
   "todo_list", "todo_add", "todo_update", "todo_toggle_done", "todo_delete",
-  "todo_snooze", "todo_dismiss_alarm", "todo_clear_done"
+  "todo_snooze", "todo_dismiss_alarm", "todo_clear_done",
+  "autoreply_state", "autoreply_set_chat", "autoreply_get_chat_doc",
+  "autoreply_save_chat_doc", "autoreply_reset_chat_doc", "autoreply_open_chat_doc",
+  "autoreply_turn", "autoreply_record_sent", "autoreply_pause_self"
 ]
 
 [[permission]]
@@ -19,7 +22,9 @@ commands.allow = [
   "add_account", "remove_account", "rename_account", "open_account", "set_default_account",
   "get_lock_status", "set_app_lock_password", "change_app_lock_password",
   "disable_app_lock", "set_app_lock_options", "set_biometric_enabled", "lock_app",
-  "fluidvoice_status", "set_ai_key", "list_ai_models"
+  "fluidvoice_status", "set_ai_key", "list_ai_models",
+  "autoreply_get_persona", "autoreply_save_persona", "autoreply_reset_persona",
+  "autoreply_open_persona", "standin_cli_status"
 ]
 
 [[permission]]

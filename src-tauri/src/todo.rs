@@ -1057,7 +1057,7 @@ fn valid_stored_msg_id(id: &str) -> bool {
 }
 
 /// `1555:14@lid` and `1555@lid` are the same chat. Status broadcasts are not chats.
-fn canonical_chat_id(id: &str) -> Option<String> {
+pub(crate) fn canonical_chat_id(id: &str) -> Option<String> {
     let id = id.trim();
     if id.is_empty() || id.len() > 120 {
         return None;

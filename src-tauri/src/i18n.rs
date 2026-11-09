@@ -289,6 +289,28 @@ static EN_TABLE: &[(&str, &str)] = &[
     ("Você tem {0} lembretes pendentes.", "You have {0} pending reminders."),
     ("Abra a lista de tarefas e Respostas para vê-los.", "Open To-Do and Replies to see them."),
     ("Abra Respostas para vê-los.", "Open Replies to see them."),
+    // Stand-in copy is English in both interface languages.
+    ("The model did not return a decision.", "The model did not return a decision."),
+    ("The reply would reveal that it is an AI.", "The reply would reveal that it is an AI."),
+    ("The model chose to stay quiet.", "The model chose to stay quiet."),
+    ("Too many searches in the chat.", "Too many searches in the chat."),
+    ("That chat is not valid.", "That chat is not valid."),
+    ("Confirm where the chat is sent.", "Confirm where the chat is sent."),
+    ("The command-line program was not found.", "The command-line program was not found."),
+    ("The request was cancelled.", "The request was cancelled."),
+    ("The request to the program timed out.", "The request to the program timed out."),
+    ("This program does not have the required safe mode.", "This program does not have the required safe mode."),
+    ("The model could not be reached.", "The model could not be reached."),
+    ("The API key will be used.", "The API key will be used."),
+    ("The command-line program is not available in this install.", "The command-line program is not available in this install."),
+    ("That program's session is not ready.", "That program's session is not ready."),
+    ("Session ready.", "Session ready."),
+    ("Replies came too quickly. The stand-in paused.", "Replies came too quickly. The stand-in paused."),
+    ("Reply limit reached in this chat.", "Reply limit reached in this chat."),
+    ("The stand-in paused in {0}.", "The stand-in paused in {0}."),
+    ("The stand-in stayed quiet in {0}.", "The stand-in stayed quiet in {0}."),
+    ("Stand-in", "Stand-in"),
+    ("this chat", "this chat"),
 ];
 
 #[cfg(test)]
@@ -380,6 +402,7 @@ mod tests {
             include_str!("llm.rs"),
             include_str!("voice.rs"),
             include_str!("todo.rs"),
+            include_str!("autoreply.rs"),
             include_str!("window.rs"),
             include_str!("biometric/macos.rs"),
         ];

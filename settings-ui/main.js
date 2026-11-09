@@ -1,11 +1,18 @@
 const invoke = window.__TAURI__.core.invoke;
 const LANGS = ["pt-BR", "en"];
-const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "menu_bar_icon", "menubar_only", "notify_when_focused", "notify_active_chat", "respect_muted", "voice_transcribe", "translate_enabled", "show_message_device"];
+const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "menu_bar_icon", "menubar_only", "notify_when_focused", "notify_active_chat", "respect_muted", "voice_transcribe", "translate_enabled", "show_message_device", "standin_enabled"];
+const STANDIN_BACKENDS = ["api", "claude_cli", "grok_cli", "codex_cli"];
 const AI_PROVIDERS = ["openrouter", "gemini", "anthropic"];
 const LIST_PROVIDERS = ["gemini", "anthropic"];
 let translateModels = { openrouter: "", gemini: "", anthropic: "" };
 let summaryModels = { openrouter: "", gemini: "", anthropic: "" };
 let shownProvider = "openrouter";
+let standinModels = { openrouter: "", gemini: "", anthropic: "" };
+let standinCliModel = "";
+let standinBins = { claude_cli: "", grok_cli: "", codex_cli: "" };
+let standinShown = "api";
+let standinCli = false;
+let personaLoaded = false;
 let keyFlags = { openrouter: false, gemini: false, anthropic: false };
 // Successful model lists, keyed by provider. Null means not loaded yet.
 let modelCatalogs = { gemini: null, anthropic: null };
@@ -85,6 +92,26 @@ async function load() {
   };
   document.getElementById("ai_provider").value = AI_PROVIDERS.includes(s.ai_provider) ? s.ai_provider : "openrouter";
   shownProvider = document.getElementById("ai_provider").value;
+  standinCli = !!s.standin_cli_available;
+  standinModels = {
+    openrouter: s.standin_model_openrouter || "",
+    gemini: s.standin_model_gemini || "",
+    anthropic: s.standin_model_anthropic || "",
+  };
+  standinCliModel = s.standin_cli_model || "";
+  standinBins = {
+    claude_cli: s.standin_claude_bin || "",
+    grok_cli: s.standin_grok_bin || "",
+    codex_cli: s.standin_codex_bin || "",
+  };
+  const standinBackend = STANDIN_BACKENDS.includes(s.standin_backend) ? s.standin_backend : "api";
+  document.getElementById("standin_backend").value = standinBackend;
+  standinShown = standinBackend;
+  document.getElementById("standin_delay_secs").value = String(s.standin_delay_secs || 10);
+  document.getElementById("standin_hourly_limit").value = String(s.standin_hourly_limit || 12);
+  syncStandinAvailability();
+  showStandinFields();
+  loadPersona();
   keyFlags = {
     openrouter: !!s.ai_key_openrouter,
     gemini: !!s.ai_key_gemini,
@@ -116,8 +143,24 @@ async function save() {
   s.summary_model_openrouter = summaryModels.openrouter;
   s.summary_model_gemini = summaryModels.gemini;
   s.summary_model_anthropic = summaryModels.anthropic;
+  commitStandinFields();
+  s.standin_backend = document.getElementById("standin_backend").value;
+  s.standin_model_openrouter = standinModels.openrouter;
+  s.standin_model_gemini = standinModels.gemini;
+  s.standin_model_anthropic = standinModels.anthropic;
+  s.standin_cli_model = standinCliModel;
+  s.standin_claude_bin = standinBins.claude_cli;
+  s.standin_grok_bin = standinBins.grok_cli;
+  s.standin_codex_bin = standinBins.codex_cli;
+  s.standin_delay_secs = parseInt(document.getElementById("standin_delay_secs").value, 10) || 10;
+  s.standin_hourly_limit = parseInt(document.getElementById("standin_hourly_limit").value, 10) || 12;
   const note = document.getElementById("note");
   try {
+    if (personaLoaded) {
+      await invoke("autoreply_save_persona", {
+        text: document.getElementById("standin_persona").value,
+      });
+    }
     const warn = await invoke("set_settings", { settings: s });
     if (warn) {
       note.textContent = t("Salvo com observação: {0}", [warn]);
@@ -264,11 +307,28 @@ window.addEventListener("DOMContentLoaded", () => {
     await save();
   });
   document.getElementById("ai_provider").addEventListener("change", () => {
+    commitStandinFields();
     commitModelFields();
     shownProvider = document.getElementById("ai_provider").value;
     refreshKeyState();
     syncModelControls();
+    showStandinFields();
   });
+  document.getElementById("standin_backend").addEventListener("change", () => {
+    commitStandinFields();
+    syncStandinAvailability();
+    showStandinFields();
+    // The old program's result would otherwise be read as this one's.
+    document.getElementById("standin_cli_state").textContent = "Not checked yet.";
+  });
+  document.getElementById("save_persona").addEventListener("click", savePersona);
+  document.getElementById("open_persona").addEventListener("click", () => {
+    invoke("autoreply_open_persona").catch((e) => {
+      document.getElementById("note").textContent = errorText(e);
+    });
+  });
+  document.getElementById("reset_persona").addEventListener("click", resetPersona);
+  document.getElementById("check_standin_cli").addEventListener("click", checkStandinCli);
   for (const id of ["translate_model", "summary_model"]) {
     document.getElementById(id).addEventListener("input", commitModelFields);
   }
@@ -282,6 +342,84 @@ window.addEventListener("DOMContentLoaded", () => {
     if (e.key === "Enter") saveAiKey();
   });
 });
+
+function commitStandinFields() {
+  const model = document.getElementById("standin_model").value.trim();
+  const bin = document.getElementById("standin_bin").value.trim();
+  if (standinShown === "api") standinModels[shownProvider] = model;
+  else {
+    standinCliModel = model;
+    standinBins[standinShown] = bin;
+  }
+}
+
+function showStandinFields() {
+  const backend = document.getElementById("standin_backend").value;
+  const cli = backend !== "api";
+  document.getElementById("standin_model").value = cli
+    ? standinCliModel
+    : (standinModels[shownProvider] || "");
+  document.getElementById("standin_bin").closest("label").hidden = !cli;
+  document.getElementById("standin_bin").value = cli ? (standinBins[backend] || "") : "";
+  document.getElementById("check_standin_cli").disabled = !cli || !standinCli;
+  document.getElementById("standin_session_row").hidden = !cli;
+  standinShown = backend;
+}
+
+function syncStandinAvailability() {
+  const select = document.getElementById("standin_backend");
+  for (const opt of select.options) {
+    if (opt.value !== "api") opt.disabled = !standinCli;
+  }
+  if (!standinCli && select.value !== "api") select.value = "api";
+  if (!standinCli) {
+    document.getElementById("standin_backend_hint").textContent =
+      "In this install, only the API key is available.";
+  }
+}
+
+async function loadPersona() {
+  try {
+    const text = await invoke("autoreply_get_persona");
+    personaLoaded = true;
+    document.getElementById("standin_persona").value = text || "";
+  } catch (e) {}
+}
+
+async function savePersona() {
+  const note = document.getElementById("note");
+  try {
+    await invoke("autoreply_save_persona", {
+      text: document.getElementById("standin_persona").value,
+    });
+    note.textContent = "Saved ✓";
+    setTimeout(() => (note.textContent = ""), 1500);
+  } catch (e) {
+    note.textContent = errorText(e);
+  }
+}
+
+async function resetPersona() {
+  try {
+    const text = await invoke("autoreply_reset_persona");
+    personaLoaded = true;
+    document.getElementById("standin_persona").value = text || "";
+  } catch (e) {
+    document.getElementById("note").textContent = errorText(e);
+  }
+}
+
+async function checkStandinCli() {
+  const status = document.getElementById("standin_cli_state");
+  status.textContent = "Checking…";
+  await save();
+  try {
+    const result = await invoke("standin_cli_status");
+    status.textContent = result && result.detail ? result.detail : "";
+  } catch (e) {
+    status.textContent = errorText(e);
+  }
+}
 
 function usesModelList(provider) {
   return LIST_PROVIDERS.includes(provider);

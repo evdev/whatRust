@@ -145,6 +145,8 @@ pub struct SettingsView {
     pub ai_key_openrouter: bool,
     pub ai_key_gemini: bool,
     pub ai_key_anthropic: bool,
+    /// False inside Flatpak, where the host CLIs are not visible.
+    pub standin_cli_available: bool,
 }
 
 #[tauri::command]
@@ -160,6 +162,7 @@ pub fn get_settings(window: tauri::Webview, app: tauri::AppHandle) -> Result<Set
         settings: crate::settings::load(&app),
         platform: std::env::consts::OS,
         menubar_supported: crate::menubar::supported(),
+        standin_cli_available: crate::settings::cli_backends_allowed(),
     })
 }
 
@@ -177,6 +180,7 @@ pub fn set_settings(
     crate::settings::save(&app, &settings).map_err(|e| e.to_string())?;
     let warning = crate::settings::apply(&app, &settings);
     crate::voice::push_prefs(&app, &settings);
+    crate::autoreply::push_prefs(&app, &settings);
     crate::window::push_device_icons(&app, settings.show_message_device);
     Ok(warning)
 }

@@ -1,6 +1,7 @@
 mod accounts;
 mod applock;
 mod aumid;
+mod autoreply;
 mod badge;
 mod biometric;
 mod commands;
@@ -179,6 +180,7 @@ pub fn run() {
         .manage(accounts::ActiveAccount::new("wa-default".into()))
         .manage(voice::VoiceState::default())
         .manage(todo::TodoState::default())
+        .manage(autoreply::AutoreplyState::default())
         .invoke_handler(tauri::generate_handler![
             integration::integration_state,
             integration::report_integration,
@@ -232,6 +234,20 @@ pub fn run() {
             todo::todo_snooze,
             todo::todo_dismiss_alarm,
             todo::todo_clear_done,
+            autoreply::autoreply_state,
+            autoreply::autoreply_set_chat,
+            autoreply::autoreply_get_chat_doc,
+            autoreply::autoreply_save_chat_doc,
+            autoreply::autoreply_reset_chat_doc,
+            autoreply::autoreply_open_chat_doc,
+            autoreply::autoreply_turn,
+            autoreply::autoreply_record_sent,
+            autoreply::autoreply_pause_self,
+            autoreply::autoreply_get_persona,
+            autoreply::autoreply_save_persona,
+            autoreply::autoreply_reset_persona,
+            autoreply::autoreply_open_persona,
+            autoreply::standin_cli_status,
         ])
         .setup(move |app| {
             // Menu-bar-only on macOS: load settings early (the rest of setup needs them

@@ -29,7 +29,12 @@
     "allow-open-notification-settings",
     "allow-fluidvoice-status",
     "allow-set-ai-key",
-    "allow-list-ai-models"
+    "allow-list-ai-models",
+    "allow-autoreply-get-persona",
+    "allow-autoreply-save-persona",
+    "allow-autoreply-reset-persona",
+    "allow-autoreply-open-persona",
+    "allow-standin-cli-status"
   ],
   "webviews": [
     "settings"

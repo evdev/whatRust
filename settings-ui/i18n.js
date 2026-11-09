@@ -239,7 +239,36 @@
     "Não foi possível redefinir o aplicativo. Tente novamente.": "Could not reset the app. Try again.",
     // dialogs
     "Cancelar": "Cancel",
-    "Este campo não pode ficar vazio.": "This field cannot be empty."
+    "Este campo não pode ficar vazio.": "This field cannot be empty.",
+    // Stand-in stays English in both interface languages.
+    "Stand-in": "Stand-in",
+    "Allow stand-in": "Allow stand-in",
+    "Each individual chat stays off until you turn it on there.": "Each individual chat stays off until you turn it on there.",
+    "How to reply": "How to reply",
+    "The API key above, or a program you have already signed in to.": "The API key above, or a program you have already signed in to.",
+    "API key": "API key",
+    "Claude Code": "Claude Code",
+    "Grok": "Grok",
+    "Codex": "Codex",
+    "Stand-in model": "Stand-in model",
+    "For the key, one model per provider. For a program, the name it accepts. Empty uses the summary model.": "For the key, one model per provider. For a program, the name it accepts. Empty uses the summary model.",
+    "Program": "Program",
+    "Full path, if the app cannot find the program on its own.": "Full path, if the app cannot find the program on its own.",
+    "Wait before replying": "Wait before replying",
+    "Seconds after the last message, from 5 to 60.": "Seconds after the last message, from 5 to 60.",
+    "Replies per hour": "Replies per hour",
+    "Maximum in each chat. After that the stand-in pauses.": "Maximum in each chat. After that the stand-in pauses.",
+    "Program session": "Program session",
+    "Not checked yet.": "Not checked yet.",
+    "Check session": "Check session",
+    "General instructions": "General instructions",
+    "Save instructions": "Save instructions",
+    "Open file": "Open file",
+    "Restore template": "Restore template",
+    "The stand-in writes as you and only says it is an assistant if asked directly. A program uses the login you already made in it. whatRust does not read that login. In Flatpak, only the API key works. Continuous use can hit your plan limit.": "The stand-in writes as you and only says it is an assistant if asked directly. A program uses the login you already made in it. whatRust does not read that login. In Flatpak, only the API key works. Continuous use can hit your plan limit.",
+    "In this install, only the API key is available.": "In this install, only the API key is available.",
+    "Saved ✓": "Saved ✓",
+    "Checking…": "Checking…",
   };
 
   var lang = root.__WR_LANG === "en" ? "en" : "pt-BR";

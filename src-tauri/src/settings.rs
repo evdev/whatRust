@@ -48,6 +48,24 @@ pub struct Settings {
     pub summary_model_openrouter: Option<String>,
     pub summary_model_gemini: Option<String>,
     pub summary_model_anthropic: Option<String>,
+    /// Master switch for the per-chat stand-in. Off until the user turns it on.
+    pub standin_enabled: bool,
+    /// `api`, `claude_cli`, `grok_cli`, or `codex_cli`.
+    pub standin_backend: String,
+    /// Optional stand-in model for each API provider. Empty uses the summary model.
+    pub standin_model_openrouter: Option<String>,
+    pub standin_model_gemini: Option<String>,
+    pub standin_model_anthropic: Option<String>,
+    /// Optional model id passed to a CLI backend.
+    pub standin_cli_model: String,
+    /// Absolute path to a CLI binary. Empty means look on PATH and the usual install locations.
+    pub standin_claude_bin: String,
+    pub standin_grok_bin: String,
+    pub standin_codex_bin: String,
+    /// Seconds to wait after the last incoming message before one reply.
+    pub standin_delay_secs: u16,
+    /// Stand-in replies allowed in one chat during a rolling hour.
+    pub standin_hourly_limit: u16,
 }
 
 pub const FLUIDVOICE_PORT_DEFAULT: u16 = 47_733;
@@ -83,7 +101,62 @@ impl Default for Settings {
             summary_model_openrouter: None,
             summary_model_gemini: None,
             summary_model_anthropic: None,
+            standin_enabled: false,
+            standin_backend: "api".into(),
+            standin_model_openrouter: None,
+            standin_model_gemini: None,
+            standin_model_anthropic: None,
+            standin_cli_model: String::new(),
+            standin_claude_bin: String::new(),
+            standin_grok_bin: String::new(),
+            standin_codex_bin: String::new(),
+            standin_delay_secs: 10,
+            standin_hourly_limit: 12,
         }
+    }
+}
+
+/// A Flatpak build cannot see the host's `claude`, `grok`, or `codex` binaries.
+pub fn cli_backends_allowed() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        flatpak_id().is_none()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+pub fn sanitize_standin_backend(value: &str, cli_ok: bool) -> String {
+    if cli_ok && matches!(value, "claude_cli" | "grok_cli" | "codex_cli") {
+        value.to_string()
+    } else {
+        "api".into()
+    }
+}
+
+fn sanitize_bin(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 300 || value.chars().any(char::is_control) {
+        return String::new();
+    }
+    if std::path::Path::new(value).is_absolute() {
+        value.to_string()
+    } else {
+        String::new()
+    }
+}
+
+pub fn sanitize_delay(value: u16) -> u16 {
+    value.clamp(5, 60)
+}
+
+pub fn sanitize_hourly(value: u16) -> u16 {
+    if value == 0 {
+        12
+    } else {
+        value.clamp(1, 60)
     }
 }
 
@@ -178,6 +251,19 @@ impl Settings {
             .unwrap_or_else(|| self.ai_model())
     }
 
+    /// Model used when the stand-in calls the configured API provider.
+    pub fn standin_model(&self) -> &str {
+        let chosen = match self.ai_provider.as_str() {
+            "gemini" => self.standin_model_gemini.as_deref(),
+            "anthropic" => self.standin_model_anthropic.as_deref(),
+            _ => self.standin_model_openrouter.as_deref(),
+        };
+        chosen
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .unwrap_or_else(|| self.summary_model())
+    }
+
     /// Repair values an older or hand-edited settings.json can carry.
     pub fn sanitized(mut self) -> Self {
         self.zoom = sanitize_zoom(self.zoom);
@@ -201,6 +287,26 @@ impl Settings {
             self.summary_model_anthropic.as_deref().unwrap_or(""),
             &self.ai_model_anthropic,
         ));
+        self.standin_backend =
+            sanitize_standin_backend(&self.standin_backend, cli_backends_allowed());
+        self.standin_model_openrouter = Some(sanitize_model(
+            self.standin_model_openrouter.as_deref().unwrap_or(""),
+            &self.summary_model_openrouter.clone().unwrap_or_default(),
+        ));
+        self.standin_model_gemini = Some(sanitize_model(
+            self.standin_model_gemini.as_deref().unwrap_or(""),
+            &self.summary_model_gemini.clone().unwrap_or_default(),
+        ));
+        self.standin_model_anthropic = Some(sanitize_model(
+            self.standin_model_anthropic.as_deref().unwrap_or(""),
+            &self.summary_model_anthropic.clone().unwrap_or_default(),
+        ));
+        self.standin_cli_model = sanitize_model(&self.standin_cli_model, "");
+        self.standin_claude_bin = sanitize_bin(&self.standin_claude_bin);
+        self.standin_grok_bin = sanitize_bin(&self.standin_grok_bin);
+        self.standin_codex_bin = sanitize_bin(&self.standin_codex_bin);
+        self.standin_delay_secs = sanitize_delay(self.standin_delay_secs);
+        self.standin_hourly_limit = sanitize_hourly(self.standin_hourly_limit);
         // Menu-bar-only mode needs WKWebView's inactive-scheduling policy
         // (macOS 14+). Dropping the flag here means a settings file or an
         // older build can never leave the app in a mode it cannot sustain.

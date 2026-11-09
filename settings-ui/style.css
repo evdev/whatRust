@@ -39,7 +39,6 @@ button { cursor: pointer; border: 0; border-radius: 22px; padding: 9px 18px; bac
 button:disabled { opacity: .45; cursor: default; }
 button.secondary { background: transparent; color: var(--green); }
 button:hover:not(:disabled) { filter: brightness(.95); }
-button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 .app-header { padding: 12px 24px; min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); }
 .app-header > div { display: flex; align-items: baseline; gap: 12px; }
 .app-header strong { font-size: 20px; font-weight: 600; }
@@ -69,7 +68,9 @@ label.row { cursor: pointer; }
 .startup-row { margin: 24px 0 16px; border-bottom: 1px solid var(--border); }
 .entry-row .row-title { flex: 0 0 90px; }
 .entry-row input { flex: 1; min-width: 0; }
-input[type=text], input[type=password], input[type=number], select { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; background: transparent; color: inherit; }
+input[type=text], input[type=password], input[type=number], select, textarea { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; background: transparent; color: inherit; }
+textarea { display: block; width: 100%; min-height: 160px; margin: 8px 0 0; resize: vertical; font: inherit; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 input[type=number] { width: 80px; }
 select { min-width: 120px; }
 select option { background: var(--bg); color: var(--fg); }

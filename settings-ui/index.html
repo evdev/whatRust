@@ -10,7 +10,7 @@
   </head>
   <body>
     <header class="app-header"><div><strong>Configurações</strong><span>whatRust</span></div><button id="back-to-chat" type="button" class="secondary back-button" aria-label="Voltar ao WhatsApp" title="Voltar ao WhatsApp" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5 M12 5l-7 7 7 7"/></svg><span>Voltar ao WhatsApp</span></button></header>
-    <div class="settings-layout"><nav class="settings-nav" aria-label="Configurações"><a href="#sec-contas">Contas</a><a href="#sec-notificacoes">Notificações</a><a href="#sec-voz">Notas de voz</a><a href="#sec-aparencia">Aparência</a><a href="#sec-seguranca">Segurança</a><a href="#sec-sistema">Inicialização</a><a href="#sec-atalhos">Atalhos</a><a href="#sec-diagnostico">Diagnóstico</a></nav>
+    <div class="settings-layout"><nav class="settings-nav" aria-label="Configurações"><a href="#sec-contas">Contas</a><a href="#sec-notificacoes">Notificações</a><a href="#sec-voz">Notas de voz</a><a href="#sec-standin">Stand-in</a><a href="#sec-aparencia">Aparência</a><a href="#sec-seguranca">Segurança</a><a href="#sec-sistema">Inicialização</a><a href="#sec-atalhos">Atalhos</a><a href="#sec-diagnostico">Diagnóstico</a></nav>
     <!-- Local preferences use familiar WhatsApp rows: titled
          groups of boxed-list rows, a title + subtitle on the left and the control
          on the right. Element ids are what main.js uses; keep them stable. -->
@@ -120,6 +120,60 @@
         </div>
         <p id="ai_key_state" class="key-status" role="status">Nenhuma chave guardada.</p>
         <p class="group-note">A chave fica neste computador e nunca entra na página do WhatsApp. A tradução e o botão Resumir usam o modelo escolhido para cada um.</p>
+      </section>
+
+      <section class="group" id="sec-standin">
+        <h2 class="group-title">Stand-in</h2>
+        <div class="boxed-list">
+          <label class="row">
+            <span class="row-text"><span class="row-title">Allow stand-in</span>
+              <span class="row-subtitle">Each individual chat stays off until you turn it on there.</span></span>
+            <input type="checkbox" class="switch" id="standin_enabled" />
+          </label>
+          <label class="row">
+            <span class="row-text"><span class="row-title">How to reply</span>
+              <span class="row-subtitle" id="standin_backend_hint">The API key above, or a program you have already signed in to.</span></span>
+            <select id="standin_backend" aria-label="How to reply">
+              <option value="api">API key</option>
+              <option value="claude_cli">Claude Code</option>
+              <option value="grok_cli">Grok</option>
+              <option value="codex_cli">Codex</option>
+            </select>
+          </label>
+          <label class="row">
+            <span class="row-text"><span class="row-title">Stand-in model</span>
+              <span class="row-subtitle">For the key, one model per provider. For a program, the name it accepts. Empty uses the summary model.</span></span>
+            <input type="text" id="standin_model" aria-label="Stand-in model" />
+          </label>
+          <label class="row">
+            <span class="row-text"><span class="row-title">Program</span>
+              <span class="row-subtitle">Full path, if the app cannot find the program on its own.</span></span>
+            <input type="text" id="standin_bin" aria-label="Program" />
+          </label>
+          <label class="row">
+            <span class="row-text"><span class="row-title">Wait before replying</span>
+              <span class="row-subtitle">Seconds after the last message, from 5 to 60.</span></span>
+            <input type="number" id="standin_delay_secs" min="5" max="60" value="10" aria-label="Wait before replying" />
+          </label>
+          <label class="row">
+            <span class="row-text"><span class="row-title">Replies per hour</span>
+              <span class="row-subtitle">Maximum in each chat. After that the stand-in pauses.</span></span>
+            <input type="number" id="standin_hourly_limit" min="1" max="60" value="12" aria-label="Replies per hour" />
+          </label>
+          <div class="row" id="standin_session_row" hidden>
+            <span class="row-text"><span class="row-title">Program session</span>
+              <span class="row-subtitle" id="standin_cli_state">Not checked yet.</span></span>
+            <button type="button" id="check_standin_cli" class="secondary">Check session</button>
+          </div>
+        </div>
+        <label class="row-title" for="standin_persona">General instructions</label>
+        <textarea id="standin_persona" aria-label="General instructions"></textarea>
+        <div class="group-actions">
+          <button type="button" id="save_persona">Save instructions</button>
+          <button type="button" id="open_persona" class="secondary">Open file</button>
+          <button type="button" id="reset_persona" class="secondary">Restore template</button>
+        </div>
+        <p class="group-note">The stand-in writes as you and only says it is an assistant if asked directly. A program uses the login you already made in it. whatRust does not read that login. In Flatpak, only the API key works. Continuous use can hit your plan limit.</p>
       </section>
 
       <section class="group" id="sec-aparencia">

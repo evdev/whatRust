@@ -549,6 +549,42 @@ fn summary_key(settings: &Settings) -> String {
     format!("{}|{}", settings.ai_provider, settings.summary_model())
 }
 
+pub(crate) fn cached_transcript(app: &AppHandle, id_or_token: &str) -> Option<String> {
+    let needle = id_or_token.trim();
+    if needle.is_empty() {
+        return None;
+    }
+    let path = cache_path(app).ok()?;
+    let cache = load_cache(&path);
+    let wanted = {
+        let token = crate::todo::message_token(needle);
+        if token.is_empty() {
+            needle.to_string()
+        } else {
+            token
+        }
+    };
+    let text_of = |entry: &Entry| {
+        let text = entry.text.trim();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text.to_string())
+        }
+    };
+    if let Some(found) = cache.items.get(needle).and_then(text_of) {
+        return Some(found);
+    }
+    cache.items.iter().find_map(|(id, entry)| {
+        let token = crate::todo::message_token(id);
+        if id == needle || (!wanted.is_empty() && (token == wanted || id == &wanted)) {
+            text_of(entry)
+        } else {
+            None
+        }
+    })
+}
+
 fn cache_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;

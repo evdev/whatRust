@@ -70,6 +70,9 @@ jobs:
       - name: todo.js tests — message capture, rail, filters
         run: node src-tauri/resources/todo.test.mjs
 
+      - name: autoreply.js tests — 1:1 chats, echo, and search
+        run: node src-tauri/resources/autoreply.test.mjs
+
       - name: settings-ui hotkey tests
         run: node settings-ui/comboToAccelerator.test.mjs
 
