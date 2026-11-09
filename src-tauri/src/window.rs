@@ -423,6 +423,12 @@ pub(crate) fn build_account_view(
     };
     #[cfg(not(windows))]
     let builder = apply_view_isolation(builder, account, app);
+    // The store wry is about to use must already carry the master-key
+    // delegate. Doing it afterwards races WhatsApp's first crypto call.
+    // Single-window accounts are child webviews, so this is the path that
+    // creates them on macOS when that mode is on.
+    #[cfg(target_os = "macos")]
+    crate::webcrypto::attach(account.store_uuid);
     let view = parent.add_child(
         builder,
         tauri::LogicalPosition::new(0., 0.),
