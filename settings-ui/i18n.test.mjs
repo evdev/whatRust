@@ -17,7 +17,7 @@ function check(name, fn) {
 
 // Text that is the same in both languages, or a proper name.
 const SAME = new Set(["whatRust", "WhatsApp", "OK", "Português (Brasil)", "English", "⇄", "⋮", "⚙",
-  "CmdOrCtrl+Shift+W", "whatrust --toggle", "Esc"]);
+  "CmdOrCtrl+Shift+W", "CmdOrCtrl+Shift+B", "whatrust --toggle", "Esc", "SOCKS5", "HTTP", "127.0.0.1", "1080"]);
 
 function visibleTexts(html) {
   html = html.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<style[\s\S]*?<\/style>/g, "")
@@ -56,7 +56,7 @@ check("every static string in the HTML pages has an English entry", () => {
 
 check("every t(\"…\") literal in the scripts has an English entry", () => {
   const missing = [];
-  for (const f of ["main.js", "panel.js", "lock.js", "shell.js", "dialog.js", "hotkey.js"]) {
+  for (const f of ["main.js", "panel.js", "lock.js", "shell.js", "dialog.js", "hotkey.js", "updates.js"]) {
     for (const m of read(f).matchAll(/\bt\(\s*(["'])((?:\\.|(?!\1).)*)\1/g)) {
       const s = norm(m[2].replace(/\\(.)/g, "$1"));
       if (!(s in EN)) missing.push(`${f}: ${s}`);
@@ -69,7 +69,7 @@ check("strings assigned to the page by the scripts have an English entry", () =>
   // textContent = "…" / Dlg.*("…", {title: "…", okLabel: "…"}) literals.
   const missing = [];
   const re = /(?:textContent\s*=\s*|title\s*:\s*|okLabel\s*:\s*|requiredMessage\s*:\s*|Dlg\.(?:alert|confirm|prompt)\(\s*)(["'])((?:\\.|(?!\1).)*[A-Za-zÀ-ú](?:\\.|(?!\1).)*)\1/g;
-  for (const f of ["main.js", "lock.js", "panel.js"]) {
+  for (const f of ["main.js", "lock.js", "panel.js", "updates.js"]) {
     for (const m of read(f).matchAll(re)) {
       const s = norm(m[2].replace(/\\(.)/g, "$1"));
       if (!/[À-ú]|\s/.test(s) && !(s in EN)) {

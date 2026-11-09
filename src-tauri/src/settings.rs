@@ -9,6 +9,11 @@ pub struct Settings {
     pub autostart: bool,
     pub hotkey_enabled: bool,
     pub hotkey: String,
+    /// Global shortcut that toggles the privacy blur in every account window.
+    /// Off by default: a new global shortcut must not grab a key combination
+    /// (Ctrl+Shift+B is the browsers' bookmarks bar) from users who never asked.
+    pub blur_hotkey_enabled: bool,
+    pub blur_hotkey: String,
     pub notifications: bool,
     pub notify_when_focused: bool,
     pub notify_active_chat: bool,
@@ -17,6 +22,14 @@ pub struct Settings {
     /// standard window. Every account stays connected in the background and
     /// opens as a panel from the tray. Off by default. Ignored on other platforms.
     pub menubar_only: bool,
+    /// Linux/macOS: host every account in one window with a switcher instead
+    /// of one window per account. Off by default; applies after a restart.
+    /// Windows always uses a single window. Menu-bar-only mode wins if both
+    /// are on.
+    pub single_window: bool,
+    /// macOS only: hide the Dock icon but keep the normal main window. The
+    /// menu bar icon is forced on, since it becomes the way back to the app.
+    pub hide_dock_icon: bool,
     /// Display zoom for the WhatsApp webview, 1.0 = the site's own sizing.
     pub zoom: f64,
     /// Icon beside a message's time when its id indicates an Apple device,
@@ -66,6 +79,29 @@ pub struct Settings {
     pub standin_delay_secs: u16,
     /// Stand-in replies allowed in one chat during a rolling hour.
     pub standin_hourly_limit: u16,
+    /// Folder downloads are saved to (issue #40). `None` keeps the OS Downloads
+    /// folder. Checked when saved and again before each download; a folder that
+    /// has gone away or is no longer writable falls back to Downloads.
+    pub download_dir: Option<String>,
+    /// Use the PNG copied into the config dir as the app icon (issue #54).
+    pub custom_icon: bool,
+    /// Network proxy for the WhatsApp webviews: `off`, `socks5` or `http`
+    /// (issue #52). Applied when a webview is created, so changes need a restart.
+    pub proxy_mode: String,
+    pub proxy_host: String,
+    pub proxy_port: u32,
+    /// Look for a newer release on GitHub shortly after start and every six
+    /// hours (api.github.com). On by default.
+    pub auto_update_check: bool,
+    /// Download and install a newer release without asking, where that needs no
+    /// password (AppImage, macOS app: replaced in place; Windows: downloaded and
+    /// verified, installed on a click). On by default; never for .deb or Flatpak.
+    pub auto_update_install: bool,
+    /// Linux: window title bar. `auto` hides it on tiling window managers
+    /// (Hyprland, Sway, i3, ...) where the compositor draws none and GTK's
+    /// fallback buttons do nothing useful; `show` / `hide` force it.
+    /// Ignored on macOS and Windows. See `decorations`.
+    pub title_bar: String,
 }
 
 pub const FLUIDVOICE_PORT_DEFAULT: u16 = 47_733;
@@ -81,11 +117,15 @@ impl Default for Settings {
             autostart: false,
             hotkey_enabled: true,
             hotkey: "CmdOrCtrl+Shift+W".to_string(),
+            blur_hotkey_enabled: false,
+            blur_hotkey: "CmdOrCtrl+Shift+B".to_string(),
             notifications: true,
             notify_when_focused: true,
             notify_active_chat: true,
             respect_muted: true,
             menubar_only: false,
+            single_window: false,
+            hide_dock_icon: false,
             zoom: 1.0,
             show_message_device: true,
             menu_bar_icon: true,
@@ -112,6 +152,14 @@ impl Default for Settings {
             standin_codex_bin: String::new(),
             standin_delay_secs: 10,
             standin_hourly_limit: 12,
+            download_dir: None,
+            custom_icon: false,
+            proxy_mode: crate::proxy::MODE_OFF.to_string(),
+            proxy_host: String::new(),
+            proxy_port: 0,
+            auto_update_check: true,
+            auto_update_install: true,
+            title_bar: crate::decorations::AUTO.to_string(),
         }
     }
 }
@@ -160,6 +208,30 @@ pub fn sanitize_hourly(value: u16) -> u16 {
     }
 }
 
+/// Do two accelerator strings name the same key combination? Compared after
+/// parsing, so "CmdOrCtrl+Shift+B" and "Shift+CmdOrCtrl+B" match. Unparseable
+/// strings never match (registration reports those separately).
+#[cfg(desktop)]
+pub fn same_shortcut(a: &str, b: &str) -> bool {
+    use tauri_plugin_global_shortcut::Shortcut;
+    match (a.trim().parse::<Shortcut>(), b.trim().parse::<Shortcut>()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Is `pressed` the privacy-blur shortcut (enabled, valid, and distinct from
+/// the show/hide shortcut, which always wins a tie)?
+#[cfg(desktop)]
+pub fn is_blur_shortcut(s: &Settings, pressed: &tauri_plugin_global_shortcut::Shortcut) -> bool {
+    s.blur_hotkey_enabled
+        && !same_shortcut(&s.blur_hotkey, &s.hotkey)
+        && s.blur_hotkey
+            .trim()
+            .parse::<tauri_plugin_global_shortcut::Shortcut>()
+            .is_ok_and(|b| &b == pressed)
+}
+
 pub fn start_hidden(preference: bool, args: &[String]) -> bool {
     if args.iter().any(|a| a == "--show") {
         return false;
@@ -183,6 +255,52 @@ pub fn start_hidden(preference: bool, args: &[String]) -> bool {
 /// level from which the settings window is unreadable.
 pub const ZOOM_MIN: f64 = 0.5;
 pub const ZOOM_MAX: f64 = 2.0;
+
+/// Levels the zoom shortcuts step through (Ctrl +/-, Ctrl+wheel), all inside
+/// `ZOOM_MIN..=ZOOM_MAX`. They include the four presets of the Display size
+/// control, so shortcut and dropdown agree where they overlap.
+pub const ZOOM_STEPS: [f64; 10] = [0.5, 0.67, 0.75, 0.85, 1.0, 1.15, 1.25, 1.5, 1.75, 2.0];
+
+/// What a zoom shortcut asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoomAction {
+    In,
+    Out,
+    Reset,
+}
+
+impl ZoomAction {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "in" => Some(Self::In),
+            "out" => Some(Self::Out),
+            "reset" => Some(Self::Reset),
+            _ => None,
+        }
+    }
+}
+
+/// The zoom after one shortcut step. Steps to the next level strictly beyond
+/// the current value, so an off-grid value (hand-edited, or from an older
+/// build) lands on a level instead of skipping one; at the ends it stays put.
+pub fn step_zoom(current: f64, action: ZoomAction) -> f64 {
+    let cur = sanitize_zoom(current);
+    const EPS: f64 = 1e-6;
+    match action {
+        ZoomAction::Reset => 1.0,
+        ZoomAction::In => ZOOM_STEPS
+            .iter()
+            .copied()
+            .find(|z| *z > cur + EPS)
+            .unwrap_or(ZOOM_MAX),
+        ZoomAction::Out => ZOOM_STEPS
+            .iter()
+            .rev()
+            .copied()
+            .find(|z| *z < cur - EPS)
+            .unwrap_or(ZOOM_MIN),
+    }
+}
 
 /// Bring a zoom factor into range. A non-finite value (a `null` or a string in
 /// the JSON deserialises to the default, but arithmetic in an older build could
@@ -307,6 +425,8 @@ impl Settings {
         self.standin_codex_bin = sanitize_bin(&self.standin_codex_bin);
         self.standin_delay_secs = sanitize_delay(self.standin_delay_secs);
         self.standin_hourly_limit = sanitize_hourly(self.standin_hourly_limit);
+        self.download_dir = self.download_dir.filter(|d| !d.trim().is_empty());
+        self.title_bar = crate::decorations::sanitize(&self.title_bar);
         // Menu-bar-only mode needs WKWebView's inactive-scheduling policy
         // (macOS 14+). Dropping the flag here means a settings file or an
         // older build can never leave the app in a mode it cannot sustain.
@@ -413,17 +533,23 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
         crate::i18n::refresh(app);
     }
     crate::window::apply_zoom_all(app, s.zoom);
+    crate::appicon::apply(app, s.custom_icon, false);
+    crate::decorations::apply_all(app, &s.title_bar);
 
     // Menu-bar mode is only available where a hidden WKWebView keeps running
     // (macOS 14+); elsewhere the setting is ignored rather than dropping every
     // account's session the moment it is enabled.
     #[cfg(target_os = "macos")]
-    let menubar_only = s.menubar_only && crate::menubar::supported();
+    // Single-window mode keeps its window set for the whole run, so a live
+    // menu-bar toggle only takes effect after a restart (menu-bar wins then).
+    let menubar_only = s.menubar_only && crate::menubar::supported() && !crate::sessions::enabled();
+    #[cfg(target_os = "macos")]
+    let hide_dock = menubar_only || s.hide_dock_icon;
 
     // In menu-bar-only mode the tray icon is the app's only entry point, so
     // it can never be hidden.
     #[cfg(target_os = "macos")]
-    crate::tray::apply_visibility(app, s.menu_bar_icon || menubar_only);
+    crate::tray::apply_visibility(app, s.menu_bar_icon || hide_dock);
     #[cfg(not(target_os = "macos"))]
     crate::tray::apply_visibility(app, s.menu_bar_icon);
 
@@ -445,7 +571,7 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
         }
 
         // Menu-bar-only apps have no Dock presence.
-        let policy = if menubar_only {
+        let policy = if hide_dock {
             tauri::ActivationPolicy::Accessory
         } else {
             tauri::ActivationPolicy::Regular
@@ -511,6 +637,19 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
                 ));
             }
         }
+        if s.blur_hotkey_enabled && !s.blur_hotkey.trim().is_empty() {
+            if same_shortcut(&s.blur_hotkey, &s.hotkey) {
+                warnings.push(trf(
+                    "O atalho para desfocar não pode ser igual ao atalho de mostrar/ocultar: {0}",
+                    &[&s.blur_hotkey],
+                ));
+            } else if let Err(e) = gs.register(s.blur_hotkey.as_str()) {
+                warnings.push(trf(
+                    "Não foi possível registrar o atalho (ele pode estar em uso): {0}",
+                    &[&e],
+                ));
+            }
+        }
         if warnings.is_empty() {
             None
         } else {
@@ -527,12 +666,24 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        sanitize_zoom, Settings, DEFAULT_MODEL_OPENROUTER, FLUIDVOICE_PORT_DEFAULT, ZOOM_MAX,
-        ZOOM_MIN,
+        sanitize_zoom, step_zoom, Settings, ZoomAction, DEFAULT_MODEL_OPENROUTER,
+        FLUIDVOICE_PORT_DEFAULT, ZOOM_MAX, ZOOM_MIN, ZOOM_STEPS,
     };
 
     #[cfg(target_os = "linux")]
     use super::{flatpak_autostart_entry, is_valid_flatpak_id};
+
+    #[test]
+    fn old_settings_keep_default_download_folder_and_icon() {
+        let s: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        assert_eq!(s.download_dir, None);
+        assert!(!s.custom_icon);
+        let blank = Settings {
+            download_dir: Some("  ".into()),
+            ..Settings::default()
+        };
+        assert_eq!(blank.sanitized().download_dir, None);
+    }
 
     #[test]
     fn old_settings_enable_new_notification_preferences() {
@@ -574,6 +725,43 @@ mod tests {
         assert!(!s.autostart);
         assert_eq!(s.zoom, 1.0);
         assert!(s.menu_bar_icon);
+    }
+
+    #[test]
+    fn zoom_steps_are_in_range_and_ascending() {
+        assert!(ZOOM_STEPS.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(ZOOM_STEPS[0], ZOOM_MIN);
+        assert_eq!(ZOOM_STEPS[ZOOM_STEPS.len() - 1], ZOOM_MAX);
+        assert!(ZOOM_STEPS.contains(&1.0));
+    }
+
+    #[test]
+    fn zoom_in_and_out_walk_the_levels() {
+        assert_eq!(step_zoom(1.0, ZoomAction::In), 1.15);
+        assert_eq!(step_zoom(1.0, ZoomAction::Out), 0.85);
+        assert_eq!(step_zoom(1.15, ZoomAction::Out), 1.0);
+        assert_eq!(step_zoom(0.75, ZoomAction::In), 0.85);
+        assert_eq!(step_zoom(1.5, ZoomAction::Reset), 1.0);
+    }
+
+    #[test]
+    fn zoom_stops_at_the_ends() {
+        assert_eq!(step_zoom(ZOOM_MAX, ZoomAction::In), ZOOM_MAX);
+        assert_eq!(step_zoom(ZOOM_MIN, ZoomAction::Out), ZOOM_MIN);
+    }
+
+    #[test]
+    fn off_grid_zoom_lands_on_the_next_level() {
+        assert_eq!(step_zoom(1.05, ZoomAction::In), 1.15);
+        assert_eq!(step_zoom(1.05, ZoomAction::Out), 1.0);
+        assert_eq!(step_zoom(f64::NAN, ZoomAction::In), 1.15);
+        assert_eq!(step_zoom(9.0, ZoomAction::Out), 1.75);
+    }
+
+    #[test]
+    fn zoom_action_parses_only_known_names() {
+        assert_eq!(ZoomAction::parse("in"), Some(ZoomAction::In));
+        assert_eq!(ZoomAction::parse("sideways"), None);
     }
 
     #[test]
@@ -702,5 +890,48 @@ mod tests {
             true,
             &["--autostart".into(), "--show".into()]
         ));
+    }
+}
+
+#[cfg(all(test, desktop))]
+mod blur_shortcut_tests {
+    use super::{is_blur_shortcut, same_shortcut, Settings};
+    use tauri_plugin_global_shortcut::Shortcut;
+
+    #[test]
+    fn blur_shortcut_is_off_by_default() {
+        let s = Settings::default();
+        assert!(!s.blur_hotkey_enabled);
+        let b: Shortcut = s.blur_hotkey.parse().unwrap();
+        assert!(!is_blur_shortcut(&s, &b));
+    }
+
+    #[test]
+    fn enabled_blur_shortcut_matches_only_itself() {
+        let s = Settings {
+            blur_hotkey_enabled: true,
+            ..Settings::default()
+        };
+        let blur: Shortcut = "CmdOrCtrl+Shift+B".parse().unwrap();
+        let toggle: Shortcut = s.hotkey.parse().unwrap();
+        assert!(is_blur_shortcut(&s, &blur));
+        assert!(!is_blur_shortcut(&s, &toggle));
+    }
+
+    #[test]
+    fn show_hide_shortcut_wins_a_tie() {
+        let s = Settings {
+            blur_hotkey_enabled: true,
+            blur_hotkey: "Shift+CmdOrCtrl+W".into(),
+            ..Settings::default()
+        };
+        assert!(same_shortcut(&s.blur_hotkey, &s.hotkey));
+        let pressed: Shortcut = s.hotkey.parse().unwrap();
+        assert!(!is_blur_shortcut(&s, &pressed));
+    }
+
+    #[test]
+    fn unparseable_shortcuts_never_match() {
+        assert!(!same_shortcut("not a key", "not a key"));
     }
 }

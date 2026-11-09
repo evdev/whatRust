@@ -19,9 +19,12 @@
 
 > **Unofficial, independent project** — not affiliated with, endorsed by, or sponsored by WhatsApp or Meta. whatRust simply loads the official `web.whatsapp.com` interface in a native system webview.
 
+> Also by the same author: [Rusty Inbox](https://aboelmakarem.pro/apps/rusty-inbox), a fast, open-source Rust email client for Linux, Windows and macOS.
+
 ## Contents
 
 - [What is whatRust?](#what-is-whatrust)
+- [Video and screenshots](#video-and-screenshots)
 - [Why whatRust? A lean, native WhatsApp Desktop alternative](#why-whatrust-a-lean-native-whatsapp-desktop-alternative)
 - [Features](#features)
 - [Run multiple WhatsApp accounts](#run-multiple-whatsapp-accounts)
@@ -42,6 +45,19 @@ whatRust is an open-source **WhatsApp Web desktop client** for Linux, Windows, a
 
 It is an **unofficial, open-source WhatsApp client** and a practical **WhatsApp Desktop alternative** for people who want a fast, native app with minimal overhead instead of the heavier Electron-based official build. It is not affiliated with WhatsApp or Meta.
 
+## Video and screenshots
+
+[![whatRust video: WhatsApp on your desktop, without the bloat (67 s)](docs/media/video-poster.jpg)](https://aboelmakarem.pro/apps/whatrust)
+
+**[Watch the 67-second video](docs/media/whatrust-video.mp4)** (also on the [whatRust page](https://aboelmakarem.pro/apps/whatrust)). It is a real recording with a real account; the chats are hidden by whatRust's own privacy blur.
+
+| | |
+|---|---|
+| ![whatRust running WhatsApp Web with the privacy blur on](docs/media/main.jpg) | ![Privacy blur panel: choose what gets blurred](docs/media/privacy-blur.jpg) |
+| WhatsApp Web with the privacy blur on | Privacy blur panel (Ctrl+Shift+P) |
+| ![Adding a second account in its own window](docs/media/accounts.jpg) | ![Settings: appearance, shortcuts, updates](docs/media/settings.jpg) |
+| A second account, in its own window | Settings: appearance, shortcuts, updates |
+
 ## Why whatRust? A lean, native WhatsApp Desktop alternative
 
 **whatRust's native app shell is small — typically around 90 MB** — because it reuses the webview that already ships with your OS instead of bundling its own browser engine the way Electron apps do. That gives it a much lighter baseline than the official Electron-based WhatsApp Desktop, which ships an entire Chromium runtime on top of the same WhatsApp Web page.
@@ -59,6 +75,8 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 - **To-do list** — open it from the button under the account switcher (it sits on the left rail only when that switcher is not on screen). In a message's own menu, choose **Add to To-Do**, set a reminder, and jump back to the chat. The list is stored on this computer, separately for each account. Reminders only fire while whatRust is running; ones that come due while it is closed are shown the next time it opens.
 - **Stand-in** — in one individual chat, turn on a reply that writes as you while you are away. It can read the chat WhatsApp Web has loaded and search it. Two markdown files, one for you and one for that chat, start with basic instructions and stay optional. It pauses when you send a message yourself, and it stays silent and notifies you when it is unsure. The text of that chat is sent to the AI provider in Settings, or to Claude Code, Grok, or Codex already signed in on this computer. Flatpak builds can use only the API key.
 - **Display size** — a Smaller / Small / Default / Big page zoom in Settings, so the chat list stops crowding out the conversation on a high-DPI screen
+- **Custom download folder** — pick where downloads are saved in Settings → Appearance, or reset to the system Downloads folder. A folder that disappears or stops being writable falls back to Downloads. On Windows the Save As dialog opens in that folder. In the Flatpak the folder is chosen through the desktop portal (needs `xdg-desktop-portal`)
+- **Custom app icon** — choose a square PNG (32–1024 px, up to 5 MB) as the app icon in Settings → Appearance: Dock icon on macOS (the unread badge still shows on top), window and taskbar icons on Windows, window icon on Linux X11 (Wayland compositors use the `.desktop` icon, so it does not change there). The tray / menu-bar icon stays as is, and the icon is app-wide, not per account
 - **Persistent login** — scan the QR code once, stay signed in across restarts
 - **Voice messages** everywhere, plus **voice & video calls** on macOS (WhatsApp Web doesn't offer calls on Windows, and whatRust's Linux builds can't place calls — see the FAQ)
 - **Drag and drop files and images** — drop a photo, video, or document straight onto a chat to attach it
@@ -67,6 +85,8 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 - **Download feedback** — a small toast confirms each download with **Open** and **Show in folder** buttons (programs and installers are only ever shown in their folder, never run)
 - **Launch at startup** (auto-start), optional
 - **Global keyboard shortcut** to show/hide the window (default `Ctrl/Cmd+Shift+W`; record your own by pressing the keys in Settings). On **Wayland**, bind `whatrust --toggle` to a system shortcut instead — see the FAQ.
+- **Proxy** — route all account traffic through a SOCKS5 or HTTP proxy (Settings → Network; see the FAQ)
+- **Automatic updates** — whatRust checks GitHub for a newer release shortly after start and every 6 hours, tells you, and installs it after checking its SHA-256 (Settings → Updates; see the FAQ). Turn it off in Settings → Updates
 - **Single instance** — relaunching focuses the running window; `whatrust --toggle` from a second launch shows/hides it
 - **Remembers window size and position**
 - **One-line install** on every platform
@@ -141,11 +161,21 @@ The Flatpak uses the GNOME runtime from Flathub, while the whatRust bundle itsel
 published with each [GitHub release](https://github.com/karem505/whatRust/releases/latest).
 It keeps its own sandboxed WhatsApp login, separate from a `.deb` or AppImage install.
 
+> **Flatpak doesn't open?** If `flatpak run io.github.karem505.whatRust` prints `bwrap: Can't find source path /run/user/…/doc/by-app/…`, the Flatpak document portal has lost its mount (this affects every Flatpak app, not just whatRust). Run `systemctl --user restart xdg-document-portal` and open it again; the installer does this check for you.
+
 **Linux AppImage / macOS** — one line:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/karem505/whatRust/master/install.sh | sh
 ```
-Installs the AppImage to `~/.local/bin` on Linux (with an application-menu entry), or the `.dmg` app into `/Applications` on macOS (Apple Silicon). The macOS build is unsigned — if it warns on first launch, right-click the app → **Open**.
+Installs the AppImage to `~/.local/bin` on Linux (with an application-menu entry), or the `.dmg` app into `/Applications` on macOS (Apple Silicon). The script also clears macOS's download quarantine flag, which the unsigned build needs.
+
+> **macOS: "whatRust is damaged and can't be opened"?** The app isn't damaged. The build is not signed with an Apple Developer ID, so macOS blocks it when it was downloaded with a browser (the `.dmg` from the release page). Drag whatRust into Applications, then run this once in Terminal and open it again:
+>
+> ```bash
+> xattr -dr com.apple.quarantine /Applications/whatRust.app
+> ```
+>
+> Installing with the `install.sh` line above avoids this. Updates installed by whatRust itself are not affected.
 
 **Windows** — one line (PowerShell):
 ```powershell
@@ -198,6 +228,33 @@ Its native shell is lighter because it doesn't bundle a Chromium browser engine 
 ### Which operating systems does whatRust support?
 Linux (WebKitGTK), Windows 10/11 (WebView2), and macOS 12.1+ (WKWebView).
 
+### Can I use a proxy (SOCKS5 or HTTP)?
+
+Yes. Open **Settings → Network**, pick **SOCKS5** or **HTTP**, enter the host and port, save, and restart whatRust (the settings page has a **Restart now** button). Every account's WhatsApp page then goes through that proxy. The default is **Off**.
+
+- Proxies that need a **username and password are not supported** — the system webview engines (WebView2, WKWebView, WebKitGTK) don't accept credentials through this route, so whatRust rejects `user:pass@` rather than half-working. Use a local relay (e.g. a SOCKS5 forwarder on `127.0.0.1`) that handles the login for you.
+- macOS needs **macOS 14 or later** for the proxy; on older versions the setting is disabled.
+- If the saved proxy is ever invalid, whatRust blocks the connection instead of silently going direct.
+- The update check and update download (see below) use the same proxy. If the saved proxy is invalid they fail instead of connecting directly. Links you open go to your default browser, which uses its own proxy settings.
+
+### Does whatRust update itself? What does it send?
+
+Yes, by default. A minute after start and then every 6 hours, whatRust asks `api.github.com` for the latest published release of `karem505/whatRust` (one anonymous request that sends only a `whatRust/<version>` User-Agent, no account, identifiers or usage data). If there is a newer version you get a notification (on Windows clicking it opens the page), an **Update to X.Y.Z** item in the tray menu, and **Settings → Updates** shows the release notes with **Download and install**. Files are downloaded from `github.com` and checked against the `SHA256SUMS` published with the release before anything is replaced or started; a mismatch, or a release without `SHA256SUMS`, is refused and the installed copy stays as it is.
+
+How it installs depends on how you installed whatRust:
+
+| Installed with | What happens |
+|---|---|
+| AppImage | replaced in place in the background; the new version starts the next time you open the app (or press **Restart now**) |
+| macOS `.app` | replaced in place (the old bundle is kept until the swap succeeds); if its folder is not writable the `.dmg` is saved to Downloads and opened |
+| Windows `.exe` setup | downloaded and verified in the background; the installer runs when you click **Restart and install** |
+| Windows `.msi` | the MSI runs after you click **Download and install** |
+| `.deb` | after you click **Download and install**; asks for your administrator password (`pkexec dpkg -i`) |
+| Flatpak | the verified bundle is saved to Downloads and opened in your software center (the sandbox cannot update itself), or run `curl -fsSL https://raw.githubusercontent.com/karem505/whatRust/master/install-flatpak.sh \| sh` |
+| built from source | only reported |
+
+To turn it off, untick **Check for updates automatically** in **Settings → Updates** (the **Check now** button still works). **Install updates automatically** only applies where no password is needed; untick it to be asked first. Versions 0.6.10 and older do not have the updater: install the newest release by hand once.
+
 ### Is whatRust free and open source?
 Yes — whatRust is free and open source under the MIT License. The source is on [GitHub](https://github.com/karem505/whatRust).
 
@@ -238,9 +295,10 @@ whatRust doesn't talk to WhatsApp's servers itself: it shows the official `web.w
 
 ## Limitations
 
-- **Windows unread count**: Windows tray icons ignore text labels, so the unread *number* appears only in the hover tooltip (the icon still switches to a badged variant). macOS and Linux show the count.
+- **Windows unread count**: Windows tray icons ignore text labels, so the unread *number* appears only in the hover tooltip (the icon still switches to a badged variant). macOS shows the count on the Dock icon and Linux on the tray icon.
+- **Linux launcher/dock badge**: the unread count is also sent to the launcher icon via the Unity `LauncherEntry` D-Bus API (.deb, AppImage with its `install.sh` desktop entry, and Flatpak). It shows on KDE Plasma's task manager, Dash to Dock / Ubuntu Dock, Plank and Latte; stock GNOME shows no app-icon badge without one of those extensions.
 - **Notification click** focuses the window on Windows only — elsewhere use the tray icon or the global shortcut.
-- **macOS** builds are unsigned and currently Apple Silicon (arm64) only.
+- **macOS** builds are unsigned and currently Apple Silicon (arm64) only. A `.dmg` downloaded with a browser shows "whatRust is damaged" until its quarantine flag is cleared (see Install).
 - **macOS and Windows file drops** go directly to WhatsApp through the native webview. Drag files from Finder/File Explorer onto the open conversation; use the attach (+) button if a drag source does not provide a file the webview can read.
 - **Linux drag-and-drop limits**: up to 200 files per drop, 500 MB per file, and 500 MB per drop total. Base64 transport is decoded incrementally while files stream in, but the page must still hold the final `File` data in memory. Larger batches can always be sent via WhatsApp's attach (+) → Document picker, which is not routed through these limits. Skipped files are reported in a notification. Native drops on macOS and Windows follow WhatsApp's own attachment limits.
 - **Multiple accounts on macOS** require macOS 14+ (older macOS runs a single account); Linux and Windows are unrestricted.

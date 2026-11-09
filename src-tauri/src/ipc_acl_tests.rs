@@ -19,12 +19,14 @@ const PAGE: &str = "https://web.whatsapp.com/";
 /// The commands the WhatsApp page's bridge.js needs.
 const PAGE_COMMANDS: &[&str] = &[
     "notify",
+    "notification_icon",
     "set_unread",
     "dlog",
     "open_download",
     "reveal_download",
     "switcher_accounts",
     "switch_account",
+    "zoom_step",
     "voice_prefs",
     "voice_lookup",
     "transcribe_voice",
@@ -51,6 +53,10 @@ const PAGE_COMMANDS: &[&str] = &[
 const SETTINGS_COMMANDS: &[&str] = &[
     "get_settings",
     "set_settings",
+    "pick_download_dir",
+    "choose_app_icon",
+    "reset_app_icon",
+    "restart_app",
     "list_accounts",
     "add_account",
     "remove_account",
@@ -72,6 +78,11 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "autoreply_reset_persona",
     "autoreply_open_persona",
     "standin_cli_status",
+    "get_update_status",
+    "check_for_updates",
+    "install_update",
+    "restart_to_update",
+    "open_release_page",
 ];
 /// Commands only the lock screen may use.
 const LOCK_COMMANDS: &[&str] = &[

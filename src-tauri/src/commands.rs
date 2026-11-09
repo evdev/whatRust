@@ -43,6 +43,29 @@ pub fn notify(
     crate::notify::from_page(&app, window.label(), &title, &body, icon.as_deref(), epoch);
 }
 
+/// The sender's picture for a notification WebView2 raised itself (Windows
+/// native path). bridge.js converts WhatsApp's `blob:`/`https:` icon to a small
+/// PNG, which Rust cannot fetch, and sends it here; it is paired with the held
+/// `NotificationReceived` toast by (webview, title, body). `icon: None` means
+/// the page could not get one. Same origin rule as `notify`.
+#[tauri::command(async)]
+pub fn notification_icon(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+    title: String,
+    body: String,
+    icon: Option<String>,
+) {
+    if crate::integration::remote(&window).is_err() {
+        return;
+    }
+    let icon = icon.filter(|i| i.len() <= crate::native_icon::MAX_ICON_B64);
+    #[cfg(windows)]
+    crate::notify::native_icon_arrived(&app, window.label(), &title, &body, icon);
+    #[cfg(not(windows))]
+    let _ = (app, title, body, icon);
+}
+
 /// Diagnostic breadcrumb from the injected page script (bridge.js) into the same
 /// file log as the Rust side, so a drag-drop failure can be traced end-to-end on a
 /// build with no console. Allowed from the WhatsApp page; it only appends a short,
@@ -120,8 +143,12 @@ pub fn set_unread(
     // whatRust can't see it (issue #3). Covered by a real notification, this
     // stays silent; see notify::unread_increased. A dismissed menu-bar panel
     // is a hidden window, so `is_visible()` already says nobody is watching.
-    let focused = window.window().is_focused().unwrap_or(false)
-        && window.window().is_visible().unwrap_or(false);
+    let focused = if crate::sessions::enabled() {
+        crate::sessions::account_focused(&app, window.label())
+    } else {
+        window.window().is_focused().unwrap_or(false)
+            && window.window().is_visible().unwrap_or(false)
+    };
     if !cfg!(windows)
         && crate::notify::fallback_due(previous, count, focused, settled.unwrap_or(false))
     {
@@ -141,6 +168,20 @@ pub struct SettingsView {
     /// `menubar::supported`). The UI disables the switch elsewhere rather
     /// than letting the user opt into a mode that would drop the session.
     pub menubar_supported: bool,
+    /// The tiling window manager this Linux session runs (Hyprland, Sway,
+    /// ...), shown next to the title-bar setting; `None` elsewhere.
+    pub tiling_wm: Option<String>,
+    /// The proxy URL the running webviews were created with (`""` = none). When
+    /// it differs from the saved settings, a restart is pending.
+    pub proxy_in_use: String,
+    /// Whether the webview engine can proxy (false on macOS < 14).
+    pub proxy_supported: bool,
+    /// Whether this run actually hosts all accounts in one window (the saved
+    /// `single_window` only applies after a restart).
+    pub single_window_active: bool,
+    /// Whether the single-window option is offered (not on Windows, where it is
+    /// always on; not on macOS < 14, which stays single-account).
+    pub single_window_supported: bool,
     /// Which providers have a key stored. The key itself is never returned.
     pub ai_key_openrouter: bool,
     pub ai_key_gemini: bool,
@@ -162,6 +203,12 @@ pub fn get_settings(window: tauri::Webview, app: tauri::AppHandle) -> Result<Set
         settings: crate::settings::load(&app),
         platform: std::env::consts::OS,
         menubar_supported: crate::menubar::supported(),
+        tiling_wm: crate::decorations::tiling_wm(),
+        proxy_in_use: crate::proxy::in_use(),
+        proxy_supported: crate::proxy::engine_supported(),
+        single_window_active: crate::sessions::enabled(),
+        single_window_supported: !cfg!(windows)
+            && crate::window::ensure_isolation_supported().is_ok(),
         standin_cli_available: crate::settings::cli_backends_allowed(),
     })
 }
@@ -176,13 +223,173 @@ pub fn set_settings(
         return Err("forbidden".into());
     }
     lock::require_unlocked(&app)?;
-    let settings = settings.sanitized();
+    let mut settings = settings.sanitized();
+    let stored = crate::settings::load(&app);
+    // A newly chosen download folder must work now. An unchanged one is not
+    // re-checked: if it has since gone away, downloads fall back to Downloads
+    // (see downloads::configured_dir) and other settings must still save.
+    if settings.download_dir != stored.download_dir {
+        if let Some(dir) = &settings.download_dir {
+            crate::downloads::validate_dir(std::path::Path::new(dir))?;
+        }
+    }
+    // The icon is only switched through choose_app_icon / reset_app_icon.
+    settings.custom_icon = stored.custom_icon;
+    crate::proxy::validate(&mut settings)?;
     crate::settings::save(&app, &settings).map_err(|e| e.to_string())?;
     let warning = crate::settings::apply(&app, &settings);
     crate::voice::push_prefs(&app, &settings);
     crate::autoreply::push_prefs(&app, &settings);
     crate::window::push_device_icons(&app, settings.show_message_device);
     Ok(warning)
+}
+
+/// Relaunch the app (the proxy applies when webviews are created). Local
+/// settings window only, and not while locked.
+#[tauri::command]
+pub fn restart_app(window: tauri::Webview, app: tauri::AppHandle) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    app.restart();
+}
+
+/// Everything Settings → Updates shows. Local settings window only, and not while locked.
+#[tauri::command]
+pub fn get_update_status(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    Ok(crate::update_service::status_json(&app))
+}
+
+/// "Check now": answers at once, the result arrives as a status event.
+#[tauri::command]
+pub fn check_for_updates(window: tauri::Webview, app: tauri::AppHandle) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    crate::update_service::check_now(&app);
+    Ok(())
+}
+
+/// "Download and install" / "Restart and install".
+#[tauri::command]
+pub fn install_update(window: tauri::Webview, app: tauri::AppHandle) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    crate::update_service::install_now(&app);
+    Ok(())
+}
+
+/// "Restart now" after an update replaced the app in place.
+#[tauri::command]
+pub fn restart_to_update(window: tauri::Webview, app: tauri::AppHandle) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    crate::update_service::restart(&app)
+}
+
+/// Open the release page of the newest version in the browser (the address
+/// is never taken from the page).
+#[tauri::command]
+pub fn open_release_page(window: tauri::Webview, app: tauri::AppHandle) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    if let Some(url) = crate::update_service::release_page_url(&app) {
+        crate::opener::open_url(&app, url);
+    }
+    Ok(())
+}
+
+/// Ask for a download folder with the system's folder picker. Returns the
+/// chosen path (already checked as writable), or `None` if cancelled. The UI
+/// saves it with the other settings. In the Flatpak the picker is the
+/// xdg-desktop-portal one, so the folder is exported into the sandbox.
+#[tauri::command]
+pub async fn pick_download_dir(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    use tauri_plugin_dialog::DialogExt;
+    let mut dialog = app.dialog().file().set_title(tr("Pasta de downloads"));
+    if let Some(dir) = app.path().download_dir().ok().filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    let Some(picked) = dialog.set_parent(&window.window()).blocking_pick_folder() else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    crate::downloads::validate_dir(&path)?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+/// Pick a PNG, validate it, keep a copy and use it as the app icon.
+/// `false` means the picker was cancelled.
+#[tauri::command]
+pub async fn choose_app_icon(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+) -> Result<bool, String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    use tauri_plugin_dialog::DialogExt;
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_title(tr("Ícone do aplicativo"))
+        .add_filter("PNG", &["png"])
+        .set_parent(&window.window())
+        .blocking_pick_file()
+    else {
+        return Ok(false);
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    // Refuse before reading a huge file into memory.
+    let len = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+    if len > crate::appicon::MAX_BYTES as u64 {
+        return Err(tr("A imagem tem mais de 5 MB.").into_owned());
+    }
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    crate::appicon::set_custom(&app, &bytes)?;
+    let mut s = crate::settings::load(&app);
+    s.custom_icon = true;
+    crate::settings::save(&app, &s).map_err(|e| e.to_string())?;
+    crate::appicon::apply(&app, true, true);
+    Ok(true)
+}
+
+/// Go back to the built-in icon and delete the stored copy.
+#[tauri::command]
+pub fn reset_app_icon(window: tauri::Webview, app: tauri::AppHandle) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    let mut s = crate::settings::load(&app);
+    s.custom_icon = false;
+    crate::settings::save(&app, &s).map_err(|e| e.to_string())?;
+    crate::appicon::apply(&app, false, true);
+    crate::appicon::clear_custom(&app);
+    Ok(())
 }
 
 // Commands that build a window are `async`. Tauri runs a synchronous command
@@ -262,6 +469,31 @@ pub fn switcher_accounts(
             unread: account.unread,
         })
         .collect())
+}
+
+/// Zoom shortcuts from the WhatsApp page (Ctrl/Cmd +/-/0, Ctrl+wheel): step the
+/// shared display zoom, persist it and apply it to every account webview. The
+/// page only names the action; the new level is computed from the saved value,
+/// so a burst of requests cannot drift or leave the range.
+#[tauri::command]
+pub fn zoom_step(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+    action: String,
+) -> Result<f64, String> {
+    crate::integration::remote(&window)?;
+    lock::require_unlocked(&app)?;
+    let action = crate::settings::ZoomAction::parse(&action).ok_or("bad action")?;
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _g = lock::guard(&SERIAL);
+    let mut s = crate::settings::load(&app);
+    let zoom = crate::settings::step_zoom(s.zoom, action);
+    if zoom != s.zoom {
+        s.zoom = zoom;
+        crate::settings::save(&app, &s).map_err(|e| e.to_string())?;
+    }
+    crate::window::apply_zoom_all(&app, zoom);
+    Ok(zoom)
 }
 
 #[tauri::command]
@@ -396,7 +628,13 @@ pub async fn remove_account(
         #[cfg(windows)]
         crate::sessions::remove_view(&app, &removed.id).map_err(|e| e.to_string())?;
         #[cfg(not(windows))]
-        let _ = _w.close();
+        {
+            if crate::sessions::enabled() {
+                crate::sessions::remove_view(&app, &removed.id).map_err(|e| e.to_string())?;
+            } else {
+                let _ = _w.close();
+            }
+        }
     }
     // Drop the per-account unread count.
     {
@@ -411,7 +649,7 @@ pub async fn remove_account(
     // so toggle/show don't target a window that no longer exists. (On Windows
     // the active view is tracked by sessions.rs instead.)
     #[cfg(not(windows))]
-    if let Some(active) = app.try_state::<ActiveAccount>() {
+    if let (false, Some(active)) = (crate::sessions::enabled(), app.try_state::<ActiveAccount>()) {
         let mut label = active.lock().unwrap_or_else(|e| e.into_inner());
         if *label == accounts::window_label(&removed.id) {
             if let Some(next) = accounts::startup_account(&f) {
@@ -458,7 +696,8 @@ pub async fn rename_account(
         let visible_account =
             crate::sessions::selected(&app, w.window().label()).as_deref() == Some(w.label());
         #[cfg(not(windows))]
-        let visible_account = true;
+        let visible_account = !crate::sessions::enabled()
+            || crate::sessions::selected(&app, w.window().label()).as_deref() == Some(w.label());
         if visible_account {
             let _ = w.window().set_title(&format!("whatRust — {name}"));
         }

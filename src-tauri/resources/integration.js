@@ -1,7 +1,7 @@
 (function () {
   "use strict";
   function L(pt, en) { return window.__WR_LANG === "en" ? en : pt; }
-  if (!window.__WHATRUST_WINDOWS__ || location.origin !== "https://web.whatsapp.com") return;
+  if (!(window.__WHATRUST_WINDOWS__ || window.__WHATRUST_SINGLE__) || location.origin !== "https://web.whatsapp.com") return;
   var state = { accounts: [], current_id: "", native_notifications: false };
   var host, root, menu, gear, accountButton, accountName, accountBadge, status, lastReport = "", observer, scheduled, resizeObserver, resizeTarget, themeObserver;
   function call(cmd, args) { var t=window.__TAURI__;if(!t||!t.core)return Promise.resolve(null);return t.core.invoke(cmd, args).catch(function () { return null; }); }
@@ -47,7 +47,8 @@
       .badge{flex:none;min-width:16px;height:16px;padding:0 4px;border-radius:9px;background:#21c063;color:#0a0a0a;font:10px/16px system-ui;text-align:center}
       :host([data-compact="true"]) .badge{position:absolute;inset-inline-end:0;top:0}
       [hidden]{display:none!important}svg{width:24px;height:24px;flex:none;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
-      dialog{color-scheme:light dark;color:light-dark(#0a0a0a,#fafafa);background:light-dark(#fff,#232626);border:1px solid #8882;border-radius:8px;box-shadow:0 2px 12px #0005;width:320px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);overflow:auto;padding:12px 8px;inset:auto;margin:0}
+      dialog{color-scheme:light dark;color:light-dark(#0a0a0a,#fafafa);background:light-dark(#fff,#232626);border:1px solid #8882;border-radius:8px;box-shadow:0 2px 12px #0005;width:320px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);overflow:auto;padding:12px 8px;inset:auto;margin:0;scrollbar-width:thin;scrollbar-color:rgba(134,150,160,.45) transparent}
+      dialog::-webkit-scrollbar{width:8px}dialog::-webkit-scrollbar-track{background:transparent}dialog::-webkit-scrollbar-thumb{background-color:rgba(134,150,160,.45);border:2px solid transparent;border-radius:4px;background-clip:padding-box}
       dialog::backdrop{background:transparent}dialog button{overflow-wrap:anywhere;display:block;width:100%;text-align:left;margin:5px 0;padding:10px 12px;border-radius:8px}
       h2{font-size:16px;font-weight:600;margin:4px 12px 10px}p{overflow-wrap:anywhere;font-size:12px;opacity:.65;margin:12px 12px 4px}dialog [aria-current=true]{background:#8696a01f;font-weight:600}
     `;
@@ -59,7 +60,8 @@
     accountButton.append(people,accountName,accountBadge);accountButton.setAttribute("aria-haspopup","dialog");accountButton.setAttribute("aria-expanded","false");
     gear=button("⚙",openPanel);gear.setAttribute("aria-label","Configurações do whatRust");gear.title="Configurações do whatRust";
     gear.textContent="";
-    var svg=document.createElementNS("http://www.w3.org/2000/svg","svg"),path=document.createElementNS("http://www.w3.org/2000/svg","path");svg.setAttribute("viewBox","0 0 24 24");svg.setAttribute("aria-hidden","true");path.setAttribute("d","M9.5 3h5l.6 2.4 2 1.2 2.4-.7 2.5 4.3-1.8 1.8v2.3l1.8 1.8-2.5 4.3-2.4-.7-2 1.2-.6 2.1h-5l-.6-2.1-2-1.2-2.4.7L2 16.1l1.8-1.8V12L2 10.2l2.5-4.3 2.4.7 2-1.2z M15.5 12.5a3.5 3.5 0 1 1-7 0a3.5 3.5 0 0 1 7 0");svg.appendChild(path);gear.appendChild(svg);
+    // Gear path: Lucide "settings" icon (ISC licence, https://lucide.dev).
+    var svg=document.createElementNS("http://www.w3.org/2000/svg","svg"),path=document.createElementNS("http://www.w3.org/2000/svg","path");svg.setAttribute("viewBox","0 0 24 24");svg.setAttribute("aria-hidden","true");path.setAttribute("d","M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915 M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0");svg.appendChild(path);gear.appendChild(svg);
     menu=document.createElement("dialog");menu.setAttribute("aria-label","Contas do whatRust");menu.addEventListener("click",function(e){var r=menu.getBoundingClientRect();if(e.target===menu&&(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom))menu.close();});menu.addEventListener("close",function(){accountButton.setAttribute("aria-expanded","false");accountButton.focus();});
     bar.append(accountButton,gear);root.append(style,bar,menu);draw();
   }

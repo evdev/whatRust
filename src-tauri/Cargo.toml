@@ -1,6 +1,6 @@
 [package]
 name = "whatrust"
-version = "0.6.10"
+version = "0.6.13"
 edition = "2021"
 rust-version = "1.82"
 
@@ -19,18 +19,25 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "=2.11.2", features = ["tray-icon", "image-png", "unstable"] }
+tauri = { version = "=2.11.2", features = ["tray-icon", "image-png", "unstable", "macos-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["time"] }
-# Loopback calls to FluidVoice and to the configured LLM. rustls, so the build
-# does not need a system OpenSSL.
+# Loopback calls to FluidVoice and the configured LLM. ureq 2's API is what
+# those callers use. The updater needs ureq 3 (SOCKS proxy); the crates are
+# not API-compatible, so it is imported as `ureq3`.
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
+ureq3 = { package = "ureq", version = "3", default-features = false, features = ["rustls", "socks-proxy"] }
 argon2 = { version = "0.5.3", features = ["std"] }  # Argon2id password hashing for the app lock (PHC strings)
+semver = "1"
+sha2 = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Version-matched to wry 0.55's webkit2gtk so PlatformWebview::inner() types unify.
 webkit2gtk = "=2.0.2"
+# Already in the tree through tauri/wry; named directly to pin the single-window
+# recovery bar (GtkBox child packing). Same 0.18 line wry uses.
+gtk = "0.18"
 zbus = "5"
 zbus_polkit = "5.0.0"
 
@@ -64,7 +71,7 @@ tauri-winrt-notification = "0.7"
 # macOS < 14 guard for data_store_identifier (per-account isolation). Already at
 # 0.3.2 in Cargo.lock via the dependency graph; the NSProcessInfo feature must be
 # explicit. Inert on Linux/Windows. NSString + NSError added for the Touch ID backend.
-objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString", "NSError", "NSObject", "NSData", "NSDictionary", "NSBundle", "NSUUID"] }
+objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString", "NSError", "NSObject", "NSData", "NSDictionary", "NSBundle", "NSUUID", "NSUserDefaults"] }
 # CGRect/CGPoint/CGSize for the synchronous NSWindow frame restore in menubar.rs.
 objc2-core-foundation = "0.3.2"
 objc2-local-authentication = { version = "0.3.2", features = ["LAContext", "block2"] }
@@ -75,6 +82,7 @@ block2 = "0.6"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"  # native folder/PNG pickers, called from Rust only (no JS permission): custom download folder + app icon
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"

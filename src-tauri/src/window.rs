@@ -105,7 +105,6 @@ fn wajs_when_ready() -> String {
     script.push_str("}start();})();");
     script
 }
-const APP_ICON: &[u8] = include_bytes!("../icons/128x128.png");
 
 /// Platform routing keeps the existing non-Windows account-window flow.
 pub fn open_account_window(app: &AppHandle, account: &Account, hidden: bool) -> tauri::Result<()> {
@@ -115,14 +114,24 @@ pub fn open_account_window(app: &AppHandle, account: &Account, hidden: bool) -> 
     }
     #[cfg(not(windows))]
     {
-        build_account_window(app, account, hidden).map(|_| ())
+        if crate::sessions::enabled() {
+            crate::sessions::open_account(app, account, hidden)
+        } else {
+            build_account_window(app, account, hidden).map(|_| ())
+        }
     }
 }
 
 // Keep navigation, injection and download hooks identical across platform builders.
 macro_rules! account_webview {
     ($builder:expr, $app:ident, $label:ident) => {
-        $builder
+        // Proxy (issue #52): every account webview gets the same proxy, so no
+        // account bypasses it and WebView2 sees identical browser arguments on
+        // every webview that shares an environment.
+        (match crate::proxy::webview_url(&crate::settings::load($app)) {
+            Some(url) => $builder.proxy_url(url),
+            None => $builder,
+        })
             .user_agent(&user_agent())
             // Keep WhatsApp syncing while the window is hidden, minimized, or
             // left alone. WebKit's default suspends an inactive WKWebView, and
@@ -130,14 +139,23 @@ macro_rules! account_webview {
             // unused, until the socket's heartbeat no longer fires. `Disabled`
             // leaves scheduling alone. Only macOS 14+ honours it.
             .background_throttling(BackgroundThrottlingPolicy::Disabled)
+            // Zoom is ours (settings + bridge.js shortcuts). Keep WebView2's own
+            // Ctrl+wheel / Ctrl+plus zoom and wry's WebKitGTK hotkey script off,
+            // so the two never stack or drift apart.
+            .zoom_hotkeys_enabled(false)
             .initialization_script(crate::i18n::init_script())
             .initialization_script(if cfg!(windows) {
                 format!("window.__WHATRUST_WINDOWS__=true;window.__whatrustNotificationEpoch={};window.__whatrustLocked={};",$app.state::<crate::notify::Recent>().epoch(),!crate::lock::is_unlocked($app))
+            } else if crate::sessions::enabled() {
+                // Linux/macOS single-window mode: header switcher instead of
+                // the legacy in-page one; notifications keep their own path.
+                "window.__WHATRUST_SINGLE__=true;".to_string()
             } else {
                 String::new()
             })
             .initialization_script(include_str!("../resources/integration.js"))
             .initialization_script(BRIDGE_JS)
+            .initialization_script(include_str!("../resources/privacy.js"))
             // WA-JS (Apache-2.0) reads WhatsApp's own media loader so a voice
             // note can be transcribed without pressing play. voice.js renders
             // the transcript under the bubble. See resources/wppconnect-wa.LICENSE.
@@ -190,6 +208,11 @@ macro_rules! account_webview {
                 let downloads = app.state::<crate::downloads::Downloads>();
                 match event {
                     tauri::webview::DownloadEvent::Requested { url, destination } => {
+                        // A custom folder (issue #40), if it is still usable; otherwise
+                        // the OS Downloads folder, as before.
+                        let custom_dir = crate::downloads::configured_dir(
+                            crate::settings::load(app).download_dir.as_deref(),
+                        );
                         #[cfg(windows)]
                         {
                             let suggested = destination
@@ -198,6 +221,7 @@ macro_rules! account_webview {
                                 .unwrap_or("download");
                             let Some(path) = choose_download_destination(
                                 suggested,
+                                custom_dir.as_deref(),
                                 webview.window().hwnd().ok(),
                             ) else {
                                 crate::dlog::log("download: save dialog cancelled");
@@ -206,7 +230,12 @@ macro_rules! account_webview {
                             *destination = path;
                         }
                         #[cfg(not(windows))]
-                        ensure_download_destination(destination, app.path().download_dir().ok());
+                        {
+                            ensure_download_destination(destination, app.path().download_dir().ok());
+                            if let Some(dir) = &custom_dir {
+                                crate::downloads::place_in(dir, destination);
+                            }
+                        }
                         downloads.requested(url.as_str(), destination);
                         // Log routing only — never the file name (matches dlog's no-PII rule).
                         crate::dlog::log(&format!(
@@ -239,7 +268,11 @@ macro_rules! account_webview {
                         #[cfg(windows)]
                         let focused = crate::sessions::account_focused(app, webview.label());
                         #[cfg(not(windows))]
-                        let focused = webview.window().is_focused().unwrap_or(false);
+                        let focused = if crate::sessions::enabled() {
+                            crate::sessions::account_focused(app, webview.label())
+                        } else {
+                            webview.window().is_focused().unwrap_or(false)
+                        };
                         if !shown || !focused {
                             if success {
                                 let body = match done.as_ref().and_then(|(_, p)| p.file_name()) {
@@ -288,14 +321,16 @@ pub(crate) fn build_account_window(
     if let Some(w) = app.get_webview_window(&label) {
         return Ok(w);
     }
+    crate::proxy::check_platform(&crate::settings::load(app))?;
 
     let url = "https://web.whatsapp.com/".parse().expect("valid url");
-    let icon = tauri::image::Image::from_bytes(APP_ICON)?;
+    let icon = crate::appicon::current(app);
 
     let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
         .title(format!("whatRust — {}", account.name))
         .inner_size(1100.0, 800.0)
         .min_inner_size(560.0, 480.0)
+        .decorations(crate::decorations::show(app))
         .icon(icon)?;
     let builder = account_webview!(builder, app, label)
         .additional_browser_args(WEBVIEW2_SYNC_ARGS)
@@ -325,6 +360,9 @@ pub(crate) fn build_account_window(
     #[cfg(target_os = "macos")]
     crate::webcrypto::attach(account.store_uuid);
     let win = builder.build()?;
+    // Issue #73: covers windows created after startup too (no-op once done).
+    #[cfg(target_os = "macos")]
+    crate::keyfix::install();
     crate::dlog::log("account window: WebView created");
     if !start_hidden {
         let _ = win.show();
@@ -352,43 +390,89 @@ pub(crate) fn build_account_window(
     apply_zoom(&win, crate::settings::load(app).zoom);
     register_focus_listener(app, &win);
     register_drop_handler(&win);
-    enable_webview_media(&win);
+    enable_webview_media(win.as_ref());
     Ok(win)
 }
 
-/// Windows views are children from birth. Reparenting a WebviewWindow does
+/// Single-window views are children from birth. Reparenting a WebviewWindow does
 /// not change Wry's non-child sizing behavior and can leave stale client bounds.
-#[cfg(windows)]
 pub(crate) fn build_account_view(
     app: &AppHandle,
     parent: &tauri::Window,
     account: &Account,
 ) -> tauri::Result<tauri::Webview> {
     let label = accounts::window_label(&account.id);
+    crate::proxy::check_platform(&crate::settings::load(app))?;
     let builder = tauri::WebviewBuilder::new(
         &label,
         WebviewUrl::External("https://web.whatsapp.com/".parse().expect("valid url")),
     );
-    let mut builder = account_webview!(builder, app, label)
-        .additional_browser_args(WEBVIEW2_SYNC_ARGS)
-        .disable_drag_drop_handler();
-    if account.id != "default" {
-        builder = builder.data_directory(accounts::profile_dir(app, &account.id)?);
-    }
+    let builder = account_webview!(builder, app, label).additional_browser_args(WEBVIEW2_SYNC_ARGS);
+    // Windows/macOS let the engine deliver file drops to the page itself. On
+    // Linux the page never receives them, so Tauri's handler stays on and
+    // `register_view_drop_handler` streams them into the visible account.
+    #[cfg(any(windows, target_os = "macos"))]
+    let builder = builder.disable_drag_drop_handler();
+    #[cfg(windows)]
+    let builder = {
+        let mut builder = builder;
+        if account.id != "default" {
+            builder = builder.data_directory(accounts::profile_dir(app, &account.id)?);
+        }
+        builder
+    };
+    #[cfg(not(windows))]
+    let builder = apply_view_isolation(builder, account, app);
     let view = parent.add_child(
         builder,
         tauri::LogicalPosition::new(0., 0.),
         tauri::LogicalSize::new(1100., 800.),
     )?;
     view.set_auto_resize(false)?;
+    crate::sessions::prepare_view(&view);
     let _ = view.set_zoom(crate::settings::sanitize_zoom(
         crate::settings::load(app).zoom,
     ));
-    let handle = app.clone();
-    let view_label = label.clone();
-    view.with_webview(move |platform| enable_media_windows(platform, handle, view_label))?;
+    #[cfg(windows)]
+    {
+        let handle = app.clone();
+        let view_label = label.clone();
+        view.with_webview(move |platform| enable_media_windows(platform, handle, view_label))?;
+    }
+    #[cfg(not(windows))]
+    {
+        enable_webview_media(&view);
+        #[cfg(target_os = "linux")]
+        register_view_drop_handler(app, &view);
+    }
     crate::dlog::log("account view: native child created");
     Ok(view)
+}
+
+/// Same isolation rules as [`apply_isolation`], for a child webview builder.
+#[cfg(not(windows))]
+fn apply_view_isolation(
+    builder: tauri::webview::WebviewBuilder<tauri::Wry>,
+    account: &Account,
+    app: &AppHandle,
+) -> tauri::webview::WebviewBuilder<tauri::Wry> {
+    if account.id == "default" {
+        return builder;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(dir) = accounts::profile_dir(app, &account.id) {
+            let _ = std::fs::create_dir_all(&dir);
+            return builder.data_directory(dir);
+        }
+        builder
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        let uuid = account.store_uuid.unwrap_or_else(accounts::gen_store_uuid);
+        builder.data_store_identifier(uuid)
+    }
 }
 
 /// Native Windows Save As dialog. Returning `None` means the user cancelled,
@@ -396,6 +480,7 @@ pub(crate) fn build_account_view(
 #[cfg(windows)]
 fn choose_download_destination(
     suggested_name: &str,
+    initial_dir: Option<&std::path::Path>,
     owner: Option<windows::Win32::Foundation::HWND>,
 ) -> Option<std::path::PathBuf> {
     use std::os::windows::ffi::OsStringExt;
@@ -411,6 +496,14 @@ fn choose_download_destination(
     }
     let filter: Vec<u16> = "Todos os arquivos\0*.*\0\0".encode_utf16().collect();
     let title: Vec<u16> = "Salvar arquivo\0".encode_utf16().collect();
+    // The dialog opens in the configured download folder (issue #40); without
+    // one, Windows picks its usual last-used folder.
+    let initial: Vec<u16> = {
+        use std::os::windows::ffi::OsStrExt;
+        initial_dir
+            .map(|d| d.as_os_str().encode_wide().chain(Some(0)).collect())
+            .unwrap_or_default()
+    };
     let mut dialog = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
         hwndOwner: owner.unwrap_or_default(),
@@ -418,6 +511,11 @@ fn choose_download_destination(
         lpstrFile: PWSTR(buffer.as_mut_ptr()),
         nMaxFile: buffer.len() as u32,
         lpstrTitle: PCWSTR(title.as_ptr()),
+        lpstrInitialDir: if initial.is_empty() {
+            PCWSTR::null()
+        } else {
+            PCWSTR(initial.as_ptr())
+        },
         Flags: OFN_EXPLORER | OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
         ..Default::default()
     };
@@ -530,56 +628,100 @@ where
     }
 }
 
-fn register_drop_handler(win: &WebviewWindow) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    // Process-wide drop id: lets the page key concurrent streams from several
-    // windows/drops without guessing by file name or content.
-    static DROP_SEQ: AtomicU64 = AtomicU64::new(1);
-    // One worker per webview is deliberate: independent threads can finish out of
-    // order, allowing a later small drop to overtake an earlier large drop. The event
-    // callback only enqueues paths, so it stays non-blocking while FIFO order is exact.
-    let (drop_tx, drop_rx) = std::sync::mpsc::channel();
-    let worker_win = win.clone();
-    std::thread::spawn(move || {
-        run_drop_queue(drop_rx, |drop_id, paths| {
-            stream_drop(&worker_win, drop_id, paths)
-        });
-    });
+/// Process-wide drop id: lets the page key concurrent streams from several
+/// windows/drops without guessing by file name or content.
+static DROP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-    let win = win.clone();
-    win.clone().on_window_event(move |event| {
-        let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) = event
+type DropTx = std::sync::mpsc::Sender<(u64, Vec<std::path::PathBuf>)>;
+
+/// One worker per webview is deliberate: independent threads can finish out of
+/// order, allowing a later small drop to overtake an earlier large drop. The event
+/// callback only enqueues paths, so it stays non-blocking while FIFO order is exact.
+fn spawn_drop_worker(view: tauri::Webview) -> DropTx {
+    let (drop_tx, drop_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        run_drop_queue(drop_rx, |drop_id, paths| stream_drop(&view, drop_id, paths));
+    });
+    drop_tx
+}
+
+/// Enqueue one OS drop for streaming into `view`.
+fn enqueue_drop(
+    app: &AppHandle,
+    drop_tx: &DropTx,
+    paths: &[std::path::PathBuf],
+    position: &tauri::PhysicalPosition<f64>,
+) {
+    let drop_id = DROP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::dlog::log(&format!(
+        "dragdrop: drop #{drop_id}: {} path(s) at ({:.0},{:.0})",
+        paths.len(),
+        position.x,
+        position.y
+    ));
+    if paths.is_empty() {
+        // Seen on macOS for promise-only drag sources (e.g. dragging straight out
+        // of Photos.app): wry reads only NSFilenamesPboardType, so the drop lands
+        // with zero paths. Tell the user instead of silently doing nothing.
+        crate::notify::show(
+            app,
+            tr("Nenhum arquivo foi anexado").as_ref(),
+            tr("Não é possível arrastar esse item diretamente. Arraste o arquivo pelo Explorador de Arquivos ou use o botão de anexo (+).").as_ref(),
+        );
+        return;
+    }
+    if drop_tx.send((drop_id, paths.to_vec())).is_err() {
+        crate::dlog::log(&format!(
+            "dragdrop: drop #{drop_id}: per-window worker unavailable"
+        ));
+        crate::notify::show(
+            app,
+            tr("Arquivos não anexados").as_ref(),
+            tr("Não foi possível processar os arquivos. Tente novamente.").as_ref(),
+        );
+    }
+}
+
+/// Per-account windows. Listen on the WEBVIEW, not the window: with tauri's
+/// `unstable` feature (needed for child webviews) a WebviewWindow's webview is
+/// created as a window child, so wry reports drops as `WebviewEvent::DragDrop`
+/// and `WindowEvent::DragDrop` never fires. Listening on the window is what
+/// silently broke Linux drag-and-drop in 0.6.9 and 0.6.10.
+fn register_drop_handler(win: &WebviewWindow) {
+    let drop_tx = spawn_drop_worker(win.as_ref().clone());
+    let app = win.app_handle().clone();
+    win.on_webview_event(move |event| {
+        let tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) = event
         else {
             return;
         };
-        let drop_id = DROP_SEQ.fetch_add(1, Ordering::Relaxed);
-        crate::dlog::log(&format!(
-            "dragdrop: drop #{drop_id}: {} path(s) at ({:.0},{:.0})",
-            paths.len(),
-            position.x,
-            position.y
-        ));
-        if paths.is_empty() {
-            // Seen on macOS for promise-only drag sources (e.g. dragging straight out
-            // of Photos.app): wry reads only NSFilenamesPboardType, so the drop lands
-            // with zero paths. Tell the user instead of silently doing nothing.
-            crate::notify::show(
-                win.app_handle(),
-                tr("Nenhum arquivo foi anexado").as_ref(),
-                tr("Não é possível arrastar esse item diretamente. Arraste o arquivo pelo Explorador de Arquivos ou use o botão de anexo (+).").as_ref(),
-            );
+        enqueue_drop(&app, &drop_tx, paths, position);
+    });
+}
+
+/// Single-window mode (Linux): each account's child webview gets its own drop
+/// target and worker. A drop is only streamed when this view is the account the
+/// user is looking at; a hidden account never receives one.
+#[cfg(target_os = "linux")]
+fn register_view_drop_handler(app: &AppHandle, view: &tauri::Webview) {
+    let drop_tx = spawn_drop_worker(view.clone());
+    let app = app.clone();
+    let label = view.label().to_string();
+    view.on_webview_event(move |event| {
+        let tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) = event
+        else {
+            return;
+        };
+        if !crate::sessions::drop_target(&app, &label) {
+            crate::dlog::log(&format!(
+                "dragdrop: drop ignored, {label} is not the visible account view"
+            ));
             return;
         }
-        if drop_tx.send((drop_id, paths.clone())).is_err() {
-            crate::dlog::log(&format!(
-                "dragdrop: drop #{drop_id}: per-window worker unavailable"
-            ));
-            crate::notify::show(
-                win.app_handle(),
-                tr("Arquivos não anexados").as_ref(),
-                tr("Não foi possível processar os arquivos. Tente novamente.").as_ref(),
-            );
-        }
+        crate::dlog::log(&format!(
+            "dragdrop: drop routed to visible account view {label}"
+        ));
+        enqueue_drop(&app, &drop_tx, paths, position);
     });
 }
 
@@ -830,7 +972,7 @@ fn stream_chunks<R: std::io::Read>(
 
 /// Stream one planned file to the page as begin + chunk(s) + end.
 fn stream_one_file(
-    w: &WebviewWindow,
+    w: &tauri::Webview,
     drop_id: u64,
     idx: usize,
     f: &PlannedFile,
@@ -879,7 +1021,7 @@ fn stream_one_file(
 }
 
 /// Plan, stream, and commit one OS drop, then surface the outcome to the user.
-fn stream_drop(w: &WebviewWindow, drop_id: u64, paths: &[std::path::PathBuf]) {
+fn stream_drop(w: &tauri::Webview, drop_id: u64, paths: &[std::path::PathBuf]) {
     let (planned, mut skips) = plan_drop(paths);
     let planned_total: u64 = planned.iter().map(|f| f.len).sum();
     // For big drops (which now legitimately happen with the raised caps) the old silent
@@ -1210,7 +1352,7 @@ pub fn ensure_isolation_supported() -> Result<(), String> {
 /// system webview no matter what we spoof; WhatsApp's "your browser doesn't
 /// support calling" is, on Linux, literally true. Calls can work on Windows
 /// (WebView2 is Chromium and ships WebRTC).
-fn enable_webview_media(win: &WebviewWindow) {
+fn enable_webview_media(win: &tauri::Webview) {
     #[cfg(target_os = "linux")]
     {
         use webkit2gtk::glib::prelude::ObjectExt;
@@ -1336,7 +1478,7 @@ fn disable_hidden_timer_throttling(settings: &webkit2gtk::Settings) {
 
 /// Stop WKWebView from lengthening timers while the window is hidden or minimized.
 #[cfg(target_os = "macos")]
-fn disable_hidden_timer_throttling_macos(win: &WebviewWindow) {
+fn disable_hidden_timer_throttling_macos(win: &tauri::Webview) {
     use objc2::runtime::{AnyObject, Bool, Sel};
     use objc2::{msg_send, sel};
     let _ = win.with_webview(|webview| unsafe {
@@ -1511,6 +1653,14 @@ fn enable_media_windows(webview: tauri::webview::PlatformWebview, app: AppHandle
                     webview2_com::take_pwstr(title),
                     webview2_com::take_pwstr(body),
                 );
+                // The sender's picture: a PNG data URI is read here; blob:/https:
+                // ones need the page (notification_icon), see native_icon.rs.
+                let mut icon_uri = windows_core::PWSTR::null();
+                let icon_uri = match notification.IconUri(&mut icon_uri) {
+                    Ok(()) => webview2_com::take_pwstr(icon_uri),
+                    Err(_) => String::new(),
+                };
+                let icon_uri = crate::native_icon::classify(&icon_uri);
                 // Ours to show: WebView2 draws nothing itself.
                 args.SetHandled(true)?;
                 let identity = crate::notify::event_id();
@@ -1541,12 +1691,28 @@ fn enable_media_windows(webview: tauri::webview::PlatformWebview, app: AppHandle
                         },
                     );
                 });
+                let icon = match icon_uri {
+                    crate::native_icon::IconUri::NeedsPage => {
+                        crate::notify::native_hold(
+                            &app,
+                            crate::native_icon::Held {
+                                label: native_label.clone(),
+                                title,
+                                body,
+                                identity,
+                            },
+                        );
+                        return Ok(());
+                    }
+                    crate::native_icon::IconUri::Png(png) => Some(png),
+                    crate::native_icon::IconUri::None => None,
+                };
                 crate::notify::from_event(
                     &app,
                     &native_label,
                     &title,
                     &body,
-                    None,
+                    icon.as_deref(),
                     crate::notify::Source::WebView2,
                     &identity,
                     false,
@@ -1577,7 +1743,13 @@ pub fn show_account(app: &AppHandle, label: &str) {
         crate::sessions::activate(app, label);
     }
     #[cfg(not(windows))]
-    show_account_legacy(app, label);
+    {
+        if crate::sessions::enabled() {
+            crate::sessions::activate(app, label);
+        } else {
+            show_account_legacy(app, label);
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -1663,6 +1835,15 @@ pub fn toggle_decision(active_visible: Option<bool>) -> ToggleAct {
     }
 }
 
+/// Flip the privacy blur in every account webview (not settings/lock).
+pub fn toggle_privacy_blur(app: &AppHandle) {
+    for (label, view) in app.webviews() {
+        if crate::accounts::id_from_label(&label).is_some() {
+            let _ = view.eval("window.__whatrustPrivacy&&window.__whatrustPrivacy.toggle()");
+        }
+    }
+}
+
 /// Toggle the active account window: hide it if visible, otherwise show + focus it.
 /// The "show" path goes through `show_active`, which defers to the lock screen when
 /// the app is locked — so a toggle (e.g. an OS-bound `whatrust --toggle` on Wayland,
@@ -1675,7 +1856,13 @@ pub fn toggle_active(app: &AppHandle) {
         crate::sessions::toggle(app);
     }
     #[cfg(not(windows))]
-    toggle_active_legacy(app);
+    {
+        if crate::sessions::enabled() {
+            crate::sessions::toggle(app);
+        } else {
+            toggle_active_legacy(app);
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -1725,7 +1912,15 @@ fn open_settings_window_inner(app: &AppHandle) {
         }
     }
     #[cfg(not(windows))]
-    open_settings_legacy(app);
+    {
+        if crate::sessions::enabled() {
+            if let Err(e) = crate::sessions::open_panel(app, None) {
+                crate::dlog::log(&format!("panel: {e}"));
+            }
+        } else {
+            open_settings_legacy(app);
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -1744,6 +1939,7 @@ fn open_settings_legacy(app: &AppHandle) {
         .title(tr("whatRust — Configurações"))
         .inner_size(860.0, 720.0)
         .min_inner_size(440.0, 520.0)
+        .decorations(crate::decorations::show(app))
         .resizable(true)
         .visible(false)
         .build()

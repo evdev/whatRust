@@ -295,9 +295,14 @@ pub fn from_event(
     #[cfg(windows)]
     let focused = crate::sessions::account_focused(app, label);
     #[cfg(not(windows))]
-    let focused = app.get_webview(label).is_some_and(|v| {
-        v.window().is_focused().unwrap_or(false) && v.window().is_visible().unwrap_or(false)
-    });
+    let focused = if crate::sessions::enabled() {
+        // One shared window: only the selected account counts as being looked at.
+        crate::sessions::account_focused(app, label)
+    } else {
+        app.get_webview(label).is_some_and(|v| {
+            v.window().is_focused().unwrap_or(false) && v.window().is_visible().unwrap_or(false)
+        })
+    };
     let s = crate::settings::load(app);
     let id = event_id();
     let r = app.state::<Recent>();
@@ -338,6 +343,7 @@ pub fn from_event(
             identity: identity.into(),
             native: source == Source::WebView2,
         }),
+        false,
     );
     #[cfg(not(windows))]
     {
@@ -435,12 +441,25 @@ pub fn visual_signal(
 pub fn show(app: &AppHandle, title: &str, body: &str) {
     show_with_icon(app, title, body, None);
 }
+
+/// A notice about an app update. On Windows, clicking the toast opens
+/// Settings → Updates; the other platforms' notification plugin has no click
+/// callback, so there the tray item "Update to X" leads to the same page.
+pub fn show_update(app: &AppHandle, title: &str, body: &str) {
+    if !crate::lock::is_unlocked(app) {
+        return;
+    }
+    #[cfg(windows)]
+    windows_toast(app, title, body, None, None, None, true);
+    #[cfg(not(windows))]
+    show(app, title, body);
+}
 pub fn show_for_account(app: &AppHandle, label: &str, title: &str, body: &str) {
     if !crate::lock::is_unlocked(app) {
         return;
     }
     #[cfg(windows)]
-    windows_toast(app, title, body, None, Some(label.into()), None);
+    windows_toast(app, title, body, None, Some(label.into()), None, false);
     #[cfg(not(windows))]
     {
         let _ = label;
@@ -452,7 +471,15 @@ pub fn show_with_icon(app: &AppHandle, title: &str, body: &str, icon: Option<&Pa
         return;
     }
     #[cfg(windows)]
-    windows_toast(app, title, body, icon.map(Path::to_path_buf), None, None);
+    windows_toast(
+        app,
+        title,
+        body,
+        icon.map(Path::to_path_buf),
+        None,
+        None,
+        false,
+    );
     #[cfg(not(windows))]
     {
         use tauri_plugin_notification::NotificationExt;
@@ -521,6 +548,65 @@ pub fn on_lock(app: &AppHandle) {
     }
 }
 
+/// Deliver a held WebView2 notification on the UI thread, with the picture the
+/// page supplied (if any). The same `from_event` path as an immediate delivery.
+#[cfg(windows)]
+fn deliver_held(app: &AppHandle, held: crate::native_icon::Held, icon: Option<String>) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        from_event(
+            &handle,
+            &held.label,
+            &held.title,
+            &held.body,
+            icon.as_deref(),
+            Source::WebView2,
+            &held.identity,
+            false,
+            None,
+        );
+    });
+}
+
+/// A native notification whose picture the page must supply: hold it until
+/// `native_icon_arrived` or the deadline, whichever is first.
+#[cfg(windows)]
+pub fn native_hold(app: &AppHandle, held: crate::native_icon::Held) {
+    use crate::native_icon::{Arrival, Broker, WAIT};
+    match app.state::<Broker>().native_arrived(held, Instant::now()) {
+        Arrival::Ready(held, icon) => deliver_held(app, held, icon),
+        Arrival::Wait(token) => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(WAIT).await;
+                if let Some(held) = app.state::<Broker>().expire(token) {
+                    crate::dlog::log("notification: page picture did not arrive in time");
+                    deliver_held(&app, held, None);
+                }
+            });
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn native_icon_arrived(
+    app: &AppHandle,
+    label: &str,
+    title: &str,
+    body: &str,
+    icon: Option<String>,
+) {
+    if let Some((held, icon)) = app.state::<crate::native_icon::Broker>().icon_arrived(
+        label,
+        title,
+        body,
+        icon,
+        Instant::now(),
+    ) {
+        deliver_held(app, held, icon);
+    }
+}
+
 #[cfg(windows)]
 pub fn cancel_native(app: &AppHandle, identity: &str) {
     // CloseRequested runs on the WebView2 UI thread. WinRT history removal
@@ -553,6 +639,7 @@ fn windows_toast(
     icon: Option<std::path::PathBuf>,
     account: Option<String>,
     delivery: Option<Delivery>,
+    open_updates: bool,
 ) {
     use windows::{
         core::{IInspectable, HSTRING},
@@ -615,7 +702,9 @@ fn windows_toast(
                             crate::window::native_report(&click, &d.identity, "clicked");
                         }
                     }
-                    if let Some(label) = &account {
+                    if open_updates {
+                        crate::update_service::open_updates(&click);
+                    } else if let Some(label) = &account {
                         crate::window::show_account(&click, label);
                     } else {
                         crate::window::show_main(&click);

@@ -1,34 +1,43 @@
 mod accounts;
+mod appicon;
 mod applock;
 mod aumid;
 mod autoreply;
 mod badge;
 mod biometric;
 mod commands;
+mod decorations;
 mod dlog;
 mod downloads;
+#[cfg(target_os = "linux")]
+mod gpu;
 mod i18n;
 mod integration;
 mod jsonfile;
+#[cfg(target_os = "macos")]
+mod keyfix;
 mod keys;
 mod links;
 mod llm;
 mod lock;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod menubar;
+mod native_icon;
 mod notif_icon;
 mod notify;
 mod opener;
-#[cfg(windows)]
+mod proxy;
+mod scrollbars;
 mod sessions;
 mod settings;
 #[cfg(all(windows, debug_assertions))]
 mod smoke;
 mod todo;
 mod tray;
-#[cfg(windows)]
 mod ui_health;
 mod unread;
+mod update_service;
+mod updater;
 mod voice;
 #[cfg(target_os = "macos")]
 mod webcrypto;
@@ -44,6 +53,15 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // macOS: force overlay scrollers BEFORE any window/webview is created —
+    // AppKit caches NSScroller.preferredScrollerStyle on first use, and
+    // WKWebView's page scrollers are native, so web CSS cannot fix them.
+    // See scrollbars.rs. No-op on other platforms. The outcome is logged in
+    // setup, after dlog::init() (re)creates the log file.
+    let scrollers_forced = scrollbars::force_overlay_scrollers();
+    #[cfg(not(target_os = "macos"))]
+    let _ = scrollers_forced;
+
     // Linux: expose SharedArrayBuffer in the webview. WhatsApp Web's Chrome
     // codepath (which we present ourselves as — see window::CHROME_UA) runs its
     // wasm media/crypto workers on SharedArrayBuffer, and desktop Chrome exposes
@@ -59,17 +77,12 @@ pub fn run() {
         std::env::set_var("JSC_useSharedArrayBuffer", "1");
     }
 
-    // Linux (issue #51): WebKitGTK's DMA-BUF renderer keeps scrolling and typing
-    // smooth on Mesa (Intel/AMD) but has crashed or rendered blank with NVIDIA's
-    // proprietary driver, so turn it off only there. The Flatpak used to force
-    // it off for everyone, which made WhatsApp stutter. A value the user set,
-    // e.g. through `flatpak override --env`, is respected either way.
+    // Linux (issue #51): WebKitGTK's DMA-BUF renderer keeps scrolling smooth
+    // but has crashed or rendered blank when NVIDIA's proprietary driver drives
+    // the display; turn it off only then (not on hybrid Intel/AMD + NVIDIA
+    // laptops). A value the user set is respected. See `gpu`.
     #[cfg(target_os = "linux")]
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
-        && std::path::Path::new("/proc/driver/nvidia/version").exists()
-    {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-    }
+    gpu::apply_webkit_renderer_env();
 
     let smoke_mode =
         cfg!(debug_assertions) && std::env::var("WHATRUST_SMOKE").as_deref() == Ok("1");
@@ -131,6 +144,13 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_notification::init());
     }
 
+    // File/folder pickers for Settings. Only Rust calls them (commands::pick_*);
+    // no capability grants the plugin's own commands to any page.
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_dialog::init());
+    }
+
     #[cfg(desktop)]
     {
         builder = builder
@@ -150,11 +170,17 @@ pub fn run() {
             )
             .plugin(
                 tauri_plugin_global_shortcut::Builder::new()
-                    .with_handler(|app, _shortcut, event| {
+                    .with_handler(|app, shortcut, event| {
                         // In-process global hotkey (X11 / Windows / macOS). On Wayland
                         // this won't fire — use `whatrust --toggle` via an OS shortcut.
                         if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                            window::toggle_active(app);
+                            let s = settings::load(app);
+                            let is_blur = settings::is_blur_shortcut(&s, shortcut);
+                            if is_blur {
+                                window::toggle_privacy_blur(app);
+                            } else {
+                                window::toggle_active(app);
+                            }
                         }
                     })
                     .build(),
@@ -169,13 +195,13 @@ pub fn run() {
             ));
     }
 
-    #[cfg(windows)]
     let builder = builder.manage(sessions::Sessions::default());
 
     builder
         .manage(accounts::UnreadMap::default())
         .manage(downloads::Downloads::default())
         .manage(notify::Recent::default())
+        .manage(native_icon::Broker::default())
         .manage(integration::Integration::default())
         .manage(accounts::ActiveAccount::new("wa-default".into()))
         .manage(voice::VoiceState::default())
@@ -194,15 +220,20 @@ pub fn run() {
             integration::test_notification,
             integration::open_notification_settings,
             commands::notify,
+            commands::notification_icon,
             commands::set_unread,
             commands::dlog,
             commands::open_download,
             commands::reveal_download,
             commands::switcher_accounts,
             commands::switch_account,
+            commands::zoom_step,
             commands::get_settings,
             commands::set_settings,
             commands::open_settings,
+            commands::pick_download_dir,
+            commands::choose_app_icon,
+            commands::reset_app_icon,
             commands::list_accounts,
             commands::add_account,
             commands::remove_account,
@@ -213,9 +244,15 @@ pub fn run() {
             commands::set_app_lock_password,
             commands::change_app_lock_password,
             commands::disable_app_lock,
+            commands::restart_app,
             commands::set_app_lock_options,
             commands::set_biometric_enabled,
             commands::lock_app,
+            commands::get_update_status,
+            commands::check_for_updates,
+            commands::install_update,
+            commands::restart_to_update,
+            commands::open_release_page,
             commands::unlock_password,
             commands::unlock_biometric,
             commands::reset_app_lock,
@@ -253,8 +290,9 @@ pub fn run() {
             // Menu-bar-only on macOS: load settings early (the rest of setup needs them
             // below) so the Dock icon can be dropped before the app starts presenting.
             let mut s = settings::load(app.handle());
+            proxy::note_startup(&s);
             #[cfg(target_os = "macos")]
-            if s.menubar_only {
+            if s.menubar_only || s.hide_dock_icon {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
 
@@ -264,6 +302,12 @@ pub fn run() {
             // way to see notification failures on a Windows GUI build with no
             // console. See dlog.rs.
             dlog::init();
+            #[cfg(target_os = "macos")]
+            dlog::log(if scrollers_forced {
+                "scrollers: forced overlay (AppleShowScrollBars=WhenScrolling in app domain)"
+            } else {
+                "scrollers: overlay already selected"
+            });
 
             // Windows: register our AppUserModelID so WinRT toast notifications
             // actually render for the installed app (no-op elsewhere). Must run
@@ -278,6 +322,8 @@ pub fn run() {
                 s.start_minimized = true;
                 settings::save(handle, &s)?;
             }
+            // Window model for this run (Linux/macOS opt-in; Windows always single).
+            sessions::init_mode(&s);
             let args: Vec<String> = std::env::args().collect();
             let start_hidden = settings::start_hidden(s.start_minimized, &args);
 
@@ -352,9 +398,14 @@ pub fn run() {
                 window::open_account_window(handle, account, open_hidden || !is_startup)?;
             }
             dlog::log("startup: account windows built");
+            // tao's content view must not re-interpret keys the webview left
+            // unhandled (issue #73); needs a tao window to exist.
+            #[cfg(target_os = "macos")]
+            keyfix::install();
             #[cfg(windows)]
             ui_health::start(handle);
             tray::setup(handle)?;
+            update_service::start(handle);
             // Let setup return before accessing tray/window APIs again. This
             // avoids waiting on the Windows UI loop while it is being created.
             let startup_handle = handle.clone();

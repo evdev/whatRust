@@ -10,7 +10,7 @@
   </head>
   <body>
     <header class="app-header"><div><strong>Configurações</strong><span>whatRust</span></div><button id="back-to-chat" type="button" class="secondary back-button" aria-label="Voltar ao WhatsApp" title="Voltar ao WhatsApp" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5 M12 5l-7 7 7 7"/></svg><span>Voltar ao WhatsApp</span></button></header>
-    <div class="settings-layout"><nav class="settings-nav" aria-label="Configurações"><a href="#sec-contas">Contas</a><a href="#sec-notificacoes">Notificações</a><a href="#sec-voz">Notas de voz</a><a href="#sec-standin">Stand-in</a><a href="#sec-aparencia">Aparência</a><a href="#sec-seguranca">Segurança</a><a href="#sec-sistema">Inicialização</a><a href="#sec-atalhos">Atalhos</a><a href="#sec-diagnostico">Diagnóstico</a></nav>
+    <div class="settings-layout"><nav class="settings-nav" aria-label="Configurações"><a href="#sec-contas">Contas</a><a href="#sec-notificacoes">Notificações</a><a href="#sec-voz">Notas de voz</a><a href="#sec-standin">Stand-in</a><a href="#sec-aparencia">Aparência</a><a href="#sec-seguranca">Segurança</a><a href="#sec-sistema">Inicialização</a><a href="#sec-rede">Rede</a><a href="#sec-atualizacoes">Atualizações</a><a href="#sec-atalhos">Atalhos</a><a href="#sec-diagnostico">Diagnóstico</a></nav>
     <!-- Local preferences use familiar WhatsApp rows: titled
          groups of boxed-list rows, a title + subtitle on the left and the control
          on the right. Element ids are what main.js uses; keep them stable. -->
@@ -21,6 +21,13 @@
           <span class="row-text"><span class="row-title">Conta ao iniciar</span></span>
           <select id="startup_account" aria-label="Conta ao iniciar"></select>
         </label>
+        <div class="boxed-list" id="single_window_row" hidden>
+          <label class="row">
+            <span class="row-text"><span class="row-title">Mostrar todas as contas em uma janela</span>
+              <span class="row-subtitle" id="single_window_subtitle">Uma janela com um seletor de contas; as contas ocultas continuam conectadas. Requer reiniciar o whatRust.</span></span>
+            <input type="checkbox" class="switch" id="single_window" />
+          </label>
+        </div>
         <div id="accounts-list" class="boxed-list"></div>
         <div class="add-row">
           <input type="text" id="new_account_name" placeholder="Nome da nova conta" aria-label="Nome da nova conta" />
@@ -58,6 +65,11 @@
             <span class="row-text"><span class="row-title">Somente na barra de menus</span>
               <span class="row-subtitle" id="menubar_only_subtitle">Sem ícone no Dock nem janela principal — todas as contas continuam conectadas para notificações e cada uma abre como painel pela bandeja</span></span>
             <input type="checkbox" class="switch" id="menubar_only" />
+          </label>
+          <label class="row mac-only" hidden>
+            <span class="row-text"><span class="row-title">Ocultar ícone do Dock</span>
+              <span class="row-subtitle">Mantém a janela principal; o ícone da barra de menus passa a ser a forma de reabrir o whatRust</span></span>
+            <input type="checkbox" class="switch" id="hide_dock_icon" />
           </label>
         </div>
       </section>
@@ -194,6 +206,15 @@
               <option value="1.15">Grande</option>
             </select>
           </label>
+          <label class="row linux-only" id="title_bar_row" hidden>
+            <span class="row-text"><span class="row-title">Barra de título</span>
+              <span class="row-subtitle" id="title_bar_subtitle">Gerenciadores de janelas lado a lado, como o Hyprland, não usam barra de título.</span></span>
+            <select id="title_bar">
+              <option value="auto">Automático</option>
+              <option value="show">Mostrar</option>
+              <option value="hide">Ocultar</option>
+            </select>
+          </label>
           <label class="row">
             <span class="row-text"><span class="row-title">Idioma</span>
               <span class="row-subtitle">Idioma da interface do whatRust.</span></span>
@@ -202,7 +223,101 @@
               <option value="en">English</option>
             </select>
           </label>
+          <div class="row">
+            <span class="row-text"><span class="row-title">Ícone do aplicativo</span>
+              <span class="row-subtitle" id="icon_subtitle">Padrão</span></span>
+            <div class="hotkey-row">
+              <button type="button" id="choose_icon" class="secondary">Escolher PNG…</button>
+              <button type="button" id="reset_icon" class="secondary">Restaurar padrão</button>
+            </div>
+          </div>
+          <p class="group-note" id="icon_note">Imagem PNG quadrada, de 32 a 1024 px e até 5 MB. Vale para o aplicativo todo; a bandeja não muda. No Linux com Wayland, o ícone da janela vem do arquivo .desktop e não muda.</p>
+          <div class="row">
+            <span class="row-text"><span class="row-title">Pasta de downloads</span>
+              <span class="row-subtitle" id="download_dir_subtitle">Pasta Downloads do sistema</span></span>
+            <div class="hotkey-row">
+              <button type="button" id="choose_download_dir" class="secondary">Escolher pasta…</button>
+              <button type="button" id="reset_download_dir" class="secondary">Restaurar Downloads</button>
+            </div>
+          </div>
         </div>
+      </section>
+
+      <section class="group" id="sec-rede">
+        <h2 class="group-title">Rede</h2>
+        <div class="boxed-list">
+          <label class="row">
+            <span class="row-text"><span class="row-title">Proxy</span>
+              <span class="row-subtitle">Encaminha todo o tráfego das contas do WhatsApp por um proxy.</span></span>
+            <select id="proxy_mode">
+              <option value="off">Desativado</option>
+              <option value="socks5">SOCKS5</option>
+              <option value="http">HTTP</option>
+            </select>
+          </label>
+          <label class="row entry-row proxy-field">
+            <span class="row-title">Servidor</span>
+            <input type="text" id="proxy_host" autocomplete="off" spellcheck="false" placeholder="127.0.0.1" />
+          </label>
+          <label class="row entry-row proxy-field">
+            <span class="row-title">Porta</span>
+            <input type="text" id="proxy_port" inputmode="numeric" autocomplete="off" placeholder="1080" />
+          </label>
+        </div>
+        <p class="group-note">Proxy com usuário e senha não é suportado: os navegadores embutidos não aceitam credenciais por esse caminho. A alteração vale após reiniciar o whatRust.</p>
+        <p id="proxy_restart" class="hotkey-hint" hidden><span>Reinicie o whatRust para aplicar o proxy.</span> <button type="button" id="proxy_restart_btn" class="secondary">Reiniciar agora</button></p>
+      </section>
+
+      <section class="group" id="sec-atualizacoes">
+        <h2 class="group-title">Atualizações</h2>
+        <div class="boxed-list">
+          <label class="row">
+            <span class="row-text"><span class="row-title">Verificar atualizações automaticamente</span>
+              <span class="row-subtitle">Consulta o GitHub (api.github.com) um minuto após iniciar e a cada 6 horas. Só pergunta qual é a versão mais recente.</span></span>
+            <input type="checkbox" class="switch" id="auto_update_check" />
+          </label>
+          <label class="row">
+            <span class="row-text"><span class="row-title">Instalar atualizações automaticamente</span>
+              <span class="row-subtitle" id="auto_update_install_subtitle">Só age quando não é preciso senha.</span></span>
+            <input type="checkbox" class="switch" id="auto_update_install" />
+          </label>
+        </div>
+        <div class="boxed-list">
+          <div class="row">
+            <span class="row-text"><span class="row-title">Versão instalada</span>
+              <span class="row-subtitle" id="upd_current"></span></span>
+            <button type="button" id="upd_check" class="secondary">Verificar agora</button>
+          </div>
+          <div class="row">
+            <span class="row-text"><span class="row-title">Tipo de instalação</span>
+              <span class="row-subtitle" id="upd_method"></span></span>
+          </div>
+          <div class="row">
+            <span class="row-text"><span class="row-title">Última verificação</span>
+              <span class="row-subtitle" id="upd_last"></span></span>
+          </div>
+        </div>
+        <div id="upd_panel" class="upd-panel" hidden>
+          <h3 id="upd_title"></h3>
+          <progress id="upd_progress" max="100" hidden></progress>
+          <p id="upd_message" class="group-note" role="status" aria-live="polite"></p>
+          <p id="upd_error" class="hotkey-hint" role="alert" hidden></p>
+          <div class="group-actions">
+            <button type="button" id="upd_install" hidden>Baixar e instalar</button>
+            <button type="button" id="upd_apply" hidden>Reiniciar e instalar</button>
+            <button type="button" id="upd_restart" hidden>Reiniciar agora</button>
+            <button type="button" id="upd_page" class="secondary" hidden>Ver no GitHub</button>
+          </div>
+          <div id="upd_flatpak" class="upd-flatpak" hidden>
+            <code id="upd_command"></code>
+            <button type="button" id="upd_copy" class="secondary">Copiar</button>
+          </div>
+        </div>
+        <div id="upd_notes_box" hidden>
+          <h3>Novidades</h3>
+          <div id="upd_notes" class="notes"></div>
+        </div>
+        <p class="group-note">Versões 0.6.10 e anteriores não atualizam sozinhas: instale esta versão manualmente uma vez. Cada arquivo baixado é conferido com a soma de verificação (SHA-256) publicada na versão antes de ser instalado.</p>
       </section>
 
       <section class="group" id="sec-atalhos">
@@ -218,6 +333,18 @@
             <div class="hotkey-row">
               <input type="text" id="hotkey" placeholder="CmdOrCtrl+Shift+W" aria-label="Atalho" />
               <button type="button" id="record_hotkey" class="secondary">Gravar</button>
+            </div>
+          </div>
+          <label class="row">
+            <span class="row-text"><span class="row-title">Atalho para desfocar</span>
+              <span class="row-subtitle">Liga ou desliga o desfoque de privacidade em todas as contas. Para escolher o que é desfocado, pressione Ctrl+Shift+P (⌘+Shift+P no Mac) numa janela do WhatsApp.</span></span>
+            <input type="checkbox" class="switch" id="blur_hotkey_enabled" />
+          </label>
+          <div class="row">
+            <span class="row-text"><span class="row-title">Atalho</span></span>
+            <div class="hotkey-row">
+              <input type="text" id="blur_hotkey" placeholder="CmdOrCtrl+Shift+B" aria-label="Atalho" />
+              <button type="button" id="record_blur_hotkey" class="secondary">Gravar</button>
             </div>
           </div>
         </div>
@@ -290,5 +417,7 @@
     <script src="hotkey.js"></script>
     <script src="main.js"></script>
     <script src="panel.js"></script>
+    <script src="notes.js"></script>
+    <script src="updates.js"></script>
   </body>
 </html>

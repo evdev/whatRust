@@ -1,6 +1,6 @@
 const invoke = window.__TAURI__.core.invoke;
 const LANGS = ["pt-BR", "en"];
-const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "menu_bar_icon", "menubar_only", "notify_when_focused", "notify_active_chat", "respect_muted", "voice_transcribe", "translate_enabled", "show_message_device", "standin_enabled"];
+const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "translate_enabled", "show_message_device", "standin_enabled"];
 const STANDIN_BACKENDS = ["api", "claude_cli", "grok_cli", "codex_cli"];
 const AI_PROVIDERS = ["openrouter", "gemini", "anthropic"];
 const LIST_PROVIDERS = ["gemini", "anthropic"];
@@ -18,6 +18,7 @@ let keyFlags = { openrouter: false, gemini: false, anthropic: false };
 let modelCatalogs = { gemini: null, anthropic: null };
 let catalogToken = 0;
 const ZOOM_DEFAULT = 1;
+const SINGLE_WINDOW_SUBTITLE = "Uma janela com um seletor de contas; as contas ocultas continuam conectadas. Requer reiniciar o whatRust.";
 
 // The menu-bar rows are macOS-only. get_settings reports the OS this build targets
 // in `platform`; the rows start hidden and appear here once it is known.
@@ -34,7 +35,7 @@ const MENU_ICON_SUBTITLE = "Quando desativado, clique no ícone do Dock para abr
 let menuBarIconChecked = true;
 
 function syncMenuBarIconRow() {
-  const only = document.getElementById("menubar_only").checked;
+  const only = document.getElementById("menubar_only").checked || document.getElementById("hide_dock_icon").checked;
   const icon = document.getElementById("menu_bar_icon");
   icon.disabled = only;
   icon.checked = only ? true : menuBarIconChecked;
@@ -43,18 +44,93 @@ function syncMenuBarIconRow() {
     : MENU_ICON_SUBTITLE;
 }
 
-// settings.json holds a zoom factor, not a preset name, so a stored value need
-// not be one of the four options offered here — it can come from a hand edit or
-// from a build with a different set of presets. Show the closest one.
+// settings.json holds a zoom factor, not a preset name, and the zoom shortcuts
+// (Ctrl +/-/wheel) land on levels the four presets do not offer. Show an exact
+// match when there is one; otherwise add a temporary "NN%" option so the control
+// reflects the real value instead of pretending it is the nearest preset.
 function selectNearestZoom(value) {
   const sel = document.getElementById("zoom");
-  const distance = (o) => Math.abs(parseFloat(o.value) - value);
-  sel.value = [...sel.options].reduce((a, b) => (distance(b) < distance(a) ? b : a)).value;
+  for (const o of [...sel.options]) if (o.dataset.custom) o.remove();
+  const exact = [...sel.options].find((o) => Math.abs(parseFloat(o.value) - value) < 0.005);
+  if (exact) {
+    sel.value = exact.value;
+    return;
+  }
+  const opt = document.createElement("option");
+  opt.dataset.custom = "1";
+  opt.value = String(value);
+  opt.textContent = Math.round(value * 100) + "%";
+  const after = [...sel.options].find((o) => parseFloat(o.value) > value);
+  sel.insertBefore(opt, after || null);
+  sel.value = opt.value;
+}
+
+// The chosen download folder (null = the system Downloads folder). Kept here
+// because save() rebuilds the whole settings object from the page.
+let downloadDir = null;
+
+function showDownloadDir() {
+  const sub = document.getElementById("download_dir_subtitle");
+  sub.textContent = downloadDir || "Pasta Downloads do sistema";
+  sub.title = downloadDir || "";
+  document.getElementById("reset_download_dir").disabled = !downloadDir;
+}
+
+function showIcon(custom) {
+  document.getElementById("icon_subtitle").textContent = custom ? "Personalizado" : "Padrão";
+  document.getElementById("reset_icon").disabled = !custom;
+}
+
+function flash(message, ms = 4000) {
+  const note = document.getElementById("note");
+  note.textContent = message;
+  setTimeout(() => { if (note.textContent === message) note.textContent = ""; }, ms);
+}
+
+async function chooseDownloadDir() {
+  try {
+    const dir = await invoke("pick_download_dir");
+    if (!dir) return;
+    const previous = downloadDir;
+    downloadDir = dir;
+    showDownloadDir();
+    // save() shows a refusal in the note; then go back to what is stored.
+    if (!(await save())) {
+      downloadDir = previous;
+      showDownloadDir();
+    }
+  } catch (e) { flash(String(e)); }
+}
+
+async function resetDownloadDir() {
+  downloadDir = null;
+  showDownloadDir();
+  await save();
+}
+
+async function chooseIcon() {
+  try {
+    if (await invoke("choose_app_icon")) { showIcon(true); flash("Alterações salvas ✓", 1500); }
+  } catch (e) { flash(String(e), 6000); }
+}
+
+async function resetIcon() {
+  try {
+    await invoke("reset_app_icon");
+    showIcon(false);
+    flash("Alterações salvas ✓", 1500);
+  } catch (e) { flash(String(e), 6000); }
 }
 
 async function load() {
   const s = await invoke("get_settings");
   setMacRows(s.platform === "macos");
+  // Title bar (Linux): auto hides it on tiling window managers like Hyprland.
+  document.getElementById("title_bar_row").hidden = s.platform !== "linux";
+  document.getElementById("title_bar").value = ["show", "hide"].includes(s.title_bar) ? s.title_bar : "auto";
+  document.getElementById("title_bar_subtitle").textContent = s.tiling_wm
+    ? t("Detectado: {0}. No modo automático a barra fica oculta.", [s.tiling_wm])
+    : "Gerenciadores de janelas lado a lado, como o Hyprland, não usam barra de título.";
   if (/Win/.test(navigator.platform || navigator.userAgent)) {
     const startupRow = document.getElementById("start_minimized").closest("label");
     startupRow.querySelector(".row-title").textContent = "Iniciar minimizado com o Windows";
@@ -73,7 +149,19 @@ async function load() {
     document.getElementById("menubar_only_subtitle").textContent =
       "Requer macOS 14 (Sonoma) ou superior — este Mac não consegue manter um painel oculto conectado";
   }
+  // Single-window mode (Linux/macOS): applies after a restart; menu-bar-only wins.
+  const swRow = document.getElementById("single_window_row");
+  swRow.hidden = !s.single_window_supported;
+  const swNote = document.getElementById("single_window_subtitle");
+  if (s.single_window_supported && !!s.single_window !== !!s.single_window_active) {
+    swNote.textContent = s.single_window && s.menubar_only
+      ? "Reinicie o whatRust para aplicar. O modo somente barra de menus tem prioridade sobre esta opção."
+      : "Reinicie o whatRust para aplicar a mudança.";
+  } else {
+    swNote.textContent = SINGLE_WINDOW_SUBTITLE;
+  }
   document.getElementById("hotkey").value = s.hotkey || "CmdOrCtrl+Shift+W";
+  document.getElementById("blur_hotkey").value = s.blur_hotkey || "CmdOrCtrl+Shift+B";
   selectNearestZoom(Number.isFinite(s.zoom) ? s.zoom : ZOOM_DEFAULT);
   const lang = LANGS.includes(s.language) ? s.language : "en";
   document.getElementById("language").value = lang;
@@ -121,6 +209,50 @@ async function load() {
   syncModelControls();
   menuBarIconChecked = document.getElementById("menu_bar_icon").checked;
   syncMenuBarIconRow();
+  downloadDir = s.download_dir || null;
+  showDownloadDir();
+  showIcon(!!s.custom_icon);
+  loadProxy(s);
+}
+
+// --- Proxy (issue #52) ---
+let proxyInUse = "";
+let proxySupported = true;
+let proxySaved = { proxy_mode: "off", proxy_host: "", proxy_port: 0 };
+
+function proxyUrl(mode, host, port) {
+  if (mode === "off") return "";
+  const h = host.includes(":") && !host.startsWith("[") ? "[" + host + "]" : host;
+  return mode + "://" + h.toLowerCase() + ":" + port;
+}
+
+function syncProxyRows() {
+  const off = document.getElementById("proxy_mode").value === "off";
+  document.querySelectorAll(".proxy-field").forEach((el) => (el.hidden = off));
+}
+
+// The restart hint shows while the saved proxy differs from the one the open
+// webviews were created with.
+function syncProxyRestart() {
+  const saved = proxyUrl(proxySaved.proxy_mode, proxySaved.proxy_host || "", proxySaved.proxy_port || 0);
+  const running = proxyInUse.replace(/\/$/, "");
+  document.getElementById("proxy_restart").hidden = saved.replace(/\/$/, "") === running;
+}
+
+function loadProxy(s) {
+  proxyInUse = s.proxy_in_use || "";
+  proxySupported = s.proxy_supported !== false;
+  proxySaved = { proxy_mode: s.proxy_mode || "off", proxy_host: s.proxy_host || "", proxy_port: s.proxy_port || 0 };
+  const mode = document.getElementById("proxy_mode");
+  mode.value = proxySaved.proxy_mode;
+  if (!proxySupported) {
+    mode.disabled = true;
+    mode.value = "off";
+  }
+  document.getElementById("proxy_host").value = proxySaved.proxy_host;
+  document.getElementById("proxy_port").value = proxySaved.proxy_port ? String(proxySaved.proxy_port) : "";
+  syncProxyRows();
+  syncProxyRestart();
 }
 
 async function save() {
@@ -131,7 +263,9 @@ async function save() {
   }
   const hk = document.getElementById("hotkey").value.trim();
   s.hotkey = hk || "CmdOrCtrl+Shift+W";
+  s.blur_hotkey = document.getElementById("blur_hotkey").value.trim() || "CmdOrCtrl+Shift+B";
   s.zoom = parseFloat(document.getElementById("zoom").value) || ZOOM_DEFAULT;
+  s.title_bar = document.getElementById("title_bar").value || "auto";
   s.language = document.getElementById("language").value;
   commitModelFields();
   s.fluidvoice_port = parseInt(document.getElementById("fluidvoice_port").value, 10) || 47733;
@@ -154,6 +288,14 @@ async function save() {
   s.standin_codex_bin = standinBins.codex_cli;
   s.standin_delay_secs = parseInt(document.getElementById("standin_delay_secs").value, 10) || 10;
   s.standin_hourly_limit = parseInt(document.getElementById("standin_hourly_limit").value, 10) || 12;
+  s.download_dir = downloadDir;
+  if (proxySupported) {
+    s.proxy_mode = document.getElementById("proxy_mode").value;
+    s.proxy_host = document.getElementById("proxy_host").value.trim();
+    const port = document.getElementById("proxy_port").value.trim();
+    // Anything but plain digits becomes 0, which the backend rejects.
+    s.proxy_port = /^[0-9]{1,5}$/.test(port) ? parseInt(port, 10) : 0;
+  }
   const note = document.getElementById("note");
   try {
     if (personaLoaded) {
@@ -162,6 +304,10 @@ async function save() {
       });
     }
     const warn = await invoke("set_settings", { settings: s });
+    const saved = await invoke("get_settings");
+    proxySaved = { proxy_mode: saved.proxy_mode, proxy_host: saved.proxy_host, proxy_port: saved.proxy_port };
+    document.getElementById("proxy_host").value = saved.proxy_host;
+    syncProxyRestart();
     if (warn) {
       note.textContent = t("Salvo com observação: {0}", [warn]);
       setTimeout(() => (note.textContent = ""), 6000);
@@ -169,8 +315,10 @@ async function save() {
       note.textContent = "Alterações salvas ✓";
       setTimeout(() => (note.textContent = ""), 1500);
     }
+    return true;
   } catch (e) {
     note.textContent = String(e);
+    return false;
   }
 }
 
@@ -284,11 +432,24 @@ async function addAccount() {
 window.addEventListener("DOMContentLoaded", () => {
   // The macOS rows stay hidden until load() knows the platform.
   document.getElementById("menubar_only").addEventListener("change", syncMenuBarIconRow);
+  document.getElementById("hide_dock_icon").addEventListener("change", syncMenuBarIconRow);
   load();
   loadAccounts();
   loadLock();
   wireLock();
   document.getElementById("save").addEventListener("click", save);
+  // The update switches apply at once, like zoom and language.
+  for (const id of ["auto_update_check", "auto_update_install"]) {
+    document.getElementById(id).addEventListener("change", save);
+  }
+  document.getElementById("proxy_mode").addEventListener("change", syncProxyRows);
+  document.getElementById("proxy_restart_btn").addEventListener("click", async () => {
+    try {
+      await invoke("restart_app");
+    } catch (e) {
+      document.getElementById("note").textContent = String(e);
+    }
+  });
   document.getElementById("add_account").addEventListener("click", addAccount);
   document.getElementById('startup_account').addEventListener('change', event => {
     const id = event.target.value;
@@ -297,10 +458,22 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("new_account_name").addEventListener("keydown", (e) => {
     if (e.key === "Enter") addAccount();
   });
-  document.getElementById("record_hotkey").addEventListener("click", toggleRecording);
+  document.getElementById("record_hotkey").addEventListener("click", () => toggleRecording("hotkey", "record_hotkey"));
+  document.getElementById("record_blur_hotkey").addEventListener("click", () => toggleRecording("blur_hotkey", "record_blur_hotkey"));
+  document.getElementById("choose_download_dir").addEventListener("click", chooseDownloadDir);
+  document.getElementById("reset_download_dir").addEventListener("click", resetDownloadDir);
+  document.getElementById("choose_icon").addEventListener("click", chooseIcon);
+  document.getElementById("reset_icon").addEventListener("click", resetIcon);
   // Zoom saves on change rather than on Save: picking a size you cannot see the
   // effect of is guesswork, and the webview applies it immediately.
   document.getElementById("zoom").addEventListener("change", save);
+  document.getElementById("title_bar").addEventListener("change", save);
+  // The zoom shortcuts change it from the WhatsApp window; catch up on return.
+  window.addEventListener("focus", () => {
+    invoke("get_settings").then((s) => {
+      if (Number.isFinite(s.zoom)) selectNearestZoom(s.zoom);
+    }).catch(() => {});
+  });
   // Language applies at once, like zoom.
   document.getElementById("language").addEventListener("change", async () => {
     I18n.setLang(document.getElementById("language").value);
@@ -707,6 +880,8 @@ function wireLock() {
 
 let recordingHotkey = false;
 let hotkeyPrev = "";
+let recordInputId = "hotkey";
+let recordBtnId = "record_hotkey";
 const MODIFIER_KEYS = new Set(["Control", "Shift", "Alt", "Meta"]);
 
 function setHotkeyHint(msg) {
@@ -720,10 +895,10 @@ function stopRecording(restore) {
   recordingHotkey = false;
   window.removeEventListener("keydown", onRecordKeydown, true);
   window.removeEventListener("blur", onRecordBlur, true);
-  const btn = document.getElementById("record_hotkey");
+  const btn = document.getElementById(recordBtnId);
   btn.textContent = "Gravar";
   btn.classList.remove("recording");
-  if (restore) document.getElementById("hotkey").value = hotkeyPrev;
+  if (restore) document.getElementById(recordInputId).value = hotkeyPrev;
 }
 
 function onRecordBlur() { setHotkeyHint(""); stopRecording(true); }
@@ -740,16 +915,18 @@ function onRecordKeydown(e) {
     setHotkeyHint("Inclua Ctrl, Alt ou Shift.");
     return;
   }
-  document.getElementById("hotkey").value = accel;
+  document.getElementById(recordInputId).value = accel;
   setHotkeyHint("");
   stopRecording(false);
 }
 
-function toggleRecording() {
+function toggleRecording(inputId, btnId) {
   if (recordingHotkey) { setHotkeyHint(""); stopRecording(true); return; }
   recordingHotkey = true;
-  hotkeyPrev = document.getElementById("hotkey").value;
-  const btn = document.getElementById("record_hotkey");
+  recordInputId = inputId;
+  recordBtnId = btnId;
+  hotkeyPrev = document.getElementById(inputId).value;
+  const btn = document.getElementById(btnId);
   btn.textContent = "Pressione as teclas… (Esc cancela)";
   btn.classList.add("recording");
   setHotkeyHint("");

@@ -132,9 +132,14 @@ function makeHarness(options = {}) {
   docInput.onchange = onChange;
   const body = new FakeElement("body");
   body.isRoot = true;
+  const head = new FakeElement("head");
   const document = {
     body,
-    getElementById() { return null; },
+    ...(options.head === false ? {} : { head }),
+    getElementById(id) {
+      const all = [...body.all(), ...(head ? head.all() : [])];
+      return all.find((e) => e.id === id) || null;
+    },
     createElement: (tag) => new FakeElement(tag),
     title: "WhatsApp",
     readyState: "complete",
@@ -150,13 +155,14 @@ function makeHarness(options = {}) {
       return null;
     },
   };
+  const listeners = {};
   const window = {
     location: { origin: "https://web.whatsapp.com" },
     Notification: options.nativeNotification,
     ServiceWorkerRegistration: options.serviceWorkerRegistration,
     __WHATRUST_WINDOWS__: !!options.windows,
     __whatrustPreferNative: !!options.preferNative,
-    addEventListener() {},
+    addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
     __TAURI__: {
       core: {
         invoke(cmd, args) {
@@ -200,7 +206,7 @@ function makeHarness(options = {}) {
   const params = Object.keys(sandboxGlobals);
   const fn = new Function(...params, `"use strict";\n${bridgeSrc}`);
   fn(...params.map((k) => sandboxGlobals[k]));
-  return { window, document, mediaInput, docInput, logs, warns, invocations, navigator: sandboxGlobals.navigator };
+  return { window, listeners, document, head, mediaInput, docInput, logs, warns, invocations, navigator: sandboxGlobals.navigator };
 }
 
 // Drive the feed the way window.rs stream_drop does.
@@ -547,6 +553,34 @@ async function testDownloadToastOffersOpenAndShowInFolder() {
   assert(toastsIn(document).length === 0, "the toast closes after a choice");
 }
 
+function testDownloadToastStylesheetIsWellFormed() {
+  console.log("the download toast stylesheet keeps every rule closed (issue #71)");
+  const { window: w, document } = makeHarness();
+  w.__whatrustDownloadDone({ ok: true, id: 1, name: "a.pdf", canOpen: true });
+  const host = document.body.children.find((c) => c.attrs["data-whatrust"] === "downloads");
+  const style = host && host.shadow.all().find((e) => e.tagName === "STYLE");
+  const css = style ? style.textContent : "";
+  // Each selector must start at brace depth 0. A stray "}" or an unclosed rule
+  // makes the CSS parser swallow the next rule, which is how the toast lost its
+  // dark background in 0.6.11.
+  let depth = 0, ok = true;
+  for (const ch of css) {
+    if (ch === "{") depth++;
+    else if (ch === "}") { depth--; if (depth < 0) ok = false; }
+  }
+  assert(ok && depth === 0, "braces balance");
+  for (const sel of [".toast{", ".text{", ".title{", "button{"]) {
+    const at = css.indexOf(sel);
+    assert(at >= 0, `${sel} present`);
+    let d = 0;
+    for (const ch of css.slice(0, at)) { if (ch === "{") d++; else if (ch === "}") d--; }
+    assert(d === 0, `${sel} is a top-level rule`);
+  }
+  // Each top-level rule body must be declarations only (no stray selector text
+  // after a closing brace inside the same rule).
+  assert(/\.stack\{[^{}]*font:14px[^{}]*\}/.test(css), ".stack keeps its font and width declarations");
+}
+
 async function testRiskyDownloadsAndFailures() {
   console.log("programs only offer Show in folder; failures say so");
   const { window: w, document, invocations } = makeHarness();
@@ -631,9 +665,124 @@ async function testDelayedIconRetainsDetectionEpoch(){
  assert(h.invocations.filter(c=>c.cmd==="notify").length===before,"locked page bridge does not forward message notifications");
 }
 
+function testScrollbarsAreThinAndTranslucent() {
+  console.log("scrollbars are restyled thin/translucent instead of the webview's white default");
+  const chromeNav = {
+    userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+  };
+  const { head } = makeHarness({ navigator: chromeNav });
+  const styles = head.children.filter((e) => e.id === "__whatrust_scrollbars");
+  assert(styles.length === 1, `one scrollbar stylesheet injected (got ${styles.length})`);
+  const css = styles[0] ? styles[0].textContent : "";
+  assert(css.includes("*::-webkit-scrollbar{width:8px"), "scrollbar is 8px wide, not the thick system bar");
+  assert(css.includes("background:transparent"), "track is transparent, not an opaque white slab");
+  assert(css.includes("rgba(134,150,160,.45)"), "thumb is WhatsApp's muted grey at low alpha");
+  assert(css.includes("scrollbar-width:thin"), "standard scrollbar-width is thin too");
+  assert(!/background:#fff|background-color:#fff/.test(css), "no opaque white scrollbar colour");
+  // An initialization script can run before <head> exists: that must not throw.
+  const noHead = makeHarness({ head: false, navigator: chromeNav });
+  assert(!!noHead.window, "bridge loads when document.head is not there yet");
+  // macOS presents a Safari UA: WKWebView scrollers are native, so the page
+  // stylesheet is skipped entirely (Rust forces overlay scrollers instead).
+  const safariNav = {
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+  };
+  const safari = makeHarness({ navigator: safariNav });
+  assert(
+    safari.head.children.every((e) => e.id !== "__whatrust_scrollbars"),
+    "Safari UA gets no scrollbar stylesheet (native overlay scrollers instead)"
+  );
+}
+
+function keyEvent(o) {
+  const e = { key: "", code: "", ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, isComposing: false, keyCode: 0, defaultPrevented: false, ...o };
+  e.preventDefault = () => { e.defaultPrevented = true; };
+  e.stopPropagation = () => { e.stopped = true; };
+  return e;
+}
+function press(h, o) {
+  const e = keyEvent(o);
+  for (const fn of h.listeners.keydown || []) fn(e);
+  return e;
+}
+const zooms = (h) => h.invocations.filter((c) => c.cmd === "zoom_step").map((c) => c.args.action);
+
+async function testZoomShortcuts() {
+  const h = makeHarness({ navigator: { platform: "Win32" } });
+  assert(press(h, { key: "=", ctrlKey: true }).defaultPrevented, "Ctrl+= is taken");
+  press(h, { key: "+", ctrlKey: true, shiftKey: true });
+  press(h, { key: "-", ctrlKey: true });
+  press(h, { key: "0", ctrlKey: true });
+  press(h, { key: "Add", code: "NumpadAdd", ctrlKey: true });
+  assert(zooms(h).join() === "in,in,out,reset,in", "Ctrl +/-/0 and numpad map to in/out/reset");
+  const before = h.invocations.length;
+  const passes = [
+    { key: "=" }, { key: "a", ctrlKey: true }, { key: "-", ctrlKey: true, altKey: true },
+    { key: "-", ctrlKey: true, shiftKey: true }, { key: "=", metaKey: true },
+    { key: "-", ctrlKey: true, isComposing: true }, { key: "-", ctrlKey: true, keyCode: 229 },
+  ].map((o) => press(h, o));
+  assert(passes.every((e) => !e.defaultPrevented) && h.invocations.length === before, "other keys, Alt/AltGr, Cmd on non-mac and IME composition are left alone");
+  const mac = makeHarness({ navigator: { platform: "MacIntel" } });
+  press(mac, { key: "=", metaKey: true });
+  press(mac, { key: "=", ctrlKey: true });
+  assert(zooms(mac).join() === "in", "Cmd zooms on macOS, bare Ctrl does not");
+}
+
+async function testZoomWheelCoalesces() {
+  const h = makeHarness({ navigator: { platform: "Win32" } });
+  const wheel = (o) => { const e = keyEvent({ deltaY: 0, deltaMode: 0, ...o }); for (const fn of h.listeners.wheel || []) fn(e); return e; };
+  assert(!wheel({ deltaY: -100 }).defaultPrevented, "plain wheel scrolls normally");
+  const e = wheel({ deltaY: -100, ctrlKey: true });
+  for (let i = 0; i < 20; i++) wheel({ deltaY: -100, ctrlKey: true });
+  assert(e.defaultPrevented && zooms(h).join() === "in", "a ctrl+wheel burst is one zoom-in step");
+  await sleep(200);
+  wheel({ deltaY: 100, ctrlKey: true });
+  assert(zooms(h).join() === "in,out", "the next burst steps again, downwards");
+  await sleep(200);
+  wheel({ deltaY: 5, ctrlKey: true });
+  assert(zooms(h).length === 2, "tiny deltas below the threshold do not step");
+}
+
+async function testNativeBranchSendsNotificationIcon() {
+  console.log("native Notification: blob/https picture goes to notification_icon, never to notify");
+  let built = 0;
+  const h = makeHarness({ windows: true, preferNative: true, nativeNotification: class { static permission = "granted"; constructor() { built++; } } });
+  const { window: w, document: d, invocations } = h;
+  w.fetch = () => Promise.resolve({ ok: true, blob: () => Promise.resolve({}) });
+  w.createImageBitmap = () => Promise.resolve({ width: 100, height: 100, close() {} });
+  d.createElement = (tag) =>
+    tag === "canvas"
+      ? { getContext: () => ({ drawImage() {} }), toDataURL: (t) => "data:" + t + ";base64,iVBORw0KGgo=" }
+      : new FakeElement(tag);
+  new w.Notification("Bob", { body: "hi", icon: "blob:https://web.whatsapp.com/1234" });
+  await sleep(20);
+  const sent = invocations.filter((x) => x.cmd === "notification_icon");
+  assert(built === 1, "the real Notification is still constructed");
+  assert(sent.length === 1 && sent[0].args.icon === "iVBORw0KGgo=", "PNG sent to notification_icon");
+  assert(sent[0].args.title === "Bob" && sent[0].args.body === "hi", "title/body identify the toast");
+  assert(!invocations.some((x) => x.cmd === "notify"), "page route does not duplicate native delivery");
+
+  w.fetch = () => Promise.reject(new Error("blocked"));
+  new w.Notification("Carol", { body: "yo", icon: "https://pps.whatsapp.net/v/x.jpg" });
+  await sleep(20);
+  const carol = invocations.filter((x) => x.cmd === "notification_icon" && x.args.title === "Carol");
+  assert(carol.length === 1 && carol[0].args.icon === null, "unloadable picture: icon null releases the held toast");
+
+  const before = invocations.filter((x) => x.cmd === "notification_icon").length;
+  new w.Notification("Dan", { body: "x", icon: "data:image/png;base64,AAAA" });
+  new w.Notification("Eve", { body: "x" });
+  await sleep(20);
+  assert(invocations.filter((x) => x.cmd === "notification_icon").length === before, "data:/no icon: Rust handles it, nothing sent");
+}
+
 const tests = [
+  testDownloadToastStylesheetIsWellFormed,
+  testScrollbarsAreThinAndTranslucent,
+  testZoomShortcuts,
+  testZoomWheelCoalesces,
   testWindowsNativePreferenceAndFallback,
   testNativePermissionAndAsyncErrorFallback,
+  testNativeBranchSendsNotificationIcon,
   testPersistentWindowsNotificationUsesOwnService,
   testDelayedIconRetainsDetectionEpoch,
   testUnreadReportsSayWhenThePageHasSettled,

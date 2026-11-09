@@ -18,6 +18,59 @@
   }
   holdSyncLock();
 
+  // 0a) Scrollbars (WebView2 / WebKitGTK only). WhatsApp Web's chat list and
+  //     conversation panes have no scrollbar styling of their own, so the
+  //     native webviews fall back to their unstyled system scrollbar: a
+  //     thick, opaque white/light bar. On Chromium (WebView2) and WebKitGTK
+  //     the `::-webkit-scrollbar` rules below DO take effect, so restyle
+  //     every scrollbar to a thin, translucent pill instead: WhatsApp's own
+  //     muted grey (#8696a0) at low alpha on a transparent track, so it reads
+  //     the same in light and dark themes and looks overlay-like. The `*`
+  //     selector covers the chat list (#side/#pane-side), the conversation
+  //     (#main) and any dialog without betting on WhatsApp's internal class
+  //     names, which change between releases. `!important` is scoped to the
+  //     scrollbar properties only, so WhatsApp's layout and colours are
+  //     untouched — this only replaces the webview's default scrollbar
+  //     painting. The 2px transparent border + padding-box clip makes the
+  //     visible thumb ~4px wide inside the 8px scrollbar gutter.
+  //     macOS is deliberately excluded: WKWebView's page scrollers are
+  //     native AppKit NSScrollers that ignore web CSS entirely, so styling
+  //     them from here does nothing — Rust forces overlay scrollers
+  //     process-wide instead (src/scrollbars.rs). Skipping the stylesheet
+  //     there also avoids any chance of web styling forcing legacy scrollbars
+  //     back. A Chrome UA is how Linux/Windows present themselves; the
+  //     Safari UA on macOS carries no Chrome token.
+  try {
+    var chromeUA = /Chrome\//.test(navigator.userAgent || "");
+    var SCROLLBAR_CSS = [
+      "*{scrollbar-width:thin!important;scrollbar-color:rgba(134,150,160,.45) transparent!important}",
+      "*::-webkit-scrollbar{width:8px!important;height:8px!important}",
+      "*::-webkit-scrollbar-track{background:transparent!important}",
+      "*::-webkit-scrollbar-thumb{background-color:rgba(134,150,160,.45)!important;border:2px solid transparent!important;border-radius:4px!important;background-clip:padding-box!important}",
+      "*::-webkit-scrollbar-thumb:hover{background-color:rgba(134,150,160,.8)!important}",
+      "*::-webkit-scrollbar-corner{background:transparent!important}",
+    ].join("");
+    var installScrollbars = function () {
+      try {
+        var head = document.head;
+        if (!head) return false;
+        if (document.getElementById("__whatrust_scrollbars")) return true;
+        var style = document.createElement("style");
+        style.id = "__whatrust_scrollbars";
+        style.textContent = SCROLLBAR_CSS;
+        head.appendChild(style);
+        return true;
+      } catch (e) {
+        return false;
+      }
+    };
+    // An initialization script runs before <head> exists, so in practice
+    // this lands on DOMContentLoaded; if <head> is already there, go now.
+    if (chromeUA && !installScrollbars() && typeof document.addEventListener === "function") {
+      document.addEventListener("DOMContentLoaded", installScrollbars, { once: true });
+    }
+  } catch (e) {}
+
   // A rejected command used to vanish here without a trace, which is how every
   // notify/set_unread call being refused by the IPC permission check went
   // unnoticed (issues #3, #32). Warn once per command in the page console
@@ -35,10 +88,50 @@
     return Promise.resolve();
   }
 
+  // Zoom shortcuts: Ctrl (Cmd on macOS) with + / - / 0, and Ctrl+wheel. The page
+  // only names the action; Rust steps the saved zoom and applies it to every
+  // account (zoom_step). Native webview zoom is switched off in window.rs, so
+  // there is no second zoom to fight with. Only exact modifier combos are taken
+  // (never Alt/AltGr, never mid-composition), everything else reaches WhatsApp.
+  var IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || "");
+  function zoomKeyAction(e) {
+    if (e.isComposing || e.keyCode === 229 || e.altKey) return null;
+    if (!(IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) return null;
+    var k = e.key, c = e.code;
+    if (k === "+" || k === "=" || c === "NumpadAdd") return "in";
+    if (!e.shiftKey && (k === "-" || c === "NumpadSubtract")) return "out";
+    if (!e.shiftKey && (k === "0" || c === "Numpad0")) return "reset";
+    return null;
+  }
+  window.addEventListener("keydown", function (e) {
+    if (e.defaultPrevented) return;
+    var action = zoomKeyAction(e);
+    if (!action) return;
+    e.preventDefault();
+    e.stopPropagation();
+    invoke("zoom_step", { action: action });
+  }, true);
+  // A wheel notch, or a trackpad pinch (a burst of ctrl+wheel events), moves one
+  // level: deltas accumulate to a threshold, then a short cooldown swallows the
+  // rest of the burst.
+  var wheelAcc = 0, wheelBusy = false;
+  window.addEventListener("wheel", function (e) {
+    if (!(IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) || e.altKey) return;
+    e.preventDefault();
+    if (wheelBusy) return;
+    wheelAcc += e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1);
+    if (Math.abs(wheelAcc) < 40) return;
+    var action = wheelAcc < 0 ? "in" : "out";
+    wheelAcc = 0;
+    wheelBusy = true;
+    setTimeout(function () { wheelBusy = false; wheelAcc = 0; }, 150);
+    invoke("zoom_step", { action: action });
+  }, { capture: true, passive: false });
+
   // A small, keyboard-accessible account switcher owned by whatRust. It exposes
   // only account names/unread counts and a request to focus an existing account.
   function mountAccountSwitcher() {
-    if (window.__WHATRUST_WINDOWS__) return;
+    if (window.__WHATRUST_WINDOWS__ || window.__WHATRUST_SINGLE__) return;
     if (!document.body || document.getElementById("__whatrust_accounts")) return;
     // Join the WhatsApp header's normal layout, so the control never covers
     // the navigation icons or conversations. Wait until the header is mounted.
@@ -203,6 +296,22 @@
     });
     return Promise.race([load, timeout]);
   }
+  // Windows native path: WebView2 raises the toast from the real Notification
+  // and can only read a data: icon itself. For blob:/https: icons, convert the
+  // picture here and hand it to Rust, which holds the toast (up to ~1.6 s) and
+  // pairs it by title and body. `icon: null` tells Rust there is none to wait for.
+  function nativeIcon(title, options) {
+    try {
+      var icon = options && options.icon;
+      var scheme = typeof icon === "string" && (/^(blob|https):/.exec(icon) || [])[1];
+      if (!scheme) return;
+      var t = String(title || ""), b = String((options && options.body) || "");
+      iconPng(icon).then(function (png) {
+        notePath("native icon " + scheme + (png ? " ok" : " unavailable"));
+        invoke("notification_icon", { title: t, body: b, icon: png || null });
+      }, function () {});
+    } catch (e) {}
+  }
   function nativeNotify(title, body, icon) {
     if(window.__whatrustLocked)return false;
     var epoch=window.__whatrustNotificationEpoch||0;
@@ -363,6 +472,7 @@
         try {
           notePath("native Notification()");
           var notification = new OriginalNotification(title, options);
+          nativeIcon(title, options);
           if(notification.addEventListener)notification.addEventListener("error",function(){notePath("native notification error; page fallback");options=options||{};nativeNotify(title,options.body,options.icon);},{once:true});
           return notification;
         } catch (e) { notePath("native constructor refused; page fallback"); }
@@ -523,8 +633,9 @@
       var style = document.createElement("style");
       style.textContent = [
         ":host{all:initial}",
-        ".stack{position:fixed;left:16px;bottom:16px;z-index:2147483647;display:flex;flex-direction:column;gap:8px;max-height:calc(100vh - var(--wr-meta-bottom, 16px) - 16px);overflow-y:auto;",
+        ".stack{position:fixed;left:16px;bottom:16px;z-index:2147483647;display:flex;flex-direction:column;gap:8px;max-height:calc(100vh - var(--wr-meta-bottom, 16px) - 16px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:rgba(134,150,160,.45) transparent;",
         "font:14px/1.35 system-ui,-apple-system,'Segoe UI',Roboto,Ubuntu,sans-serif;max-width:min(380px,calc(100vw - 32px))}",
+        ".stack::-webkit-scrollbar{width:8px}.stack::-webkit-scrollbar-track{background:transparent}.stack::-webkit-scrollbar-thumb{background-color:rgba(134,150,160,.45);border:2px solid transparent;border-radius:4px;background-clip:padding-box}",
         ".toast{display:flex;align-items:center;gap:12px;padding:10px 10px 10px 14px;border-radius:10px;",
         "background:#233138;color:#e9edef;box-shadow:0 4px 18px rgba(0,0,0,.35)}",
         ".text{flex:1;min-width:0}",
