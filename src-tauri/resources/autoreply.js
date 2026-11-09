@@ -113,6 +113,58 @@
     return hits;
   }
 
+  function attrOf(el, name) {
+    if (!el || typeof el.getAttribute !== "function") return "";
+    return el.getAttribute(name) || "";
+  }
+
+  function listed(el, selector) {
+    if (!el || typeof el.querySelectorAll !== "function") return [];
+    return Array.prototype.slice.call(el.querySelectorAll(selector));
+  }
+
+  // Header buttons only. A video-call control is the anchor; the menu and the
+  // voice call must not match, or the pill lands on top of them.
+  function isVideoCallControl(el) {
+    if (!el || typeof el.getAttribute !== "function") return false;
+    var tag = String(el.tagName || "").toLowerCase();
+    var itself = tag === "button" || attrOf(el, "role") === "button";
+    if (!itself && listed(el, "button,[role=button]").length > 1) return false;
+    var bits = [
+      attrOf(el, "data-icon"),
+      attrOf(el, "data-testid"),
+      attrOf(el, "aria-label"),
+      attrOf(el, "title"),
+    ];
+    listed(el, "[data-icon],[data-testid]").forEach(function (node) {
+      bits.push(
+        attrOf(node, "data-icon"),
+        attrOf(node, "data-testid"),
+        attrOf(node, "aria-label"),
+        attrOf(node, "title")
+      );
+    });
+    var text = fold(bits.join(" "));
+    if (!/\S/.test(text)) return false;
+    if (/video-note|status-video|gif/.test(text)) return false;
+    if (/video-?call|videocam|video-refreshed|ic-video|wds-ic-video/.test(text)) return true;
+    if (/video/.test(text) && /call|chamada|ligar|ligac|llamada/.test(text)) return true;
+    if (/(^|[^a-z])video([^a-z]|$)/.test(text)) return true;
+    return false;
+  }
+
+  function videoCallButton(doc) {
+    var header = doc.querySelector("#main header");
+    if (!header) return null;
+    var buttons = listed(header, "button,[role=button]");
+    for (var i = 0; i < buttons.length; i++) {
+      var el = buttons[i];
+      if (typeof el.closest === "function" && el.closest("[data-whatrust-standin]")) continue;
+      if (isVideoCallControl(el)) return el;
+    }
+    return null;
+  }
+
   if (root.__WHATRUST_TEST) {
     root.__whatrustAutoreplyApi = {
       normalizeChatId: normalizeChatId,
@@ -125,6 +177,8 @@
       mapMessage: mapMessage,
       messageToken: messageToken,
       fold: fold,
+      isVideoCallControl: isVideoCallControl,
+      videoCallButton: videoCallButton,
     };
     return;
   }
@@ -140,7 +194,10 @@
   var busy = {};
   var host = null;
   var shadow = null;
+  var panelHost = null;
+  var panelShadow = null;
   var bannerHost = null;
+  var HOST_STYLE = "display:flex;align-items:center;flex:0 1 auto;min-width:0;margin-inline-end:6px";
   var open = false;
   var watching = false;
 
@@ -341,22 +398,124 @@
     if (host) return;
     host = document.createElement("div");
     host.setAttribute("data-whatrust-standin", "1");
-    host.style.cssText = "position:fixed;top:12px;right:16px;z-index:100003";
     shadow = host.attachShadow({ mode: "open" });
     var style = document.createElement("style");
-    style.textContent = ":host{all:initial}button,textarea{font:13px/1.4 system-ui} .pill{border:0;border-radius:999px;padding:6px 10px;cursor:pointer;background:#1daa61;color:#042} .panel{margin-top:8px;width:320px;max-width:calc(100vw - 32px);max-height:calc(100vh - 120px);overflow:auto;padding:12px;border-radius:12px;background:#111b21;color:#e9edef} textarea{width:100%;min-height:120px;box-sizing:border-box} .row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px} .log{max-height:140px;overflow:auto;font-size:12px;opacity:.85}";
+    style.textContent = ":host{all:initial}button{font:13px/1.2 system-ui} .pill{border:0;border-radius:999px;padding:6px 10px;cursor:pointer;background:#1daa61;color:#042;white-space:nowrap}";
     shadow.appendChild(style);
-    document.documentElement.appendChild(host);
+    host.addEventListener("click", function (event) { event.stopPropagation(); });
+  }
+
+  function ensurePanel() {
+    if (panelHost) return;
+    panelHost = document.createElement("div");
+    panelHost.setAttribute("data-whatrust-standin-panel", "1");
+    panelHost.style.cssText = "position:fixed;z-index:100003;display:none;box-sizing:border-box";
+    panelShadow = panelHost.attachShadow({ mode: "open" });
+    var style = document.createElement("style");
+    style.textContent = ":host{all:initial}button,textarea{font:13px/1.4 system-ui} .panel{box-sizing:border-box;width:100%;max-height:calc(100vh - 120px);overflow:auto;padding:12px;border-radius:12px;background:#111b21;color:#e9edef} textarea{width:100%;min-height:120px;box-sizing:border-box} .row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px} .log{max-height:140px;overflow:auto;font-size:12px;opacity:.85}";
+    panelShadow.appendChild(style);
+    document.documentElement.appendChild(panelHost);
+  }
+
+  function hideStandin() {
+    if (host && host.parentNode) host.remove();
+    if (panelHost) panelHost.style.display = "none";
+  }
+
+  // Sit in the header's own row, immediately before the video call, so the
+  // name and the menu keep their space. A fixed corner would cover the menu.
+  function headerSlot(button) {
+    var point = button;
+    var el = button;
+    while (el && el.parentElement) {
+      var parent = el.parentElement;
+      if (parent === document.body || parent === document.documentElement) break;
+      var style;
+      try { style = getComputedStyle(parent); } catch (e) { break; }
+      var row = style.display === "flex" || style.display === "inline-flex";
+      var dir = style.flexDirection || "row";
+      if (row && dir.indexOf("column") !== 0) {
+        var controls = 0;
+        for (var i = 0; i < parent.children.length; i++) {
+          var child = parent.children[i];
+          if (child === host) continue;
+          if (child.matches && child.matches("button,[role=button]")) controls++;
+          else if (child.querySelector && child.querySelector("button,[role=button],[data-icon]")) controls++;
+        }
+        if (controls >= 2) return el;
+      }
+      if (String(parent.tagName || "").toLowerCase() === "header") break;
+      el = parent;
+    }
+    return point;
+  }
+
+  function rightClusterButton(doc) {
+    var header = doc.querySelector("#main header");
+    if (!header || typeof header.getBoundingClientRect !== "function") return null;
+    var box = header.getBoundingClientRect();
+    if (box.width < 160) return null;
+    var buttons = listed(header, "button,[role=button]");
+    var best = null;
+    var bestLeft = Infinity;
+    var limit = box.left + box.width * 0.55;
+    for (var i = 0; i < buttons.length; i++) {
+      var el = buttons[i];
+      if (typeof el.closest === "function" && el.closest("[data-whatrust-standin]")) continue;
+      if (typeof el.getBoundingClientRect !== "function") continue;
+      var rect = el.getBoundingClientRect();
+      if (rect.width < 20 || rect.height < 20 || rect.width > 64 || rect.height > 64) continue;
+      if (rect.left < limit) continue;
+      if (rect.left < bestLeft) {
+        best = el;
+        bestLeft = rect.left;
+      }
+    }
+    return best;
+  }
+
+  function placeHost() {
+    var slot = videoCallButton(document) || rightClusterButton(document);
+    if (!slot || !slot.parentNode) return false;
+    var header = document.querySelector("#main header");
+    if (!header || (header.contains && !header.contains(slot))) return false;
+    var anchor = headerSlot(slot);
+    if (!anchor || !anchor.parentNode || (anchor.contains && anchor.contains(host))) return false;
+    if (host.parentNode !== anchor.parentNode || host.nextElementSibling !== anchor) {
+      anchor.parentNode.insertBefore(host, anchor);
+    }
+    if (host.getAttribute("style") !== HOST_STYLE) host.setAttribute("style", HOST_STYLE);
+    return true;
+  }
+
+  function syncPanel() {
+    if (!open || !panelHost || !shadow) return;
+    var pill = shadow.querySelector(".pill");
+    if (!pill || !pill.getBoundingClientRect) return;
+    var rect = pill.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return;
+    var width = Math.min(320, Math.max(180, window.innerWidth - 16));
+    var right = window.innerWidth - rect.right;
+    if (right < 8) right = 8;
+    if (right + width > window.innerWidth - 8) right = Math.max(8, window.innerWidth - 8 - width);
+    panelHost.style.display = "block";
+    panelHost.style.top = Math.round(rect.bottom + 8) + "px";
+    panelHost.style.right = Math.round(right) + "px";
+    panelHost.style.width = Math.round(width) + "px";
+    panelHost.style.left = "auto";
   }
 
   function paint() {
     var current = activeChat();
     if (!current) {
-      if (host) host.style.display = "none";
+      hideStandin();
       return;
     }
     ensureHost();
-    host.style.display = "block";
+    if (!placeHost()) {
+      hideStandin();
+      return;
+    }
     var status = statusOf(current.id);
     var shown = (prefs.enabled ? "on:" : "off:") + status;
     var label = prefs.enabled && status === "armed"
@@ -373,15 +532,19 @@
       shadow.appendChild(existing);
     }
     existing.textContent = label;
-    var panel = shadow.querySelector(".panel");
+    var panel = panelShadow && panelShadow.querySelector(".panel");
     if (!open) {
       if (panel) panel.remove();
+      if (panelHost) panelHost.style.display = "none";
       return;
     }
+    ensurePanel();
+    panel = panelShadow.querySelector(".panel");
+    syncPanel();
     if (!panel) {
       panel = document.createElement("div");
       panel.className = "panel";
-      shadow.appendChild(panel);
+      panelShadow.appendChild(panel);
     }
     if (panel.dataset.chat === current.id && panel.dataset.status === shown) {
       fillLog(panel, current.id);
@@ -482,12 +645,14 @@
       return;
     }
     ensureHost();
-    var panel = shadow.querySelector(".panel");
+    ensurePanel();
+    var panel = panelShadow.querySelector(".panel");
     if (!panel) {
       open = true;
       paint();
-      panel = shadow.querySelector(".panel");
+      panel = panelShadow && panelShadow.querySelector(".panel");
     }
+    if (!panel) return;
     var note = document.createElement("div");
     note.className = "confirm";
     note.textContent = "Messages in this chat will be sent to " + prefs.backend + ".";
@@ -539,15 +704,17 @@
   }
 
   function docError(error, fallback) {
-    return String(error) === "locked"
-      ? "Unlock whatRust to change the stand-in."
-      : fallback;
+    var text = typeof error === "string" ? error : String(error || "");
+    invoke("dlog", { msg: ("stand-in: " + text).slice(0, 240) }).catch(function () {});
+    if (text === "locked") return "Unlock whatRust to change the stand-in.";
+    if (text && text !== "[object Object]" && text.length <= 200) return text;
+    return fallback;
   }
 
   function showBanner(chatId, text) {
     if (!bannerHost) {
       bannerHost = document.createElement("div");
-      bannerHost.style.cssText = "position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:100004;background:#111b21;color:#e9edef;padding:12px;border-radius:12px;max-width:420px";
+      bannerHost.style.cssText = "position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:100004;background:#111b21;color:#e9edef;padding:12px;border-radius:12px;max-width:420px;overflow-wrap:anywhere";
       document.documentElement.appendChild(bannerHost);
     }
     bannerHost.innerHTML = "";
@@ -873,6 +1040,32 @@
     }
   }
 
+  function watchPlacement() {
+    if (watchPlacement.started) return;
+    if (!document.body) {
+      setTimeout(watchPlacement, 200);
+      return;
+    }
+    watchPlacement.started = true;
+    var timer = 0;
+    var observer = new MutationObserver(function () {
+      if (timer) return;
+      timer = setTimeout(function () {
+        timer = 0;
+        if (!activeChat()) {
+          hideStandin();
+          return;
+        }
+        ensureHost();
+        if (!placeHost()) hideStandin();
+        else if (open) syncPanel();
+      }, 200);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("resize", function () { if (open) syncPanel(); });
+  }
+
   setInterval(paint, 2000);
+  watchPlacement();
   refresh().then(armWatch);
 })();

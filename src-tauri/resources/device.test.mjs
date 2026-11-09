@@ -47,6 +47,17 @@ class El {
     return child;
   }
   get parentElement() { return this.parentNode; }
+  get previousElementSibling() {
+    if (!this.parentNode) return null;
+    const at = this.parentNode.children.indexOf(this);
+    return at > 0 ? this.parentNode.children[at - 1] : null;
+  }
+  get childNodes() { return this._nodes || []; }
+  getBoundingClientRect() {
+    if (this.rect) return this.rect;
+    if (this.attrs && this.attrs["data-wr-device"] && globalThis.__WR_ICON_RECT) return globalThis.__WR_ICON_RECT;
+    return { left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0 };
+  }
   get nextSibling() {
     if (!this.parentNode) return null;
     const at = this.parentNode.children.indexOf(this);
@@ -218,8 +229,71 @@ api.paint(corner.message);
 api.paint(corner.message);
 const spacers = corner.message.querySelectorAll("[data-wr-device-spacer]");
 assert(spacers.length === 1 && spacers[0].parentNode === cornerBody, "an overlaid time reserves space at the end of the text");
+assert(spacers[0].style.width === "15px", "the reserved space is only the icon width");
 assert(corner.message.querySelector("[data-wr-device]").parentNode === corner.clock, "the overlaid icon stays inside the time");
 assert(corner.clock.style.zIndex === "2", "the time stays above the last line");
+
+function deletedRow(id, time) {
+  const message = new El("div");
+  message.setAttribute("data-id", id);
+  const plain = new El("div");
+  plain.setAttribute("data-pre-plain-text", "[" + time + ", 11/9/2026] Ana: ");
+  const line = new El("span");
+  const ban = new El("span");
+  ban.setAttribute("data-icon", "recalled");
+  const words = new El("span");
+  words.textContent = "This message was deleted";
+  line.appendChild(ban);
+  line.appendChild(words);
+  const body = new El("span");
+  body.setAttribute("class", "selectable-text copyable-text");
+  body.appendChild(line);
+  const clock = new El("span");
+  clock.textContent = time;
+  const meta = new El("div");
+  meta.appendChild(clock);
+  plain.appendChild(body);
+  plain.appendChild(meta);
+  message.appendChild(plain);
+  positions.set(meta, "absolute");
+  return { message, clock, line };
+}
+const deleted = deletedRow(web, "10:39 AM");
+api.paint(deleted.message);
+const deletedSpacers = deleted.message.querySelectorAll("[data-wr-device-spacer]");
+assert(deletedSpacers.length === 1 && deletedSpacers[0].parentNode === deleted.line, "a deleted message reserves space on the icon-and-text row");
+assert(deleted.message.querySelector("[data-wr-device]").parentNode === deleted.clock, "the deleted-message icon stays inside the time");
+
+const clear = row(apple, "8:05");
+const clearBody = clear.message.querySelector("span");
+clearBody.setAttribute("class", "selectable-text");
+positions.set(clear.clock, "absolute");
+clear.clock.rect = { left: 90, right: 140, top: 0, bottom: 14, width: 50, height: 14 };
+clearBody._nodes = [{ nodeType: 3, textContent: "hi", rect: { left: 0, right: 20, top: 0, bottom: 14, width: 20, height: 14 } }];
+globalThis.__WR_ICON_RECT = { left: 90, right: 102, top: 1, bottom: 13, width: 12, height: 12 };
+document.createRange = () => {
+  let node = null;
+  return {
+    selectNodeContents(n) { node = n; },
+    getClientRects() { return node && node.rect ? [node.rect] : []; },
+    detach() {},
+  };
+};
+api.paint(clear.message);
+assert(clear.message.querySelector("[data-wr-device-spacer]") === null, "a short line that clears the icon gets no extra gap");
+
+const tight = row(web, "10:40 AM");
+const tightBody = tight.message.querySelector("span");
+tightBody.setAttribute("class", "selectable-text");
+positions.set(tight.clock, "absolute");
+tight.clock.rect = { left: 70, right: 140, top: 0, bottom: 14, width: 70, height: 14 };
+tightBody._nodes = [{ nodeType: 3, textContent: "deleted", rect: { left: 0, right: 80, top: 0, bottom: 14, width: 80, height: 14 } }];
+globalThis.__WR_ICON_RECT = { left: 70, right: 82, top: 1, bottom: 13, width: 12, height: 12 };
+api.paint(tight.message);
+api.paint(tight.message);
+const tightSpacers = tight.message.querySelectorAll("[data-wr-device-spacer]");
+assert(tightSpacers.length === 1 && tightSpacers[0].parentNode === tightBody, "an overlapping last line keeps a single gap");
+assert(tightSpacers[0].style.width === "11px", "the gap matches the overlap instead of a fixed pad");
 
 api.setEnabled(false);
 api.paint(sample.message);

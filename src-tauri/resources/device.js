@@ -145,7 +145,123 @@
       if (layer && (el === layer || (layer.contains && layer.contains(el)))) continue;
       if (classText(el).indexOf(" selectable-text ") !== -1) return el;
     }
+    // Deleted messages sometimes keep the words next to the time with no
+    // selectable-text class. The row beside the corner time is that line.
+    if (layer && layer.previousElementSibling) {
+      var prev = layer.previousElementSibling;
+      if (prev && !attr(prev, "data-wr-device") && !attr(prev, "data-wr-device-spacer")) return prev;
+    }
     return null;
+  }
+
+  // A spacer on an outer wrapper sits under a flex or block row and does not
+  // make that row any wider, so the corner icon still covers the last letters.
+  function textLine(body, layer) {
+    var node = body;
+    for (var depth = 0; node && depth < 6; depth++) {
+      var only = null;
+      var count = 0;
+      var kids = node.children || [];
+      for (var i = 0; i < kids.length; i++) {
+        var child = kids[i];
+        if (attr(child, "data-wr-device") || attr(child, "data-wr-device-spacer")) continue;
+        if (layer && (child === layer || (layer.contains && layer.contains(child)))) continue;
+        count++;
+        only = child;
+      }
+      if (count !== 1) break;
+      node = only;
+    }
+    return node;
+  }
+
+  function rectOf(el) {
+    try {
+      if (!el || typeof el.getBoundingClientRect !== "function") return null;
+      var r = el.getBoundingClientRect();
+      if (!r || r.width < 1 || r.height < 1) return null;
+      return r;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function lastTextRect(host) {
+    var doc = root.document;
+    if (!host || !doc || typeof doc.createRange !== "function") return null;
+    var range;
+    try { range = doc.createRange(); } catch (e) { return null; }
+    var best = null;
+    function consider(node) {
+      if (!node || node.nodeType !== 3 || !String(node.textContent || "").trim()) return;
+      try {
+        range.selectNodeContents(node);
+        var rects = range.getClientRects ? range.getClientRects() : [];
+        for (var i = 0; i < rects.length; i++) {
+          var r = rects[i];
+          if (!r || r.width < 1 || r.height < 1) continue;
+          if (!best || r.bottom > best.bottom + 0.5 || (Math.abs(r.bottom - best.bottom) <= 0.5 && r.right > best.right)) best = r;
+        }
+      } catch (e) {}
+    }
+    function walk(el) {
+      var nodes = el.childNodes || [];
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        if (n.nodeType === 3) consider(n);
+        else if (n.nodeType === 1 && !attr(n, "data-wr-device") && !attr(n, "data-wr-device-spacer")) walk(n);
+      }
+    }
+    walk(host);
+    try { if (range.detach) range.detach(); } catch (e) {}
+    return best;
+  }
+
+  // The clock is the icon plus the gap before the digits. Count that gap, or
+  // the icon looks clear while it still covers the last letters.
+  function hitRect(icon, clock) {
+    var r = rectOf(icon);
+    if (!r) return null;
+    var left = r.left;
+    var right = r.right;
+    var c = rectOf(clock);
+    if (c) {
+      if (c.right > r.right + 1) right += Math.min(4, c.right - r.right);
+      if (c.left < r.left - 1) left -= Math.min(4, r.left - c.left);
+    }
+    return { left: left, right: right, top: r.top, bottom: r.bottom };
+  }
+
+  function overlapAmount(icon, clock, host) {
+    var text = lastTextRect(host);
+    var box = hitRect(icon, clock);
+    if (!text || !box) return null;
+    var x = Math.min(box.right, text.right) - Math.max(box.left, text.left);
+    var y = Math.min(box.bottom, text.bottom) - Math.max(box.top, text.top);
+    if (y <= 0.5) return 0;
+    return x > 0.5 ? x : 0;
+  }
+
+  function directChild(el, name) {
+    var kids = el && el.children || [];
+    for (var i = 0; i < kids.length; i++) {
+      if (attr(kids[i], name)) return kids[i];
+    }
+    return null;
+  }
+
+  function styleSpacer(spacer, width) {
+    var s = spacer.style;
+    if (!s) return;
+    s.display = "inline-block";
+    s.height = "1px";
+    s.overflow = "hidden";
+    s.verticalAlign = "bottom";
+    s.userSelect = "none";
+    s.pointerEvents = "none";
+    s.flex = "none";
+    s.flexShrink = "0";
+    s.width = width + "px";
   }
 
   function removeSpacers(node) {
@@ -163,19 +279,51 @@
     removeSpacers(node);
   }
 
-  // The corner time is only as wide as the clock. Growing it with an icon covers
-  // the last words unless the message text reserves the same extra width.
-  function reserve(row, layer) {
+  // The corner time is only as wide as the digits. The icon hangs off its left
+  // side, over the last letters. Reserve just that overlap, on the same line
+  // as the words, and leave messages that already clear the icon alone.
+  function reserve(row, layer, clock) {
     var body = findBody(row, layer);
-    if (!body) return;
-    if (body.querySelector && body.querySelector("[data-wr-device-spacer]")) return;
-    var doc = root.document;
-    if (!doc) return;
-    var spacer = doc.createElement("span");
-    spacer.setAttribute("data-wr-device-spacer", "1");
-    spacer.setAttribute("aria-hidden", "true");
-    spacer.style.cssText = "display:inline-block;width:18px;height:1px;overflow:hidden;vertical-align:bottom;user-select:none;pointer-events:none";
-    body.appendChild(spacer);
+    if (!body || !root.document) {
+      removeSpacers(row);
+      return;
+    }
+    var host = textLine(body, layer);
+    if (!host) {
+      removeSpacers(row);
+      return;
+    }
+    var icon = clock && clock.querySelector ? clock.querySelector("[data-wr-device]") : null;
+    var existing = row.querySelectorAll ? row.querySelectorAll("[data-wr-device-spacer]") : [];
+    var hidden = [];
+    for (var i = 0; i < existing.length; i++) {
+      hidden.push(existing[i].style ? existing[i].style.display : "");
+      if (existing[i].style) existing[i].style.display = "none";
+    }
+    var amount = overlapAmount(icon, clock, host);
+    for (var h = 0; h < hidden.length; h++) {
+      if (existing[h].style) existing[h].style.display = hidden[h] || "";
+    }
+    // No layout boxes: keep a single icon-width gap. A measured miss removes it.
+    var width = amount === null ? 15 : amount <= 0.5 ? 0 : Math.min(16, Math.ceil(amount + 1));
+    if (!width) {
+      removeSpacers(row);
+      return;
+    }
+    var spacer = directChild(host, "data-wr-device-spacer");
+    if (!spacer) {
+      spacer = root.document.createElement("span");
+      spacer.setAttribute("data-wr-device-spacer", "1");
+      spacer.setAttribute("aria-hidden", "true");
+      styleSpacer(spacer, width);
+      host.appendChild(spacer);
+    } else if (!spacer.style || spacer.style.width !== width + "px") {
+      styleSpacer(spacer, width);
+    }
+    var all = row.querySelectorAll("[data-wr-device-spacer]");
+    for (var k = 0; k < all.length; k++) {
+      if (all[k] !== spacer && all[k].parentNode) all[k].parentNode.removeChild(all[k]);
+    }
   }
 
   function clockSpan(row) {
@@ -300,7 +448,7 @@
     var layer = outOfFlow(clock, node);
     if (layer) {
       if (layer.style && !layer.style.zIndex) layer.style.zIndex = "2";
-      reserve(node, layer);
+      reserve(node, layer, clock);
     } else {
       removeSpacers(node);
     }

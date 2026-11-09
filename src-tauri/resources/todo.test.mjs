@@ -432,7 +432,6 @@ assert(lightPalette.panel.bg === "#ffffff" && lightPalette.panel.fg === "#111b21
 assert(darkPalette.popup.bg === "#233138" && darkPalette.popup.btn === "#2a3942" && darkPalette.popup.link === "#7dffb3", "dark popups use the elevated WhatsApp surface");
 assert(lightPalette.popup.bg === "#ffffff" && lightPalette.popup.fg === "#111b21" && lightPalette.popup.btn === "#f0f2f5" && lightPalette.popup.link === "#008069", "light popups use a readable undo color");
 assert(lightPalette.popup.border === "1px solid #e9edef", "a light popup keeps a visible edge");
-assert(darkPalette.hover.bg === "#111b21cc" && lightPalette.hover.bg === "#ffffffcc", "the hover chip keeps its translucent wash");
 
 const popup = api.popupCss();
 assert(popup.indexOf("var(--bg)") !== -1 && popup.indexOf("var(--btn)") !== -1, "popup styles follow the theme variables");

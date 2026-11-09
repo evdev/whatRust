@@ -348,9 +348,13 @@ static EN_TABLE: &[(&str, &str)] = &[
     ("Abra a lista de tarefas e Respostas para vê-los.", "Open To-Do and Replies to see them."),
     ("Abra Respostas para vê-los.", "Open Replies to see them."),
     // Stand-in copy is English in both interface languages.
-    ("The model did not return a decision.", "The model did not return a decision."),
+    ("Nothing was sent because the model did not choose to reply, stay quiet, or search the chat.", "Nothing was sent because the model did not choose to reply, stay quiet, or search the chat."),
+    ("Nothing was sent about \"{0}\" because the model did not choose to reply, stay quiet, or search the chat.", "Nothing was sent about \"{0}\" because the model did not choose to reply, stay quiet, or search the chat."),
+    ("Nothing was sent in {0} because the model did not choose to reply, stay quiet, or search the chat.", "Nothing was sent in {0} because the model did not choose to reply, stay quiet, or search the chat."),
+    ("Nothing was sent in {0} about \"{1}\" because the model did not choose to reply, stay quiet, or search the chat.", "Nothing was sent in {0} about \"{1}\" because the model did not choose to reply, stay quiet, or search the chat."),
     ("The reply would reveal that it is an AI.", "The reply would reveal that it is an AI."),
     ("The model chose to stay quiet.", "The model chose to stay quiet."),
+    ("The model chose to stay quiet about \"{0}\".", "The model chose to stay quiet about \"{0}\"."),
     ("Too many searches in the chat.", "Too many searches in the chat."),
     ("That chat is not valid.", "That chat is not valid."),
     ("Confirm where the chat is sent.", "Confirm where the chat is sent."),
@@ -367,6 +371,7 @@ static EN_TABLE: &[(&str, &str)] = &[
     ("Reply limit reached in this chat.", "Reply limit reached in this chat."),
     ("The stand-in paused in {0}.", "The stand-in paused in {0}."),
     ("The stand-in stayed quiet in {0}.", "The stand-in stayed quiet in {0}."),
+    ("The stand-in stayed quiet in {0} about \"{1}\".", "The stand-in stayed quiet in {0} about \"{1}\"."),
     ("Stand-in", "Stand-in"),
     ("this chat", "this chat"),
 ];

@@ -1028,4 +1028,167 @@ mod tests {
     fn is_remote_settings_is_false() {
         assert!(!is_remote_label("settings"));
     }
+
+    /// A top-level invoke key that contains `_` only arrives if the command
+    /// opts into snake_case. Tauri's default is camelCase, and a missing
+    /// required key rejects the call.
+    #[test]
+    fn page_scripts_snake_case_keys_match_the_command() {
+        let scripts = [
+            include_str!("../resources/autoreply.js"),
+            include_str!("../resources/bridge.js"),
+            include_str!("../resources/integration.js"),
+            include_str!("../resources/todo.js"),
+            include_str!("../resources/voice.js"),
+            include_str!("../../settings-ui/lock.js"),
+            include_str!("../../settings-ui/main.js"),
+            include_str!("../../settings-ui/panel.js"),
+            include_str!("../../settings-ui/shell.js"),
+            include_str!("../../settings-ui/updates.js"),
+        ];
+        let rust = [
+            include_str!("autoreply.rs"),
+            include_str!("commands.rs"),
+            include_str!("integration.rs"),
+            include_str!("todo.rs"),
+            include_str!("voice.rs"),
+        ]
+        .join("\n");
+        let mut found = 0;
+        for script in scripts {
+            let mut search = 0;
+            while let Some(rel) = script[search..].find("invoke(\"") {
+                let start = search + rel;
+                let after = &script[start + "invoke(\"".len()..];
+                let Some(name_len) = after.find('"') else {
+                    break;
+                };
+                let name = &after[..name_len];
+                let after_name = &after[name_len + 1..];
+                search = start + 8;
+                let Some(body) = top_level_object(after_name) else {
+                    continue;
+                };
+                for key in object_key_spans(body) {
+                    if !key.contains('_') {
+                        continue;
+                    }
+                    found += 1;
+                    let Some(at) = rust.find(&format!("fn {name}(")) else {
+                        panic!("{name} is called from a page script but has no command");
+                    };
+                    let window = &rust[at.saturating_sub(500)..at];
+                    assert!(
+                        window.contains("rename_all = \"snake_case\""),
+                        "{name} is called with {key}"
+                    );
+                }
+            }
+        }
+        assert!(
+            found >= 8,
+            "expected the known snake_case calls, found {found}"
+        );
+    }
+
+    fn top_level_object(after_name: &str) -> Option<&str> {
+        let bytes = after_name.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b',' {
+            return None;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'{' {
+            return None;
+        }
+        let mut depth = 0;
+        let mut in_str = None;
+        let mut escape = false;
+        for (offset, byte) in after_name[i..].bytes().enumerate() {
+            if let Some(quote) = in_str {
+                if escape {
+                    escape = false;
+                } else if byte == b'\\' {
+                    escape = true;
+                } else if byte == quote {
+                    in_str = None;
+                }
+                continue;
+            }
+            match byte {
+                b'\'' | b'"' | b'`' => in_str = Some(byte),
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&after_name[i + 1..i + offset]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn object_key_spans(body: &str) -> Vec<&str> {
+        let mut keys = Vec::new();
+        let mut depth = 0;
+        let mut in_str = None;
+        let mut escape = false;
+        let mut start = None;
+        let bytes = body.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let byte = bytes[i];
+            if let Some(quote) = in_str {
+                if escape {
+                    escape = false;
+                } else if byte == b'\\' {
+                    escape = true;
+                } else if byte == quote {
+                    in_str = None;
+                }
+                i += 1;
+                continue;
+            }
+            match byte {
+                b'\'' | b'"' | b'`' => in_str = Some(byte),
+                b'{' | b'(' | b'[' => {
+                    depth += 1;
+                    start = None;
+                }
+                b'}' | b')' | b']' => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                }
+                b':' if depth == 0 => {
+                    if let Some(from) = start {
+                        let key = body[from..i].trim().trim_matches(|c| c == '"' || c == '\'');
+                        if !key.is_empty()
+                            && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        {
+                            keys.push(key);
+                        }
+                    }
+                    start = None;
+                }
+                b',' if depth == 0 => start = None,
+                _ if depth == 0 && !byte.is_ascii_whitespace() => {
+                    if start.is_none() {
+                        start = Some(i);
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        keys
+    }
 }

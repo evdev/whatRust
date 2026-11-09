@@ -491,7 +491,8 @@ fn finish(
     Ok(snapshot)
 }
 
-#[tauri::command]
+// The page sends snake_case keys. Tauri otherwise requires camelCase.
+#[tauri::command(rename_all = "snake_case")]
 pub fn todo_list(
     window: tauri::Webview,
     app: AppHandle,
@@ -506,7 +507,7 @@ pub fn todo_list(
     Ok(snapshot_of(&file, now_ms(), offset))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn todo_add(
     window: tauri::Webview,
     app: AppHandle,
@@ -520,7 +521,7 @@ pub fn todo_add(
     finish(&app, &account_id, snapshot)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn todo_update(
     window: tauri::Webview,
     app: AppHandle,
@@ -531,7 +532,7 @@ pub fn todo_update(
     finish(&app, &account_id, snapshot)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn todo_toggle_done(
     window: tauri::Webview,
     app: AppHandle,
@@ -558,7 +559,7 @@ pub fn todo_toggle_done(
     finish(&app, &account_id, snapshot)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn todo_delete(
     window: tauri::Webview,
     app: AppHandle,
@@ -577,7 +578,7 @@ pub fn todo_delete(
     finish(&app, &account_id, snapshot)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn todo_snooze(
     window: tauri::Webview,
     app: AppHandle,
@@ -598,7 +599,7 @@ pub fn todo_snooze(
     finish(&app, &account_id, snapshot)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn todo_dismiss_alarm(
     window: tauri::Webview,
     app: AppHandle,
@@ -614,7 +615,7 @@ pub fn todo_dismiss_alarm(
     finish(&app, &account_id, snapshot)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn todo_clear_done(
     window: tauri::Webview,
     app: AppHandle,

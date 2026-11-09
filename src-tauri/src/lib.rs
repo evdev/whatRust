@@ -284,6 +284,7 @@ pub fn run() {
             autoreply::autoreply_save_persona,
             autoreply::autoreply_reset_persona,
             autoreply::autoreply_open_persona,
+            autoreply::list_standin_cli_models,
             autoreply::standin_cli_status,
         ])
         .setup(move |app| {
@@ -405,7 +406,9 @@ pub fn run() {
             #[cfg(windows)]
             ui_health::start(handle);
             tray::setup(handle)?;
-            update_service::start(handle);
+            // Fork: do not start the upstream self-updater. It would check
+            // the original repo and can install those releases over this build.
+            // update_service::start(handle);
             // Let setup return before accessing tray/window APIs again. This
             // avoids waiting on the Windows UI loop while it is being created.
             let startup_handle = handle.clone();

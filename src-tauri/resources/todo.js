@@ -848,14 +848,12 @@
       return {
         panel: { bg: "#111b21", fg: "#e9edef", dim: "#8696a0", line: "#222d34", hover: "#202c33" },
         popup: { bg: "#233138", fg: "#e9edef", dim: "#8696a0", btn: "#2a3942", btnFg: "#ffffff", link: "#7dffb3", border: "0" },
-        hover: { bg: "#111b21cc", fg: "#d1d7db", edge: "#ffffff22" },
         badgeRing: "#111b21",
       };
     }
     return {
       panel: { bg: "#ffffff", fg: "#111b21", dim: "#667781", line: "#e9edef", hover: "#f0f2f5" },
       popup: { bg: "#ffffff", fg: "#111b21", dim: "#667781", btn: "#f0f2f5", btnFg: "#111b21", link: "#008069", border: "1px solid #e9edef" },
-      hover: { bg: "#ffffffcc", fg: "#3b4a54", edge: "#00000022" },
       badgeRing: "#fff",
     };
   }
@@ -944,9 +942,6 @@
   var replyFallback;
   var replyFallbackLabel;
   var replyFallbackBadge;
-  var hover;
-  var hoverTimer;
-  var hoverRow;
   var toastHost;
   var toastTimer;
   var alarmHost;
@@ -1109,14 +1104,6 @@
     node.style.colorScheme = dark ? "dark" : "light";
   }
 
-  function paintHoverColors() {
-    if (!hover) return;
-    var colors = themePalette(themeDark());
-    hover.style.background = colors.hover.bg;
-    hover.style.color = colors.hover.fg;
-    hover.style.border = "1px solid " + colors.hover.edge;
-  }
-
   function paintTheme() {
     var dark = themeDark();
     var colors = themePalette(dark);
@@ -1139,7 +1126,6 @@
       var undo = toastHost.querySelector("[data-role=undo]");
       if (undo) undo.style.color = colors.popup.link;
     }
-    if (hover && hover.style.display !== "none") paintHoverColors();
     if (companion && companion.style.display !== "none") {
       companion.style.background = colors.popup.bg;
       companion.style.color = colors.popup.fg;
@@ -3453,7 +3439,7 @@
   function isOurControl(node) {
     var cur = node;
     for (var i = 0; cur && i < 8; i++) {
-      if (attr(cur, "data-wr-todo-hover") || attr(cur, "data-wr-todo-badge") || attr(cur, "data-wr-todo-menu")) return true;
+      if (attr(cur, "data-wr-todo-badge") || attr(cur, "data-wr-todo-menu")) return true;
       if (cur.id && String(cur.id).indexOf("__whatrust_todo") === 0) return true;
       cur = cur.parentElement;
     }
@@ -3474,55 +3460,6 @@
       cur = cur.parentElement;
     }
     return false;
-  }
-
-  function ensureHover() {
-    if (hover) return;
-    hover = el("button", "+");
-    hover.type = "button";
-    hover.setAttribute("data-wr-todo-hover", "1");
-    hover.style.cssText = "position:fixed;z-index:20;width:22px;height:22px;border-radius:6px;cursor:pointer;display:none;font:14px/20px system-ui;padding:0";
-    hover.addEventListener("click", function (event) {
-      event.preventDefault();
-      event.stopPropagation();
-      if (hover._item) openPanel(hover._item.id);
-      else withExtract(hover._extract, function (next) { addExtract(next, null); });
-    });
-    hover.addEventListener("mouseenter", function () { clearTimeout(hoverTimer); });
-    hover.addEventListener("mouseleave", hideHoverSoon);
-    document.documentElement.appendChild(hover);
-  }
-
-  function hideHoverSoon() {
-    clearTimeout(hoverTimer);
-    hoverRow = null;
-    hoverTimer = setTimeout(function () {
-      if (hover) hover.style.display = "none";
-    }, 250);
-  }
-
-  function positionHover(row) {
-    ensureHover();
-    var rect = rectOf(row);
-    if (!rect) return;
-    if (row !== hoverRow || hover.style.display !== "block") {
-      var extract = extractDom(row);
-      if (!extract) return;
-      hoverRow = row;
-      hover._extract = extract;
-      hover._item = lookupExtract(extract);
-      hover.textContent = hover._item ? "✓" : "+";
-      hover.title = hover._item ? L("Abrir na lista de tarefas", "Open in To-Do") : L("Adicionar à lista de tarefas", "Add to To-Do");
-    }
-    hover.style.display = "block";
-    paintHoverColors();
-    if (rect.height < 72) {
-      hover.style.left = Math.max(8, rect.left + 8) + "px";
-      hover.style.top = Math.max(8, rect.top + (rect.height - 22) / 2) + "px";
-    } else {
-      hover.style.left = Math.max(8, rect.right - 30) + "px";
-      hover.style.top = Math.max(8, rect.bottom - 28) + "px";
-    }
   }
 
   function directBadge(row) {
@@ -3864,23 +3801,6 @@
     armMenuWatch(extractDom(row), event.clientX, event.clientY, false);
   }, true);
 
-  document.addEventListener("mouseover", function (event) {
-    var row = rowOf(event.target);
-    if (!row || !inMain(row)) return;
-    if (isChevronTarget(event.target) || isRowMenuButton(event.target, row)) {
-      hideHoverSoon();
-      return;
-    }
-    clearTimeout(hoverTimer);
-    positionHover(row);
-  }, true);
-
-  document.addEventListener("mouseout", function (event) {
-    if (!hover || hover.style.display === "none") return;
-    if (event.relatedTarget === hover) return;
-    hideHoverSoon();
-  }, true);
-
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape" && open) {
       var active = shadow && shadow.activeElement;
@@ -3962,7 +3882,6 @@
     if (!document.documentElement) return;
     new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
     document.addEventListener("scroll", function () {
-      if (hover) hover.style.display = "none";
       if (!menuFound && pending && pending.fallback && Date.now() - pending.at > 700 && companion && companion.style.display !== "none") {
         stopMenuWatch();
       }

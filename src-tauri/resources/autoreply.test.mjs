@@ -91,6 +91,49 @@ assert(quoted.quoted_snippet === "are we still on for Friday?", "the quoted line
 assert(quoted.text === "yes", "the reply itself stays the text");
 assert(api.messageToken("false_1555@c.us_3EB0ABC") === "3EB0ABC", "a classic id yields its token");
 
+function iconButton(icon, label) {
+  var iconNode = {
+    getAttribute: function (name) {
+      return name === "data-icon" ? icon : "";
+    },
+  };
+  return {
+    tagName: "BUTTON",
+    getAttribute: function (name) {
+      return name === "aria-label" ? label || "" : "";
+    },
+    querySelectorAll: function (sel) {
+      if (sel === "button,[role=button]") return [];
+      return [iconNode];
+    },
+  };
+}
+
+function headerDoc(buttons) {
+  return {
+    querySelector: function (sel) {
+      if (sel !== "#main header") return null;
+      return {
+        querySelectorAll: function () {
+          return buttons;
+        },
+      };
+    },
+  };
+}
+
+const video = iconButton("video-call", "Video call");
+const voice = iconButton("voice-call", "Voice call");
+const menu = iconButton("menu", "Menu");
+assert(
+  api.videoCallButton(headerDoc([voice, video, menu])) === video,
+  "the stand-in anchors on the video call, not the menu"
+);
+assert(api.videoCallButton(headerDoc([voice, menu])) === null, "a voice call is not the video call");
+assert(api.isVideoCallControl(iconButton("", "Chamada de vídeo")), "a Portuguese video call label counts");
+assert(!api.isVideoCallControl(iconButton("menu", "Menu")), "the menu is not the video call");
+assert(!api.isVideoCallControl(iconButton("voice-call", "Voice call")), "the voice call is not the video call");
+
 if (failures) {
   console.error(`\n${failures} failed`);
   process.exit(1);

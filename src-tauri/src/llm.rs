@@ -88,18 +88,9 @@ pub fn build(job: &Completion<'_>) -> Result<Outbound, &'static str> {
 pub fn parse(provider: &str, body: &str) -> Result<String, &'static str> {
     let value: Value = serde_json::from_str(body).map_err(|_| "llm")?;
     let text = match provider {
-        OPENROUTER => value
-            .pointer("/choices/0/message/content")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        GEMINI => value
-            .pointer("/candidates/0/content/parts/0/text")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        ANTHROPIC => value
-            .pointer("/content/0/text")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        OPENROUTER => openrouter_text(&value),
+        GEMINI => gemini_text(&value),
+        ANTHROPIC => anthropic_text(&value),
         _ => None,
     };
     match text {
@@ -111,6 +102,16 @@ pub fn parse(provider: &str, body: &str) -> Result<String, &'static str> {
 pub async fn complete(job: Completion<'_>) -> Result<String, &'static str> {
     let provider = job.provider.to_string();
     let outbound = build(&job)?;
+    // Voice and summary callers have one error string. A schema rejection is
+    // only meaningful to the stand-in, which uses `complete_turns`.
+    match finish(&provider, outbound).await {
+        Err("llm_rejected") => Err("llm"),
+        other => other,
+    }
+}
+
+async fn finish(provider: &str, outbound: Outbound) -> Result<String, &'static str> {
+    let provider = provider.to_string();
     let body = tauri::async_runtime::spawn_blocking(move || post(outbound))
         .await
         .map_err(|_| "llm")??;
@@ -122,7 +123,10 @@ fn post(outbound: Outbound) -> Result<String, &'static str> {
         Ok((status, body)) if (200..300).contains(&status) => Ok(body),
         Ok((status, _)) => {
             crate::dlog::log(&format!("voice: llm status={status}"));
-            Err("llm")
+            // 400 is a rejected request, which is what an unsupported JSON
+            // schema looks like. Other 4xx codes, such as a rate limit, are
+            // not retried.
+            Err(if status == 400 { "llm_rejected" } else { "llm" })
         }
         Err(error) => {
             crate::dlog::log(&format!("voice: llm status={}", error.status));
@@ -1025,6 +1029,10 @@ pub struct TurnJob<'a> {
     pub system: &'a str,
     pub turns: &'a [ChatTurn<'a>],
     pub max_tokens: u32,
+    /// When set, Gemini and OpenRouter are asked for a JSON object.
+    /// Anthropic is asked for this schema. Callers retry without it if the
+    /// provider rejects the request.
+    pub json_schema: Option<&'a str>,
 }
 
 /// One completion that can include earlier assistant and user turns.
@@ -1040,50 +1048,71 @@ pub fn build_turns(job: &TurnJob<'_>) -> Result<Outbound, &'static str> {
         return Err("llm");
     }
     match job.provider {
-        OPENROUTER => Ok(Outbound {
-            url: "https://openrouter.ai/api/v1/chat/completions".into(),
-            headers: vec![
-                ("Authorization".into(), format!("Bearer {}", job.key)),
-                ("Content-Type".into(), "application/json".into()),
-            ],
-            body: json!({
+        OPENROUTER => {
+            let mut body = json!({
                 "model": job.model,
                 "max_tokens": job.max_tokens,
                 "messages": openrouter_messages(job.system, &turns)
+            });
+            // `json_object` is the compatible request. A strict json_schema
+            // is rejected by some routed models, which would fail the turn.
+            if job.json_schema.is_some() {
+                body["response_format"] = json!({"type": "json_object"});
+            }
+            Ok(Outbound {
+                url: "https://openrouter.ai/api/v1/chat/completions".into(),
+                headers: vec![
+                    ("Authorization".into(), format!("Bearer {}", job.key)),
+                    ("Content-Type".into(), "application/json".into()),
+                ],
+                body: body.to_string(),
             })
-            .to_string(),
-        }),
-        GEMINI => Ok(Outbound {
-            url: format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-                path_encode(job.model)
-            ),
-            headers: vec![
-                ("x-goog-api-key".into(), job.key.into()),
-                ("Content-Type".into(), "application/json".into()),
-            ],
-            body: json!({
-                "systemInstruction": {"parts": [{"text": job.system}]},
-                "contents": gemini_contents(&turns),
-                "generationConfig": {"maxOutputTokens": job.max_tokens}
+        }
+        GEMINI => {
+            let mut generation = json!({"maxOutputTokens": job.max_tokens});
+            if let Some(schema) = parsed_schema(job.json_schema) {
+                generation["responseMimeType"] = json!("application/json");
+                generation["responseJsonSchema"] = schema;
+            }
+            Ok(Outbound {
+                url: format!(
+                    "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                    path_encode(job.model)
+                ),
+                headers: vec![
+                    ("x-goog-api-key".into(), job.key.into()),
+                    ("Content-Type".into(), "application/json".into()),
+                ],
+                body: json!({
+                    "systemInstruction": {"parts": [{"text": job.system}]},
+                    "contents": gemini_contents(&turns),
+                    "generationConfig": generation
+                })
+                .to_string(),
             })
-            .to_string(),
-        }),
-        ANTHROPIC => Ok(Outbound {
-            url: "https://api.anthropic.com/v1/messages".into(),
-            headers: vec![
-                ("x-api-key".into(), job.key.into()),
-                ("anthropic-version".into(), "2023-06-01".into()),
-                ("Content-Type".into(), "application/json".into()),
-            ],
-            body: json!({
+        }
+        ANTHROPIC => {
+            let mut body = json!({
                 "model": job.model,
                 "max_tokens": job.max_tokens,
                 "system": job.system,
                 "messages": anthropic_messages(&turns)
+            });
+            if let Some(schema) = parsed_schema(job.json_schema) {
+                body["output_config"] = json!({
+                    "format": {"type": "json_schema", "schema": schema}
+                });
+            }
+            Ok(Outbound {
+                url: "https://api.anthropic.com/v1/messages".into(),
+                headers: vec![
+                    ("x-api-key".into(), job.key.into()),
+                    ("anthropic-version".into(), "2023-06-01".into()),
+                    ("Content-Type".into(), "application/json".into()),
+                ],
+                body: body.to_string(),
             })
-            .to_string(),
-        }),
+        }
         _ => Err("llm"),
     }
 }
@@ -1091,10 +1120,95 @@ pub fn build_turns(job: &TurnJob<'_>) -> Result<Outbound, &'static str> {
 pub async fn complete_turns(job: TurnJob<'_>) -> Result<String, &'static str> {
     let provider = job.provider.to_string();
     let outbound = build_turns(&job)?;
-    let body = tauri::async_runtime::spawn_blocking(move || post(outbound))
-        .await
-        .map_err(|_| "llm")??;
-    parse(&provider, &body)
+    finish(&provider, outbound).await
+}
+
+fn parsed_schema(schema: Option<&str>) -> Option<Value> {
+    let schema = schema?;
+    let value: Value = serde_json::from_str(schema).ok()?;
+    value.as_object().is_some().then_some(value)
+}
+
+fn push_text(out: &mut String, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(text);
+}
+
+/// Gemini thinking models put a `thought: true` part before the answer.
+/// Reading parts/0 treats that chain of thought as the completion.
+fn gemini_text(value: &Value) -> Option<String> {
+    let parts = value.pointer("/candidates/0/content/parts")?.as_array()?;
+    let answer = join_gemini(parts, true);
+    if answer.is_some() {
+        return answer;
+    }
+    // No visible answer. Use a thought only when it holds the JSON decision,
+    // so a reasoning trace is never returned as a chat reply.
+    let thoughts = join_gemini(parts, false)?;
+    thoughts.contains("\"action\"").then_some(thoughts)
+}
+
+fn join_gemini(parts: &[Value], skip_thoughts: bool) -> Option<String> {
+    let mut out = String::new();
+    for part in parts {
+        let thought = part.get("thought").and_then(Value::as_bool) == Some(true);
+        if skip_thoughts == thought {
+            continue;
+        }
+        if let Some(text) = part.get("text").and_then(Value::as_str) {
+            push_text(&mut out, text);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn anthropic_text(value: &Value) -> Option<String> {
+    let blocks = value.get("content")?.as_array()?;
+    let mut out = String::new();
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("text") {
+            continue;
+        }
+        if let Some(text) = block.get("text").and_then(Value::as_str) {
+            push_text(&mut out, text);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn openrouter_text(value: &Value) -> Option<String> {
+    match value.pointer("/choices/0/message/content")? {
+        Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        Value::Array(parts) => {
+            let mut out = String::new();
+            for part in parts {
+                match part {
+                    Value::String(text) => push_text(&mut out, text),
+                    Value::Object(part) => {
+                        let kind = part.get("type").and_then(Value::as_str).unwrap_or("text");
+                        if kind != "text" && kind != "output_text" {
+                            continue;
+                        }
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            push_text(&mut out, text);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (!out.is_empty()).then_some(out)
+        }
+        _ => None,
+    }
 }
 
 fn joined_turns(turns: &[ChatTurn<'_>]) -> Vec<(String, String)> {
@@ -1521,6 +1635,261 @@ fn run_capturing(
     Ok(output)
 }
 
+/// Models the stand-in picker offers for one command-line program.
+///
+/// Claude Code is chosen by family alias, which tracks the newest model in
+/// that family. Grok and Codex are read from the installed program when it is
+/// there; otherwise a short current list is used. OpenRouter is not a program
+/// and stays a typed name.
+pub fn cli_picker_models(
+    backend: CliBackend,
+    program: Option<&std::path::Path>,
+) -> Vec<ModelChoice> {
+    if let Some(program) = program.filter(|path| path.is_absolute() && path.is_file()) {
+        let args: &[&str] = match backend {
+            CliBackend::Claude => &[],
+            CliBackend::Grok => &["models"],
+            CliBackend::Codex => &["debug", "models", "--bundled"],
+        };
+        if !args.is_empty() {
+            if let Some(text) = capture_stdout(program, args, std::time::Duration::from_secs(5)) {
+                let parsed = match backend {
+                    CliBackend::Grok => parse_grok_models(&text),
+                    CliBackend::Codex => parse_codex_models(&text),
+                    CliBackend::Claude => Vec::new(),
+                };
+                if !parsed.is_empty() {
+                    return parsed;
+                }
+            }
+        }
+    }
+    builtin_cli_models(backend)
+}
+
+pub fn builtin_cli_models(backend: CliBackend) -> Vec<ModelChoice> {
+    match backend {
+        CliBackend::Claude => model_choices(&[
+            ("fable", "Fable"),
+            ("opus", "Opus"),
+            ("sonnet", "Sonnet"),
+            ("haiku", "Haiku"),
+        ]),
+        CliBackend::Grok => {
+            model_choices(&[("grok-4.7", "Grok 4.7"), ("grok-build", "Grok Build")])
+        }
+        CliBackend::Codex => model_choices(&[
+            ("gpt-6-astra", "GPT-6-Astra"),
+            ("gpt-6-sol", "GPT-6-Sol"),
+            ("gpt-6-luna", "GPT-6-Luna"),
+            ("gpt-5.6-sol", "GPT-5.6-Sol"),
+            ("gpt-5.6-terra", "GPT-5.6-Terra"),
+            ("gpt-5.6-luna", "GPT-5.6-Luna"),
+            ("gpt-5.5", "GPT-5.5"),
+        ]),
+    }
+}
+
+fn model_choices(pairs: &[(&str, &str)]) -> Vec<ModelChoice> {
+    pairs
+        .iter()
+        .map(|(id, label)| ModelChoice {
+            id: (*id).to_string(),
+            label: (*label).to_string(),
+        })
+        .collect()
+}
+
+/// `grok models` prints either JSON or one id per line. Prose and markers are dropped.
+pub fn parse_grok_models(text: &str) -> Vec<ModelChoice> {
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        let mut models = Vec::new();
+        push_grok_value(&value, &mut models);
+        if !models.is_empty() {
+            return models;
+        }
+    }
+    let mut models = Vec::new();
+    for line in text.lines() {
+        let Some(id) = model_token(line) else {
+            continue;
+        };
+        if models.iter().any(|model: &ModelChoice| model.id == id) {
+            continue;
+        }
+        models.push(ModelChoice {
+            label: id.to_string(),
+            id: id.to_string(),
+        });
+    }
+    models
+}
+
+fn push_grok_value(value: &Value, models: &mut Vec<ModelChoice>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                push_grok_value(item, models);
+            }
+        }
+        Value::Object(map) => {
+            if let Some(list) = map.get("models") {
+                push_grok_value(list, models);
+                return;
+            }
+            let id = ["id", "slug", "model"]
+                .iter()
+                .find_map(|key| map.get(*key).and_then(Value::as_str))
+                .and_then(model_token);
+            let Some(id) = id else {
+                return;
+            };
+            if models.iter().any(|model| model.id == id) {
+                return;
+            }
+            let label = ["display_name", "name", "label"]
+                .iter()
+                .find_map(|key| map.get(*key).and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .unwrap_or(id)
+                .to_string();
+            models.push(ModelChoice {
+                id: id.to_string(),
+                label,
+            });
+        }
+        Value::String(text) => {
+            let Some(id) = model_token(text) else {
+                return;
+            };
+            if models.iter().any(|model| model.id == id) {
+                return;
+            }
+            models.push(ModelChoice {
+                label: id.to_string(),
+                id: id.to_string(),
+            });
+        }
+        _ => {}
+    }
+}
+
+fn model_token(text: &str) -> Option<&str> {
+    let text = text
+        .trim()
+        .trim_start_matches(|c: char| matches!(c, '-' | '*' | '•'))
+        .trim();
+    let token = text
+        .split_whitespace()
+        .next()?
+        .trim_matches(|c: char| matches!(c, ',' | '"' | '\'' | '`' | '*' | '[' | ']' | '(' | ')'));
+    if !(2..=80).contains(&token.len()) {
+        return None;
+    }
+    let mut chars = token.chars();
+    if !chars.next()?.is_ascii_alphabetic() {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_')) {
+        return None;
+    }
+    // A bare word is a heading ("Available"), not a model id.
+    if !token.contains('-') && !token.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(token)
+}
+
+/// Codex `debug models --bundled` JSON. Only models the program itself lists
+/// in its picker are kept, in the program's order.
+pub fn parse_codex_models(text: &str) -> Vec<ModelChoice> {
+    #[derive(serde::Deserialize)]
+    struct Catalog {
+        models: Vec<Listed>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Listed {
+        slug: String,
+        #[serde(default)]
+        display_name: String,
+        #[serde(default)]
+        visibility: String,
+        #[serde(default)]
+        priority: i64,
+    }
+    let Ok(catalog) = serde_json::from_str::<Catalog>(text) else {
+        return Vec::new();
+    };
+    let mut models = catalog.models;
+    models.retain(|model| model.visibility == "list" && model_token(&model.slug).is_some());
+    models.sort_by_key(|model| model.priority);
+    models
+        .into_iter()
+        .map(|model| ModelChoice {
+            label: if model.display_name.trim().is_empty() {
+                model.slug.clone()
+            } else {
+                model.display_name
+            },
+            id: model.slug,
+        })
+        .collect()
+}
+
+fn capture_stdout(
+    program: &std::path::Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf.truncate(1_000_000);
+        buf
+    });
+    let started = Instant::now();
+    // None means the process was killed or failed to report a status. Partial
+    // output from a killed process is not a model list.
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() > timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(30)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let bytes = reader.join().ok()?;
+    if !status.is_some_and(|status| status.success()) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1592,6 +1961,27 @@ mod tests {
         );
         assert!(parse(OPENROUTER, r#"{"error":{"message":"no"}}"#).is_err());
         assert!(parse(GEMINI, "not json").is_err());
+        assert_eq!(
+            parse(
+                GEMINI,
+                r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking"},{"text":"{\"action\":\"skip\"}"}]}}]}"#
+            )
+            .unwrap(),
+            r#"{"action":"skip"}"#
+        );
+        assert!(parse(
+            GEMINI,
+            r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"I should stay quiet"}]}}]}"#
+        )
+        .is_err());
+        assert_eq!(
+            parse(
+                ANTHROPIC,
+                r#"{"content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"Done"}]}"#
+            )
+            .unwrap(),
+            "Done"
+        );
     }
 
     #[test]
@@ -1876,6 +2266,7 @@ mod tests {
                 system: "system",
                 turns: &turns,
                 max_tokens: 64,
+                json_schema: None,
             })
             .unwrap();
             assert!(!outbound.body.contains(key), "{provider}");
@@ -1904,10 +2295,60 @@ mod tests {
             system: "system",
             turns: &mixed,
             max_tokens: 64,
+            json_schema: None,
         })
         .unwrap();
         assert!(outbound.body.contains("\"role\":\"model\""));
         assert!(!outbound.body.contains("\"role\":\"assistant\""));
+        assert!(!outbound.body.contains("responseMimeType"));
+    }
+
+    #[test]
+    fn json_mode_is_added_only_when_a_schema_is_set() {
+        let key = "sk-test-KEY-123";
+        let turns = [ChatTurn {
+            role: "user",
+            content: "hello",
+        }];
+        let schema = r#"{"type":"object","properties":{"action":{"type":"string"}}}"#;
+        let gemini = build_turns(&TurnJob {
+            provider: GEMINI,
+            model: "gemini-2.5-flash",
+            key,
+            system: "system",
+            turns: &turns,
+            max_tokens: 64,
+            json_schema: Some(schema),
+        })
+        .unwrap();
+        assert!(gemini.body.contains("application/json"));
+        assert!(gemini.body.contains("responseJsonSchema"));
+        assert!(!gemini.body.contains(key));
+        let openrouter = build_turns(&TurnJob {
+            provider: OPENROUTER,
+            model: "model-a",
+            key,
+            system: "system",
+            turns: &turns,
+            max_tokens: 64,
+            json_schema: Some(schema),
+        })
+        .unwrap();
+        assert!(openrouter.body.contains("json_object"));
+        assert!(!openrouter.body.contains(key));
+        let anthropic = build_turns(&TurnJob {
+            provider: ANTHROPIC,
+            model: "claude",
+            key,
+            system: "system",
+            turns: &turns,
+            max_tokens: 64,
+            json_schema: Some(schema),
+        })
+        .unwrap();
+        assert!(anthropic.body.contains("output_config"));
+        assert!(anthropic.body.contains("json_schema"));
+        assert!(!anthropic.body.contains(key));
     }
 
     #[test]
@@ -2003,5 +2444,54 @@ mod tests {
                 .contains("reply")
         );
         assert!(decision_text(jsonl).is_empty() || decision_text(jsonl).contains("action"));
+    }
+
+    #[test]
+    fn each_program_has_its_own_model_list() {
+        let claude = builtin_cli_models(CliBackend::Claude);
+        assert!(claude.iter().any(|model| model.id == "sonnet"));
+        assert!(claude.iter().all(|model| !model.id.starts_with("gpt-")));
+        let grok = builtin_cli_models(CliBackend::Grok);
+        assert!(grok.iter().any(|model| model.id == "grok-4.7"));
+        assert!(grok.iter().all(|model| !model.id.starts_with("claude")));
+        let codex = builtin_cli_models(CliBackend::Codex);
+        assert!(codex.iter().any(|model| model.id == "gpt-5.6-terra"));
+        assert!(codex.iter().all(|model| !model.id.starts_with("grok")));
+    }
+
+    #[test]
+    fn grok_model_text_keeps_ids_and_drops_prose() {
+        let models = parse_grok_models("Available models:\ngrok-4.7 (default)\n- grok-4.6\n");
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["grok-4.7", "grok-4.6"]
+        );
+        let json = parse_grok_models(
+            r#"{"models":[{"slug":"grok-4.7","display_name":"Grok 4.7"},{"slug":"grok-build","name":"Grok Build"}]}"#,
+        );
+        assert_eq!(json[0].label, "Grok 4.7");
+        assert_eq!(json[1].id, "grok-build");
+    }
+
+    #[test]
+    fn codex_model_json_keeps_the_picker_order() {
+        let models = parse_codex_models(
+            r#"{"models":[
+                {"slug":"gpt-5.5","display_name":"GPT-5.5","visibility":"list","priority":12},
+                {"slug":"hidden","display_name":"Hidden","visibility":"hide","priority":1},
+                {"slug":"gpt-6-sol","display_name":"GPT-6-Sol","visibility":"list","priority":2}
+            ]}"#,
+        );
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-6-sol", "gpt-5.5"]
+        );
+        assert_eq!(models[0].label, "GPT-6-Sol");
     }
 }

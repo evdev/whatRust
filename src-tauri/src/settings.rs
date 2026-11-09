@@ -69,8 +69,14 @@ pub struct Settings {
     pub standin_model_openrouter: Option<String>,
     pub standin_model_gemini: Option<String>,
     pub standin_model_anthropic: Option<String>,
-    /// Optional model id passed to a CLI backend.
+    /// Older settings stored one model for every program. Kept so that value can
+    /// move onto the program that was selected, then cleared.
     pub standin_cli_model: String,
+    /// Optional model id for each command-line program. Empty lets that program
+    /// choose its own default.
+    pub standin_model_claude: String,
+    pub standin_model_grok: String,
+    pub standin_model_codex: String,
     /// Absolute path to a CLI binary. Empty means look on PATH and the usual install locations.
     pub standin_claude_bin: String,
     pub standin_grok_bin: String,
@@ -147,6 +153,9 @@ impl Default for Settings {
             standin_model_gemini: None,
             standin_model_anthropic: None,
             standin_cli_model: String::new(),
+            standin_model_claude: String::new(),
+            standin_model_grok: String::new(),
+            standin_model_codex: String::new(),
             standin_claude_bin: String::new(),
             standin_grok_bin: String::new(),
             standin_codex_bin: String::new(),
@@ -184,7 +193,7 @@ pub fn sanitize_standin_backend(value: &str, cli_ok: bool) -> String {
     }
 }
 
-fn sanitize_bin(value: &str) -> String {
+pub(crate) fn sanitize_bin(value: &str) -> String {
     let value = value.trim();
     if value.is_empty() || value.len() > 300 || value.chars().any(char::is_control) {
         return String::new();
@@ -369,6 +378,17 @@ impl Settings {
             .unwrap_or_else(|| self.ai_model())
     }
 
+    /// Model id passed to the selected command-line program. Empty lets the
+    /// program use its own default.
+    pub fn standin_program_model(&self) -> &str {
+        match self.standin_backend.as_str() {
+            "claude_cli" => self.standin_model_claude.as_str(),
+            "grok_cli" => self.standin_model_grok.as_str(),
+            "codex_cli" => self.standin_model_codex.as_str(),
+            _ => "",
+        }
+    }
+
     /// Model used when the stand-in calls the configured API provider.
     pub fn standin_model(&self) -> &str {
         let chosen = match self.ai_provider.as_str() {
@@ -405,21 +425,47 @@ impl Settings {
             self.summary_model_anthropic.as_deref().unwrap_or(""),
             &self.ai_model_anthropic,
         ));
+        self.standin_model_claude = sanitize_model(&self.standin_model_claude, "");
+        self.standin_model_grok = sanitize_model(&self.standin_model_grok, "");
+        self.standin_model_codex = sanitize_model(&self.standin_model_codex, "");
+        let legacy = sanitize_model(&self.standin_cli_model, "");
+        match self.standin_backend.as_str() {
+            "claude_cli" => {
+                if self.standin_model_claude.is_empty() {
+                    self.standin_model_claude = legacy;
+                }
+                self.standin_cli_model.clear();
+            }
+            "grok_cli" => {
+                if self.standin_model_grok.is_empty() {
+                    self.standin_model_grok = legacy;
+                }
+                self.standin_cli_model.clear();
+            }
+            "codex_cli" => {
+                if self.standin_model_codex.is_empty() {
+                    self.standin_model_codex = legacy;
+                }
+                self.standin_cli_model.clear();
+            }
+            _ => self.standin_cli_model = legacy,
+        }
         self.standin_backend =
             sanitize_standin_backend(&self.standin_backend, cli_backends_allowed());
+        // Blank stays blank. `standin_model` follows the summary model at call
+        // time, so a later summary change still applies.
         self.standin_model_openrouter = Some(sanitize_model(
             self.standin_model_openrouter.as_deref().unwrap_or(""),
-            &self.summary_model_openrouter.clone().unwrap_or_default(),
+            "",
         ));
         self.standin_model_gemini = Some(sanitize_model(
             self.standin_model_gemini.as_deref().unwrap_or(""),
-            &self.summary_model_gemini.clone().unwrap_or_default(),
+            "",
         ));
         self.standin_model_anthropic = Some(sanitize_model(
             self.standin_model_anthropic.as_deref().unwrap_or(""),
-            &self.summary_model_anthropic.clone().unwrap_or_default(),
+            "",
         ));
-        self.standin_cli_model = sanitize_model(&self.standin_cli_model, "");
         self.standin_claude_bin = sanitize_bin(&self.standin_claude_bin);
         self.standin_grok_bin = sanitize_bin(&self.standin_grok_bin);
         self.standin_codex_bin = sanitize_bin(&self.standin_codex_bin);
@@ -833,6 +879,40 @@ mod tests {
         let s = s.sanitized();
         assert_eq!(s.ai_model(), "claude-haiku-5-5");
         assert_eq!(s.summary_model(), "claude-sonnet-5-5");
+    }
+
+    #[test]
+    fn empty_standin_model_follows_the_summary_model() {
+        let s: Settings = serde_json::from_str(
+            r#"{"ai_provider":"gemini","ai_model_gemini":"gemini-3.8-flash","summary_model_gemini":"gemini-3.8-pro","standin_model_gemini":""}"#,
+        )
+        .unwrap();
+        let s = s.sanitized();
+        assert_eq!(s.standin_model_gemini.as_deref(), Some(""));
+        assert_eq!(s.standin_model(), "gemini-3.8-pro");
+    }
+
+    #[test]
+    fn a_legacy_program_model_stays_with_that_program() {
+        let s: Settings = serde_json::from_str(
+            r#"{"standin_backend":"grok_cli","standin_cli_model":"grok-4.7"}"#,
+        )
+        .unwrap();
+        let s = s.sanitized();
+        assert_eq!(s.standin_model_grok, "grok-4.7");
+        assert_eq!(s.standin_model_claude, "");
+        assert_eq!(s.standin_model_codex, "");
+        assert_eq!(s.standin_cli_model, "");
+    }
+
+    #[test]
+    fn standin_model_can_differ_from_the_summary_model() {
+        let s: Settings = serde_json::from_str(
+            r#"{"ai_provider":"anthropic","summary_model_anthropic":"claude-haiku-5-5","standin_model_anthropic":"claude-sonnet-5-5"}"#,
+        )
+        .unwrap();
+        let s = s.sanitized();
+        assert_eq!(s.standin_model(), "claude-sonnet-5-5");
     }
 
     #[test]

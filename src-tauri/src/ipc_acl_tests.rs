@@ -77,6 +77,7 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "autoreply_save_persona",
     "autoreply_reset_persona",
     "autoreply_open_persona",
+    "list_standin_cli_models",
     "standin_cli_status",
     "get_update_status",
     "check_for_updates",
