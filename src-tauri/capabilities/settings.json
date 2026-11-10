@@ -37,6 +37,7 @@
     "allow-test-notification",
     "allow-open-notification-settings",
     "allow-fluidvoice-status",
+    "allow-open-fluidvoice-windows",
     "allow-set-ai-key",
     "allow-list-ai-models",
     "allow-autoreply-get-persona",

@@ -128,9 +128,13 @@ async function resetIcon() {
   } catch (e) { flash(String(e), 6000); }
 }
 
+let hostPlatform = "";
+
 async function load() {
   const s = await invoke("get_settings");
+  hostPlatform = s.platform;
   setMacRows(s.platform === "macos");
+  document.getElementById("fluidvoice_install_row").hidden = s.platform !== "windows";
   // Title bar (Linux): auto hides it on tiling window managers like Hyprland.
   document.getElementById("title_bar_row").hidden = s.platform !== "linux";
   document.getElementById("title_bar").value = ["show", "hide"].includes(s.title_bar) ? s.title_bar : "auto";
@@ -542,6 +546,14 @@ window.addEventListener("DOMContentLoaded", () => {
     loadCliModelCatalog(standinShown);
   });
   document.getElementById("test_fluidvoice").addEventListener("click", testFluidVoice);
+  document.getElementById("install_fluidvoice").addEventListener("click", () => {
+    offerFluidVoiceInstall(false);
+  });
+  document.getElementById("voice_transcribe").addEventListener("change", () => {
+    if (hostPlatform === "windows" && document.getElementById("voice_transcribe").checked) {
+      offerFluidVoiceIfMissing();
+    }
+  });
   document.getElementById("save_ai_key").addEventListener("click", saveAiKey);
   document.getElementById("remove_ai_key").addEventListener("click", removeAiKey);
   document.getElementById("ai_key").addEventListener("keydown", (e) => {
@@ -805,7 +817,30 @@ function setKeyStatus(text, tone) {
 
 function refreshKeyState() {
   const on = keyFlags[document.getElementById("ai_provider").value];
-  setKeyStatus(on ? "Chave guardada neste Mac." : "Nenhuma chave guardada.", "ok");
+  setKeyStatus(on ? "Chave guardada neste computador." : "Nenhuma chave guardada.", "ok");
+}
+
+async function offerFluidVoiceIfMissing() {
+  try {
+    const port = parseInt(document.getElementById("fluidvoice_port").value, 10) || 47733;
+    const result = await invoke("fluidvoice_status", { port });
+    if (result.ok) return;
+  } catch {
+    // A failed check is the same as no answer: offer the installer.
+  }
+  await offerFluidVoiceInstall(true);
+}
+
+async function offerFluidVoiceInstall(missing) {
+  const message = missing
+    ? "O FluidVoice não respondeu. A transcrição usa esse aplicativo separado, e a versão para Windows ainda é beta. Abrir o instalador oficial? Depois, ative a API local no FluidVoice."
+    : "O FluidVoice é um aplicativo separado, e a versão para Windows ainda é beta. O whatRust abre o instalador oficial no navegador. Depois, ative a API local no FluidVoice.";
+  if (!await Dlg.confirm(message, { title: "Instalar o FluidVoice?", okLabel: "Abrir instalador" })) return;
+  try {
+    await invoke("open_fluidvoice_windows");
+  } catch (e) {
+    document.getElementById("fluidvoice_status").textContent = errorText(e);
+  }
 }
 
 async function testFluidVoice() {
@@ -865,7 +900,7 @@ async function removeAiKey() {
     setKeyStatus("Nenhuma chave guardada.", "ok");
     return;
   }
-  if (!await Dlg.confirm("A chave guardada deste provedor será apagada deste Mac.", {
+  if (!await Dlg.confirm("A chave guardada deste provedor será apagada deste computador.", {
     title: "Remover chave",
     okLabel: "Remover",
     danger: true,
@@ -874,7 +909,7 @@ async function removeAiKey() {
     const result = await invoke("set_ai_key", { provider, key: "", remove: true });
     keyFlags[provider] = false;
     modelCatalogs[provider] = null;
-    setKeyStatus(result.detail || "A chave deste provedor foi removida deste Mac.", "ok");
+    setKeyStatus(result.detail || "A chave deste provedor foi removida deste computador.", "ok");
     if (provider === shownProvider) syncModelControls();
   } catch (e) {
     setKeyStatus(errorText(e), "bad");

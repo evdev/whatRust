@@ -478,14 +478,14 @@
         if (target && host && (target === host || (host.contains && host.contains(target)))) return;
         if (target && (target === panelHost || (panelHost.contains && panelHost.contains(target)))) return;
         open = false;
-        paint();
+        paint(true);
       }, true);
       window.addEventListener("keydown", function (event) {
         if (!open || event.key !== "Escape") return;
         event.preventDefault();
         event.stopPropagation();
         open = false;
-        paint();
+        paint(true);
       }, true);
     }
   }
@@ -582,21 +582,43 @@
     panelHost.style.left = "auto";
   }
 
-  function paint() {
+  function pageBlocked() {
+    return (typeof root.__whatrustPageBusy === "function" && root.__whatrustPageBusy()) || Date.now() < menuQuietUntil;
+  }
+
+  // A click inside the pill retargets to the host at the document, so a
+  // listener has to walk the composed path to see that it was ours.
+  function ownStandinEvent(event) {
+    var path = event && typeof event.composedPath === "function" ? event.composedPath() : [];
+    for (var i = 0; i < path.length; i++) {
+      var node = path[i];
+      if (!node || typeof node.getAttribute !== "function") continue;
+      if (node.getAttribute("data-whatrust-standin") || node.getAttribute("data-whatrust-standin-panel")) return true;
+    }
+    return false;
+  }
+
+  function paint(immediate) {
     if (!open) {
       var stale = panelShadow && panelShadow.querySelector(".panel");
       if (stale) stale.remove();
       if (panelHost) panelHost.style.display = "none";
     }
-    if ((typeof root.__whatrustPageBusy === "function" && root.__whatrustPageBusy()) || Date.now() < menuQuietUntil) return;
-    markStandin();
+    var blocked = pageBlocked();
+    // Background refreshes wait while a WhatsApp menu is opening, because
+    // rewriting the header closes it. The click that opens this panel is
+    // itself that gesture, and a header-menu hold lasts half a minute, so a
+    // click cannot wait its turn.
+    if (blocked && !immediate) return;
     var current = activeChat();
     if (!current) {
-      hideStandin();
+      if (!blocked) hideStandin();
       return;
     }
     ensureHost();
-    if (!placeHost()) {
+    if (blocked) {
+      if (!host || !host.parentNode) return;
+    } else if (!placeHost()) {
       hideStandin();
       return;
     }
@@ -612,14 +634,15 @@
       existing = document.createElement("button");
       existing.className = "pill";
       existing.type = "button";
-      existing.addEventListener("click", function () { open = !open; paint(); });
+      existing.addEventListener("click", function () { open = !open; paint(true); });
       shadow.appendChild(existing);
     }
-    existing.textContent = label;
+    if (existing.textContent !== label) existing.textContent = label;
     var panel = panelShadow && panelShadow.querySelector(".panel");
     if (!open) {
       if (panel) panel.remove();
       if (panelHost) panelHost.style.display = "none";
+      if (!blocked && !immediate) setTimeout(markStandin, 0);
       return;
     }
     ensurePanel();
@@ -631,6 +654,9 @@
       panelShadow.appendChild(panel);
     }
     panel.dataset.theme = panelTheme();
+    // After the panel is in the document. The scan walks every message, so a
+    // click does not run it; the next refresh does, once the window is up.
+    if (!blocked && !immediate) setTimeout(markStandin, 0);
     if (panel.dataset.chat === current.id && panel.dataset.status === shown) return;
     panel.dataset.chat = current.id;
     panel.dataset.status = shown;
@@ -665,7 +691,7 @@
     close.setAttribute("aria-label", "Close");
     close.title = "Close";
     close.appendChild(closeGlyph());
-    close.addEventListener("click", function () { open = false; paint(); });
+    close.addEventListener("click", function () { open = false; paint(true); });
     head.appendChild(titles);
     head.appendChild(close);
     panel.appendChild(head);
@@ -848,7 +874,7 @@
     var panel = panelShadow.querySelector(".panel");
     if (!panel) {
       open = true;
-      paint();
+      paint(true);
       panel = panelShadow && panelShadow.querySelector(".panel");
     }
     if (!panel) return;
@@ -914,7 +940,7 @@
     }).then(function (snapshot) {
       applySnapshot(snapshot);
       open = true;
-      paint();
+      paint(true);
     }).catch(function (error) {
       showBanner(current.id, docError(error, "Could not change the stand-in. Try again."));
     });
@@ -1266,6 +1292,7 @@
     watchPlacement.started = true;
     var timer = 0;
     function noteMenuGesture(event) {
+      if (ownStandinEvent(event)) return;
       var target = event && event.target;
       if (!target || !target.closest || !target.closest("#main")) return;
       menuQuietUntil = Date.now() + 1000;

@@ -1,12 +1,13 @@
 //! WebKit's WebCrypto master key, kept out of the login keychain.
 //!
 //! WhatsApp persists `crypto.subtle` keys in IndexedDB. WebKit wraps those
-//! keys with a 16-byte master key that it stores in the login keychain as
-//! "<app> WebCrypto Master Key". This build is ad-hoc signed, so macOS has no
-//! stable identity to attach an "Always Allow" decision to and asks for the
-//! login password on every launch.
+//! keys with a 16-byte master key. The login keychain item is that key in
+//! base64 (24 bytes), labeled "<app> WebCrypto Master Key". This build is
+//! ad-hoc signed, so macOS has no stable identity to attach an "Always Allow"
+//! decision to and asks for the login password on every read. Each webview
+//! reads it, which is why launch asks more than once.
 //!
-//! The same key is copied once into a `0600` file. Before a webview is
+//! The decoded key is copied once into a `0600` file. Before a webview is
 //! created, the website data store's private delegate is set to return that
 //! file. WebKit then never calls `SecItem` for it. A brand-new install
 //! generates the key locally and never creates the keychain item.
@@ -24,8 +25,9 @@ use objc2_foundation::{
 };
 use tauri::{AppHandle, Manager};
 
-/// WebKit's wrapping key is 16 bytes. A 32-byte value is accepted so a future
-/// WebKit that stores a longer key still round-trips instead of being replaced.
+/// WebKit's wrapping key is 16 raw bytes. The keychain item holds the base64
+/// form of that key, which is 24 bytes, so the blob itself is not the key.
+/// A 32-byte raw key is accepted so a longer future key still round-trips.
 const KEY_LEN: usize = 16;
 
 const ERR_SUCCESS: i32 = 0;
@@ -119,6 +121,12 @@ pub fn attach(store_uuid: Option<[u8; 16]>) {
         return;
     }
     let delegate = delegate();
+    let crypto_sel = sel!(webCryptoMasterKey:);
+    let has_crypto: Bool = unsafe { msg_send![&*delegate, respondsToSelector: crypto_sel] };
+    if !has_crypto.as_bool() {
+        crate::dlog::log("webcrypto: master-key delegate method is missing");
+        return;
+    }
     unsafe {
         let _: () = msg_send![&*store, set_delegate: delegate];
     }
@@ -206,15 +214,63 @@ fn copy_secret(account: &str) -> Option<Vec<u8>> {
         return None;
     }
     let bytes = bytes?;
-    if acceptable(&bytes) {
-        Some(bytes)
-    } else {
-        crate::dlog::log(&format!(
-            "webcrypto: login keychain master key has unexpected length {}",
-            bytes.len()
-        ));
-        None
+    match decode_keychain_blob(&bytes) {
+        Some(key) => Some(key),
+        None => {
+            crate::dlog::log(&format!(
+                "webcrypto: login keychain master key has unexpected length {}",
+                bytes.len()
+            ));
+            None
+        }
     }
+}
+
+/// The keychain stores base64 of the raw key (`SerializedCryptoKeyWrapCocoa`).
+/// A blob that is already 16 or 32 bytes is the raw key from an older item.
+pub(crate) fn decode_keychain_blob(bytes: &[u8]) -> Option<Vec<u8>> {
+    if acceptable(bytes) {
+        return Some(bytes.to_vec());
+    }
+    let decoded = base64_decode(bytes)?;
+    acceptable(&decoded).then_some(decoded)
+}
+
+fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    if input.is_empty() || input.len() % 4 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    for chunk in input.chunks_exact(4) {
+        let (a, b, c, d) = (chunk[0], chunk[1], chunk[2], chunk[3]);
+        if c == b'=' && d != b'=' {
+            return None;
+        }
+        let padding = usize::from(c == b'=') + usize::from(d == b'=');
+        let av = value(a)?;
+        let bv = value(b)?;
+        let cv = if c == b'=' { 0 } else { value(c)? };
+        let dv = if d == b'=' { 0 } else { value(d)? };
+        out.push((av << 2) | (bv >> 4));
+        if padding < 2 {
+            out.push((bv << 4) | (cv >> 2));
+        }
+        if padding < 1 {
+            out.push((cv << 6) | dv);
+        }
+    }
+    Some(out)
 }
 
 /// `return_data` reads the secret and can raise the login-keychain dialog.
@@ -367,6 +423,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn keychain_blob_is_base64_of_the_raw_key() {
+        // 0x00..=0x0f, the 24-byte form WebKit writes with SecItemAdd.
+        let blob = b"AAECAwQFBgcICQoLDA0ODw==";
+        assert_eq!(blob.len(), 24);
+        assert_eq!(
+            decode_keychain_blob(blob).as_deref(),
+            Some((0u8..16).collect::<Vec<_>>().as_slice())
+        );
+        assert_eq!(decode_keychain_blob(&[7u8; 16]).unwrap(), vec![7u8; 16]);
+        assert_eq!(decode_keychain_blob(&[9u8; 32]).unwrap(), vec![9u8; 32]);
+        assert_eq!(decode_keychain_blob(b"not-a-key"), None);
+        assert_eq!(decode_keychain_blob(&[1u8; 24]), None);
     }
 
     #[test]

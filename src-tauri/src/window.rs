@@ -1225,10 +1225,8 @@ fn base64_encode_into(out: &mut String, data: &[u8]) {
 }
 
 /// Standard base64 of `data` as an owned `String`. Thin wrapper over [`base64_encode_into`].
-/// Only the chunked [`stream_chunks`] is used in production now, so this whole-buffer
-/// form is exercised by the tests (as the parity oracle) — hence `cfg(test)`.
-#[cfg(test)]
-fn base64_encode(data: &[u8]) -> String {
+/// Voice transcription uses this for FluidVoice's JSON audio body.
+pub(crate) fn base64_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     base64_encode_into(&mut out, data);
     out

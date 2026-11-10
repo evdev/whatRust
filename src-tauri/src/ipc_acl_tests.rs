@@ -71,6 +71,7 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "set_biometric_enabled",
     "lock_app",
     "fluidvoice_status",
+    "open_fluidvoice_windows",
     "set_ai_key",
     "list_ai_models",
     "autoreply_get_persona",

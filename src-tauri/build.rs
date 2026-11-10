@@ -87,6 +87,7 @@ fn main() {
             "unlock_biometric",
             "reset_app_lock",
             "fluidvoice_status",
+            "open_fluidvoice_windows",
             "set_ai_key",
             "list_ai_models",
         ]),

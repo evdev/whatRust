@@ -79,7 +79,7 @@
         <div class="boxed-list">
           <label class="row">
             <span class="row-text"><span class="row-title">Transcrever notas de voz</span>
-              <span class="row-subtitle">Mostra a transcrição embaixo de cada nota de voz. O áudio fica neste Mac e é transcrito pelo FluidVoice.</span></span>
+              <span class="row-subtitle">Mostra a transcrição embaixo de cada nota de voz. O áudio fica neste computador e é transcrito pelo FluidVoice.</span></span>
             <input type="checkbox" class="switch" id="voice_transcribe" />
           </label>
           <label class="row">
@@ -91,6 +91,11 @@
             <span class="row-text"><span class="row-title">Conexão</span>
               <span class="row-subtitle" id="fluidvoice_status">Ainda não verificada.</span></span>
             <button type="button" id="test_fluidvoice" class="secondary">Testar conexão</button>
+          </div>
+          <div class="row" id="fluidvoice_install_row" hidden>
+            <span class="row-text"><span class="row-title">FluidVoice no Windows</span>
+              <span class="row-subtitle">Opcional. Abre o instalador oficial da versão beta para Windows. O FluidVoice é um aplicativo separado.</span></span>
+            <button type="button" id="install_fluidvoice" class="secondary">Instalar FluidVoice</button>
           </div>
           <label class="row">
             <span class="row-text"><span class="row-title">Traduzir transcrições</span>

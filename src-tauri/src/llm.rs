@@ -1597,6 +1597,33 @@ pub async fn run_cli(
     .map_err(|err| err.to_string())?
 }
 
+/// Spawn without a console window. The release binary is a GUI subsystem
+/// program, so a console child would flash a window on the settings page.
+pub(crate) fn hidden_command(program: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    hide_console(&mut command);
+    command
+}
+
+fn hide_console(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
+}
+
+fn batch_program(program: &std::path::Path) -> bool {
+    program
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+}
+
 fn run_capturing(
     program: &std::path::Path,
     args: &[String],
@@ -1607,9 +1634,9 @@ fn run_capturing(
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<String, String> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::time::{Duration, Instant};
-    let mut command = Command::new(program);
+    let mut command = hidden_command(program);
     command
         .args(args)
         .current_dir(cwd)
@@ -1619,7 +1646,12 @@ fn run_capturing(
     for name in strip_env {
         command.env_remove(name);
     }
-    let mut child = command.spawn().map_err(|err| err.to_string())?;
+    // A `.cmd` that cannot be escaped must not return the argument text.
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) if batch_program(program) => return Err("cli_missing".into()),
+        Err(err) => return Err(err.to_string()),
+    };
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(stdin_text.as_bytes());
     }
@@ -1867,9 +1899,9 @@ fn capture_stdout(
     timeout: std::time::Duration,
 ) -> Option<String> {
     use std::io::Read;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::time::Instant;
-    let mut child = Command::new(program)
+    let mut child = hidden_command(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

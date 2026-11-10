@@ -1072,6 +1072,27 @@ fn resolve_bin(explicit: &str, names: &[&str]) -> Option<PathBuf> {
         let path = PathBuf::from(explicit);
         return path.is_file().then_some(path);
     }
+    pick_program(&program_dirs(), names)
+}
+
+/// An `.exe` anywhere in the search list beats a `.cmd` that appears earlier.
+/// npm puts `claude.cmd` on `PATH`; the native `claude.exe` lives later, in
+/// `%USERPROFILE%\.local\bin`, and the batch shim rejects long arguments.
+fn pick_program(dirs: &[PathBuf], names: &[&str]) -> Option<PathBuf> {
+    let (primary, fallback): (Vec<&str>, Vec<&str>) =
+        names.iter().copied().partition(|name| !batch_name(name));
+    dirs.iter()
+        .find_map(|dir| first_program(dir, &primary))
+        .or_else(|| dirs.iter().find_map(|dir| first_program(dir, &fallback)))
+}
+
+fn batch_name(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+}
+
+fn program_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(path) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&path));
@@ -1084,22 +1105,45 @@ fn resolve_bin(explicit: &str, names: &[&str]) -> Option<PathBuf> {
     }
     dirs.push(PathBuf::from("/opt/homebrew/bin"));
     dirs.push(PathBuf::from("/usr/local/bin"));
-    for dir in dirs {
-        for name in names {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
+    #[cfg(windows)]
+    dirs.extend(windows_program_dirs(
+        std::env::var_os("APPDATA").as_deref().map(Path::new),
+        std::env::var_os("LOCALAPPDATA").as_deref().map(Path::new),
+    ));
+    dirs
+}
+
+/// npm's global bin on Windows is the prefix root, not `bin/`. WinGet links
+/// and per-user Program Files sit beside it. The native Claude installer is
+/// already covered by `%USERPROFILE%\.local\bin`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_program_dirs(appdata: Option<&Path>, local: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(appdata) = appdata {
+        dirs.push(appdata.join("npm"));
     }
-    None
+    if let Some(local) = local {
+        dirs.push(local.join("Programs"));
+        dirs.push(local.join("Microsoft").join("WinGet").join("Links"));
+    }
+    dirs
+}
+
+/// `.exe` before the bare name, then the batch shims. A folder that has both
+/// `codex.exe` and `codex.cmd` must run the executable: batch escaping rejects
+/// some of the long arguments these programs are given.
+fn first_program(dir: &Path, names: &[&str]) -> Option<PathBuf> {
+    names
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|path| path.is_file())
 }
 
 fn cli_names(backend: CliBackend) -> &'static [&'static str] {
     match backend {
-        CliBackend::Claude => &["claude", "claude.exe"],
-        CliBackend::Grok => &["grok", "grok.exe"],
-        CliBackend::Codex => &["codex", "codex.exe"],
+        CliBackend::Claude => &["claude.exe", "claude", "claude.cmd", "claude.bat"],
+        CliBackend::Grok => &["grok.exe", "grok", "grok.cmd", "grok.bat"],
+        CliBackend::Codex => &["codex.exe", "codex", "codex.cmd", "codex.bat"],
     }
 }
 
@@ -1505,14 +1549,24 @@ pub async fn standin_cli_status(
     };
     let dir = std::env::temp_dir();
     let output = tauri::async_runtime::spawn_blocking(move || {
-        std::process::Command::new(&program)
+        llm::hidden_command(&program)
             .args(&args)
             .current_dir(&dir)
             .output()
     })
     .await
-    .map_err(|err| err.to_string())?
     .map_err(|err| err.to_string())?;
+    // A batch shim that cannot be spawned reports the same "not found" the
+    // UI already shows. The OS error names the argument that failed escaping.
+    let output = match output {
+        Ok(output) => output,
+        Err(_) => {
+            return Ok(CliStatus {
+                ok: false,
+                detail: tr("The command-line program was not found.").into_owned(),
+            });
+        }
+    };
     let text = String::from_utf8_lossy(&output.stdout);
     let err = String::from_utf8_lossy(&output.stderr);
     let combined = format!("{text}\n{err}");
@@ -2226,5 +2280,60 @@ mod tests {
             found >= 6,
             "expected the stand-in page calls, found {found}"
         );
+    }
+
+    #[test]
+    fn an_exe_in_the_folder_wins_over_the_batch_shim() {
+        let dir = std::env::temp_dir().join(format!("whatrust-bin-exe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("codex.cmd"), b"@echo off").unwrap();
+        std::fs::write(dir.join("codex.exe"), b"MZ").unwrap();
+        let found = first_program(&dir, cli_names(CliBackend::Codex)).unwrap();
+        assert_eq!(found.file_name().unwrap(), "codex.exe");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_exe_later_in_the_search_list_beats_an_earlier_cmd() {
+        let root = std::env::temp_dir().join(format!("whatrust-bin-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let npm = root.join("npm");
+        let native = root.join("local");
+        std::fs::create_dir_all(&npm).unwrap();
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::write(npm.join("codex.cmd"), b"@echo off").unwrap();
+        std::fs::write(native.join("codex.exe"), b"MZ").unwrap();
+        let found = pick_program(&[npm, native], cli_names(CliBackend::Codex)).unwrap();
+        assert_eq!(found.file_name().unwrap(), "codex.exe");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_cmd_shim_is_used_when_it_is_the_only_program() {
+        let dir = std::env::temp_dir().join(format!("whatrust-bin-cmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("codex.cmd"), b"@echo off").unwrap();
+        let found = first_program(&dir, cli_names(CliBackend::Codex)).unwrap();
+        assert_eq!(found.file_name().unwrap(), "codex.cmd");
+        assert!(first_program(&dir, cli_names(CliBackend::Claude)).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn windows_program_dirs_use_the_npm_prefix_and_winget_links() {
+        let app = PathBuf::from(r"C:\Users\a\AppData\Roaming");
+        let local = PathBuf::from(r"C:\Users\a\AppData\Local");
+        let dirs = windows_program_dirs(Some(&app), Some(&local));
+        assert_eq!(
+            dirs,
+            vec![
+                app.join("npm"),
+                local.join("Programs"),
+                local.join("Microsoft").join("WinGet").join("Links"),
+            ]
+        );
+        assert!(windows_program_dirs(None, None).is_empty());
     }
 }

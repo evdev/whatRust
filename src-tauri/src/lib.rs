@@ -261,6 +261,7 @@ pub fn run() {
             voice::transcribe_voice,
             voice::summarize_voice,
             voice::fluidvoice_status,
+            voice::open_fluidvoice_windows,
             voice::set_ai_key,
             voice::list_ai_models,
             todo::todo_list,

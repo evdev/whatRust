@@ -13,11 +13,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{InvokeBody, Request};
 use tauri::{AppHandle, Manager, Webview};
 
 pub const MAX_AUDIO: usize = 20 * 1024 * 1024;
+
+/// The Windows beta button on fluidvoice.com. It redirects to the current
+/// official `FluidVoice_*_x64-setup.exe`. The page cannot supply another address.
+const FLUIDVOICE_WINDOWS_SETUP: &str = "https://fluidvoice.com/fluid/download/windows";
 const MAX_ITEMS: usize = 2_000;
 const FLUID_TRANSCRIBE_SECS: u64 = 180;
 
@@ -199,6 +204,28 @@ pub async fn summarize_voice(
     Ok(SummaryView { id, summary })
 }
 
+/// Open the official FluidVoice Windows beta installer in the browser.
+/// The download is optional: nothing is installed until the user runs it.
+#[tauri::command]
+pub fn open_fluidvoice_windows(window: Webview, app: AppHandle) -> Result<(), String> {
+    settings_window(&window, &app)?;
+    let url = fluidvoice_windows_setup_url().map_err(|_| "fluidvoice".to_string())?;
+    #[cfg(windows)]
+    {
+        crate::opener::open_url(&app, url);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, url);
+        Err(tr("O instalador do FluidVoice só é oferecido no Windows.").into_owned())
+    }
+}
+
+fn fluidvoice_windows_setup_url() -> Result<tauri::Url, ()> {
+    FLUIDVOICE_WINDOWS_SETUP.parse().map_err(|_| ())
+}
+
 #[tauri::command]
 pub async fn fluidvoice_status(
     window: Webview,
@@ -253,7 +280,7 @@ pub async fn set_ai_key(
             stored: false,
             accepted: false,
             tone: "ok".into(),
-            detail: tr("A chave deste provedor foi removida deste Mac.").into_owned(),
+            detail: tr("A chave deste provedor foi removida deste computador.").into_owned(),
             models: Vec::new(),
         });
     }
@@ -715,6 +742,18 @@ pub fn audio_filename(bytes: &[u8]) -> &'static str {
     }
 }
 
+/// MIME type for FluidVoice's raw-byte mode. The documented request uses an
+/// audio type; `application/octet-stream` is not one of them.
+pub fn audio_content_type(filename: &str) -> &'static str {
+    match filename.rsplit('.').next() {
+        Some("opus") => "audio/ogg",
+        Some("m4a") => "audio/mp4",
+        Some("wav") => "audio/wav",
+        Some("mp3") => "audio/mpeg",
+        _ => "application/octet-stream",
+    }
+}
+
 pub fn probe_health(port: u16) -> Result<String, &'static str> {
     let url = format!("http://127.0.0.1:{port}/v1/health");
     let response = llm::client(Duration::from_secs(4))
@@ -834,33 +873,200 @@ fn speaker_timestamp(seconds: f64) -> String {
     }
 }
 
-fn fluid_transcribe(port: u16, audio: &[u8], filename: &str) -> Result<String, &'static str> {
-    let url = transcribe_url(port, wants_speaker_labels(audio));
-    let response = llm::client(Duration::from_secs(FLUID_TRANSCRIBE_SECS))
-        .post(&url)
-        .set("X-Filename", filename)
-        .set("Content-Type", "application/octet-stream")
-        .send_bytes(audio);
-    let response = match response {
-        Ok(response) => response,
-        Err(ureq::Error::Status(400, response)) => {
-            let _ = response.into_string();
-            crate::dlog::log("voice: fluidvoice rejected audio");
-            return Err("bad_audio");
+/// Base64 grows by 4/3. Notes larger than this skip that body and use a file.
+const BASE64_MAX: usize = 18 * 1024 * 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Transport {
+    Raw,
+    Base64,
+    File,
+}
+
+/// Raw bytes first. Base64 next, unless the note is too large. A temp file last,
+/// so a server that only accepts `{"path"}` or `{"audioBase64"}` still works.
+fn transports_for(audio_len: usize) -> &'static [Transport] {
+    if audio_len > BASE64_MAX {
+        &[Transport::Raw, Transport::File]
+    } else {
+        &[Transport::Raw, Transport::Base64, Transport::File]
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum After {
+    /// Try the next body. A 404, or a 400 that asks for `path` / `audioBase64`.
+    Next,
+    /// The server refused the audio itself.
+    BadAudio,
+    /// Any other status. Stop; another body will not help.
+    Stop,
+}
+
+/// The documented refusal names the field it wanted (`audio path`, `audioBase64`).
+/// A bare "path" is not enough: a decode error can echo the temp file's path.
+fn asks_for_another_body(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("audiobase64") || lower.contains(" path") || lower.contains("\"path\"")
+}
+
+fn after_status(status: u16, body: &str) -> After {
+    match status {
+        // The raw body was the wrong shape, too large, or an unsupported type.
+        // A file path or base64 body is a different request, so keep going.
+        400 if asks_for_another_body(body) => After::Next,
+        400 => After::BadAudio,
+        404 | 413 | 415 => After::Next,
+        _ => After::Stop,
+    }
+}
+
+fn path_body(path: &Path) -> String {
+    serde_json::json!({ "path": path.to_string_lossy() }).to_string()
+}
+
+fn base64_body(filename: &str, audio: &[u8]) -> String {
+    serde_json::json!({
+        "audioBase64": crate::window::base64_encode(audio),
+        "filename": filename,
+    })
+    .to_string()
+}
+
+fn note_temp_path(dir: &Path, filename: &str, token: u64) -> PathBuf {
+    let ext = Path::new(filename)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .filter(|ext| {
+            !ext.is_empty() && ext.len() <= 8 && ext.chars().all(|c| c.is_ascii_alphanumeric())
+        })
+        .unwrap_or("opus");
+    dir.join(format!(
+        "whatrust-note-{}-{token}.{ext}",
+        std::process::id()
+    ))
+}
+
+fn fresh_note_path(filename: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    note_temp_path(
+        &std::env::temp_dir(),
+        filename,
+        NEXT.fetch_add(1, Ordering::Relaxed),
+    )
+}
+
+enum Attempt {
+    Down,
+    Status(u16, String),
+}
+
+fn post_once(
+    port: u16,
+    labels: bool,
+    transport: Transport,
+    audio: &[u8],
+    filename: &str,
+    temp: &mut Option<PathBuf>,
+) -> Result<String, Attempt> {
+    let url = transcribe_url(port, labels);
+    let response = match transport {
+        Transport::Raw => llm::client(Duration::from_secs(FLUID_TRANSCRIBE_SECS))
+            .post(&url)
+            .set("X-Filename", filename)
+            .set("Content-Type", audio_content_type(filename))
+            .send_bytes(audio),
+        Transport::Base64 => llm::client(Duration::from_secs(FLUID_TRANSCRIBE_SECS))
+            .post(&url)
+            .set("Content-Type", "application/json")
+            .send_string(&base64_body(filename, audio)),
+        Transport::File => {
+            let path = match temp.clone() {
+                Some(path) => path,
+                None => {
+                    let path = fresh_note_path(filename);
+                    if std::fs::write(&path, audio).is_err() {
+                        let _ = std::fs::remove_file(&path);
+                        return Err(Attempt::Down);
+                    }
+                    *temp = Some(path.clone());
+                    path
+                }
+            };
+            llm::client(Duration::from_secs(FLUID_TRANSCRIBE_SECS))
+                .post(&url)
+                .set("Content-Type", "application/json")
+                .send_string(&path_body(&path))
+        }
+    };
+    match response {
+        Ok(response) => {
+            let text = response.into_string().map_err(|_| Attempt::Down)?;
+            let value: Value = serde_json::from_str(&text).map_err(|_| Attempt::Down)?;
+            transcript_text(&value).ok_or(Attempt::Down)
         }
         Err(ureq::Error::Status(code, response)) => {
-            let _ = response.into_string();
-            crate::dlog::log(&format!("voice: fluidvoice status={code}"));
-            return Err("fluidvoice");
+            let body = response.into_string().unwrap_or_default();
+            if code == 400 && !asks_for_another_body(&body) {
+                crate::dlog::log("voice: fluidvoice rejected audio");
+            } else {
+                crate::dlog::log(&format!("voice: fluidvoice status={code}"));
+            }
+            Err(Attempt::Status(code, body))
         }
         Err(_) => {
             crate::dlog::log("voice: fluidvoice unreachable");
-            return Err("fluidvoice");
+            Err(Attempt::Down)
         }
-    };
-    let text = response.into_string().map_err(|_| "fluidvoice")?;
-    let value: Value = serde_json::from_str(&text).map_err(|_| "fluidvoice")?;
-    transcript_text(&value).ok_or("fluidvoice")
+    }
+}
+
+fn fluid_transcribe(port: u16, audio: &[u8], filename: &str) -> Result<String, &'static str> {
+    let labels = wants_speaker_labels(audio);
+    let mut temp = None;
+    let result = (|| {
+        for transport in transports_for(audio.len()) {
+            match post_once(port, labels, *transport, audio, filename, &mut temp) {
+                Ok(text) => return Ok(text),
+                Err(Attempt::Down) => return Err("fluidvoice"),
+                Err(Attempt::Status(code, body)) => {
+                    let first = after_status(code, &body);
+                    // `speakerLabels` is a Mac query. Retry the same body once
+                    // without it before deciding the audio itself was refused.
+                    if labels && matches!(first, After::Next | After::BadAudio) {
+                        match post_once(port, false, *transport, audio, filename, &mut temp) {
+                            Ok(text) => return Ok(text),
+                            Err(Attempt::Down) => return Err("fluidvoice"),
+                            Err(Attempt::Status(code, body)) => {
+                                let second = after_status(code, &body);
+                                // A 404 or "send a path" on the labeled call must
+                                // not die just because the plain call says the
+                                // raw bytes were unusable. The next body may work.
+                                if first == After::Next || second == After::Next {
+                                    continue;
+                                }
+                                if second == After::BadAudio {
+                                    return Err("bad_audio");
+                                }
+                                return Err("fluidvoice");
+                            }
+                        }
+                    }
+                    match first {
+                        After::BadAudio => return Err("bad_audio"),
+                        After::Stop => return Err("fluidvoice"),
+                        After::Next => continue,
+                    }
+                }
+            }
+        }
+        crate::dlog::log("voice: fluidvoice rejected every transport");
+        Err("fluidvoice")
+    })();
+    if let Some(path) = temp {
+        let _ = std::fs::remove_file(path);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -970,6 +1176,83 @@ mod tests {
         assert_eq!(audio_filename(b"RIFFwav"), "note.wav");
         assert_eq!(audio_filename(b"ID3tag"), "note.mp3");
         assert_eq!(audio_filename(b"????"), "note.opus");
+    }
+
+    #[test]
+    fn the_windows_installer_is_the_official_fluidvoice_download() {
+        let url = fluidvoice_windows_setup_url().unwrap();
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("fluidvoice.com"));
+        assert_eq!(url.path(), "/fluid/download/windows");
+    }
+
+    #[test]
+    fn content_types_match_the_filename() {
+        assert_eq!(audio_content_type("note.opus"), "audio/ogg");
+        assert_eq!(audio_content_type("note.m4a"), "audio/mp4");
+        assert_eq!(audio_content_type("note.wav"), "audio/wav");
+        assert_eq!(audio_content_type("note.mp3"), "audio/mpeg");
+        assert_eq!(audio_content_type("note"), "application/octet-stream");
+    }
+
+    #[test]
+    fn transports_skip_base64_once_the_note_is_too_large() {
+        assert_eq!(
+            transports_for(32),
+            &[Transport::Raw, Transport::Base64, Transport::File]
+        );
+        assert_eq!(
+            transports_for(BASE64_MAX + 1),
+            &[Transport::Raw, Transport::File]
+        );
+    }
+
+    #[test]
+    fn a_windows_path_round_trips_through_the_json_body() {
+        let path = Path::new(r"C:\Users\a\AppData\Local\Temp\note.opus");
+        let body = path_body(path);
+        let value: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            value.get("path").and_then(Value::as_str),
+            Some(r"C:\Users\a\AppData\Local\Temp\note.opus")
+        );
+        assert!(body.contains(r"C:\\Users\\a\\AppData\\Local\\Temp\\note.opus"));
+    }
+
+    #[test]
+    fn a_missing_path_error_tries_the_next_body_and_a_refusal_does_not() {
+        assert_eq!(
+            after_status(400, r#"{"error":"Missing audio path or audioBase64."}"#),
+            After::Next
+        );
+        assert_eq!(after_status(404, "not found"), After::Next);
+        assert_eq!(after_status(400, "could not decode audio"), After::BadAudio);
+        assert_eq!(
+            after_status(400, r#"could not decode C:\Users\a\Temp\note.opus"#),
+            After::BadAudio
+        );
+        assert_eq!(after_status(413, "too large"), After::Next);
+        assert_eq!(after_status(415, "unsupported media type"), After::Next);
+        assert_eq!(after_status(500, "down"), After::Stop);
+    }
+
+    #[test]
+    fn the_temp_note_keeps_a_windows_directory_and_the_extension() {
+        let dir = Path::new(r"C:\Users\a\AppData\Local\Temp");
+        let path = note_temp_path(dir, "note.opus", 7);
+        assert_eq!(path.parent(), Some(dir));
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .ends_with(".opus"));
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("whatrust-note-"));
     }
 
     #[test]
