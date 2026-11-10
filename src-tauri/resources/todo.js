@@ -3,10 +3,11 @@
  * The button sits under the account switcher, in the same rail cell, so it
  * cannot land beside it. Messages are captured from the message menu, and a
  * summarized voice card can add that summary as a task while keeping the
- * link to the voice message. WhatsApp redraws that menu from its own state,
- * so an item added inside it may be removed; a copy is then drawn against
- * the menu's edge instead. The panel is an overlay: WhatsApp's own nodes
- * stay in the DOM.
+ * link to the voice message. The actions are drawn beside that menu, never
+ * inside it: writing into the menu, or opening another popover, makes
+ * WhatsApp close it immediately on some accounts. While the menu is open,
+ * the other page scripts leave the document alone. The panel is an overlay:
+ * WhatsApp's own nodes stay in the DOM.
  */
 (function () {
   "use strict";
@@ -952,7 +953,6 @@
   var menuObserver = null;
   var menuTimer = 0;
   var recentNodes = [];
-  var menuInjects = 0;
   var menuFound = false;
   var menuGone = 0;
   var menuFoundLogged = false;
@@ -3102,69 +3102,6 @@
     }).catch(saveFailed);
   }
 
-  function sampleRow(menu) {
-    var rows = menuRows(menu);
-    return rows.length ? rows[0] : null;
-  }
-
-  function menuInk(menu, sample) {
-    var source = sample || menu;
-    try {
-      var color = getComputedStyle(source).color;
-      if (color && color !== "transparent" && color.indexOf("0, 0, 0, 0") === -1) return color;
-    } catch (e) {}
-    return themeDark() ? "#e9edef" : "#111b21";
-  }
-
-  function pinStyle(node, css) {
-    var parts = css.split(";");
-    for (var i = 0; i < parts.length; i++) {
-      var bit = parts[i].trim();
-      if (!bit) continue;
-      var cut = bit.indexOf(":");
-      if (cut < 1) continue;
-      node.style.setProperty(bit.slice(0, cut).trim(), bit.slice(cut + 1).trim(), "important");
-    }
-  }
-
-  // Incoming rows keep their words in a shadow tree or a collapsed span, and
-  // their stylesheet clips any text that is not in that slot. Copy the row's
-  // role only, then draw an icon and a label that the menu CSS cannot hide.
-  function makeMenuNode(menu, label, actionName) {
-    var sample = sampleRow(menu);
-    var node = null;
-    if (sample && sample.cloneNode) {
-      try { node = sample.cloneNode(false); } catch (e) { node = null; }
-    }
-    if (!node) {
-      var tag = String(menu.tagName || "").toLowerCase() === "ul" ? "li" : "div";
-      node = el(tag);
-    }
-    if (node.removeAttribute) {
-      node.removeAttribute("id");
-      node.removeAttribute("style");
-      node.removeAttribute("data-animate-dropdown-item");
-    }
-    if ("className" in node) node.className = "";
-    var color = menuInk(menu, sample);
-    var icon = document.createElement("span");
-    icon.setAttribute("data-wr-todo-icon", "1");
-    pinStyle(icon, "display:inline-flex;flex:0 0 24px;width:24px;height:24px;min-width:24px;align-items:center;justify-content:center;overflow:visible");
-    icon.innerHTML = menuIcon(actionName);
-    var text = document.createElement("span");
-    text.setAttribute("data-wr-todo-label", "1");
-    text.textContent = label;
-    pinStyle(text, "display:block;flex:1 1 auto;width:auto;min-width:140px;max-width:none;height:auto;white-space:nowrap;overflow:visible;visibility:visible;opacity:1;position:static;clip:auto;font-size:14.5px;font-weight:400;line-height:20px;text-align:start;color:" + color + ";-webkit-text-fill-color:" + color);
-    while (node.firstChild) node.removeChild(node.firstChild);
-    node.appendChild(icon);
-    node.appendChild(text);
-    node.setAttribute("data-wr-todo-menu", "1");
-    node.setAttribute("data-wr-todo-action", actionName);
-    node.setAttribute("aria-label", label);
-    pinStyle(node, "display:flex;flex-direction:row;align-items:center;gap:12px;width:100%;min-width:180px;max-width:none;height:auto;min-height:40px;box-sizing:border-box;padding:8px 16px;cursor:pointer;background:transparent;border:0;overflow:visible;opacity:1;visibility:visible;position:static;color:" + color + ";-webkit-text-fill-color:" + color + ";font-size:14.5px");
-    return node;
-  }
-
   function runMenuNode(node, event) {
     if (!node || node.getAttribute("data-wr-fired") === "1") return;
     var action = node.getAttribute("data-wr-todo-action");
@@ -3178,47 +3115,11 @@
     runMenuAction(action, extract, lookupExtract(extract));
   }
 
-  function countOurs(menu) {
-    var n = 0;
-    var visible = 0;
-    walk(menu, function (node) {
-      if (!attr(node, "data-wr-todo-menu")) return;
-      n += 1;
-      var rect = rectOf(node);
-      if (rect && rect.width > 40 && rect.height > 10) visible += 1;
-    });
-    return { n: n, visible: visible };
-  }
-
-  function stripOurs(menu) {
-    var found = [];
-    walk(menu, function (node) {
-      if (attr(node, "data-wr-todo-menu")) found.push(node);
-    });
-    for (var i = 0; i < found.length; i++) {
-      if (found[i].parentNode) found[i].parentNode.removeChild(found[i]);
-    }
-  }
-
-  function injectMenu(menu, extract) {
-    if (!menu || !extract) return;
-    stripOurs(menu);
-    var sample = sampleRow(menu);
-    var parent = sample && sample.parentNode ? sample.parentNode : menu;
-    var anchor = sample || null;
-    pendingMenuActions(extract).forEach(function (action) {
-      var node = makeMenuNode(menu, menuLabel(action), action);
-      if (anchor && anchor.parentNode === parent) parent.insertBefore(node, anchor);
-      else parent.appendChild(node);
-    });
-  }
-
   function ensureCompanion() {
     if (companion) return;
     companion = el("div");
     companion.id = "__whatrust_todo_menu";
-    companion.setAttribute("popover", "manual");
-    companion.style.cssText = "position:fixed;z-index:100003;display:none;box-sizing:border-box;overflow:hidden;box-shadow:0 12px 28px #0006;margin:0;border:0;padding:0;inset:auto";
+    companion.style.cssText = "position:fixed;z-index:100003;display:none;box-sizing:border-box;overflow:hidden;box-shadow:0 12px 28px #0006;margin:0;border:0;padding:0";
     document.documentElement.appendChild(companion);
   }
 
@@ -3226,18 +3127,12 @@
     companion.style.display = "block";
     companion.style.margin = "0";
     companion.style.border = "0";
-    if (typeof companion.showPopover !== "function") return;
-    try {
-      if (!companion.matches || !companion.matches(":popover-open")) companion.showPopover();
-    } catch (e) {}
   }
 
   function hideCompanion() {
     companionKey = "";
     if (!companion) return;
     companion.style.display = "none";
-    if (typeof companion.hidePopover !== "function") return;
-    try { companion.hidePopover(); } catch (e) {}
   }
 
   function fillCompanion(existing, extract) {
@@ -3350,21 +3245,23 @@
       crumb("todo: message menu found");
     }
     menuFound = true;
-    var ours = countOurs(menu);
-    var want = pendingMenuActions(pending.extract).length;
-    if (ours.visible < want && menuInjects < 3) {
-      menuInjects += 1;
-      injectMenu(menu, pending.extract);
-      ours = countOurs(menu);
+    if (companion && companion.style.display !== "none") {
+      showCompanion(menu, pending.extract);
+      return;
     }
-    if (ours.visible >= want) hideCompanion();
-    else showCompanion(menu, pending.extract);
+    var stamp = pending.at;
+    setTimeout(function () {
+      if (!pending || pending.at !== stamp) return;
+      var current = locateMenu();
+      if (!current) return;
+      showCompanion(current, pending.extract);
+    }, 0);
   }
 
   function stopMenuWatch() {
     pending = null;
     menuFound = false;
-    menuInjects = 0;
+    root.__whatrustMenuHold = false;
     recentNodes = [];
     clearTimeout(menuTimer);
     menuTimer = 0;
@@ -3380,7 +3277,7 @@
     pending = { extract: extract, at: Date.now(), x: x, y: y, fallback: !!fallback };
     menuFound = false;
     menuGone = 0;
-    menuInjects = 0;
+    root.__whatrustMenuHold = true;
     recentNodes = [];
     if (!menuObserver && typeof MutationObserver === "function") {
       menuObserver = new MutationObserver(function (records) {
@@ -3424,8 +3321,8 @@
           menuTimer = setTimeout(pump, 120);
           return;
         }
-        // The native menu can close because our menu took focus. Keep the
-        // actions on screen until the user picks one or clicks away.
+        // The message menu closed on its own. Keep the actions until the user
+        // picks one or clicks away.
         if (companion && companion.style.display !== "none") menuFound = false;
         else {
           stopMenuWatch();
@@ -3829,6 +3726,10 @@
     scheduled = true;
     setTimeout(function () {
       scheduled = false;
+      if (pending || (typeof root.__whatrustPageBusy === "function" && root.__whatrustPageBusy())) {
+        schedule();
+        return;
+      }
       bindThemeApp();
       mountRail();
       paintMarkers();

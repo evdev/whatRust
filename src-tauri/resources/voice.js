@@ -456,6 +456,10 @@
   }
 
   function paint(id) {
+    if (typeof root.__whatrustPageBusy === "function" && root.__whatrustPageBusy()) {
+      setTimeout(function () { paint(id); }, 250);
+      return;
+    }
     var view = known[id];
     if (!view || view.skip) return;
     var rows = findRows(id);
@@ -562,11 +566,22 @@
     Object.keys(known).forEach(paint);
   }
 
+  var menuQuietUntil = 0;
+  function noteMenuGesture(event) {
+    var target = event && event.target;
+    if (!target || !target.closest || !target.closest("#main")) return;
+    menuQuietUntil = Date.now() + 1000;
+  }
+
   function schedule() {
     if (scheduled) return;
     scheduled = true;
     setTimeout(function () {
       scheduled = false;
+      if ((typeof root.__whatrustPageBusy === "function" && root.__whatrustPageBusy()) || Date.now() < menuQuietUntil) {
+        schedule();
+        return;
+      }
       scan();
     }, 300);
   }
@@ -574,6 +589,10 @@
   function arm() {
     if (armed || !root.document || !root.document.documentElement) return;
     armed = true;
+    if (root.document.addEventListener) {
+      root.document.addEventListener("pointerdown", noteMenuGesture, true);
+      root.document.addEventListener("contextmenu", noteMenuGesture, true);
+    }
     new MutationObserver(schedule).observe(root.document.documentElement, { childList: true, subtree: true });
     root.document.addEventListener("scroll", schedule, true);
     schedule();

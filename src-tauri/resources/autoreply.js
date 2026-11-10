@@ -200,6 +200,7 @@
   var HOST_STYLE = "display:flex;align-items:center;flex:0 1 auto;min-width:0;margin-inline-end:6px";
   var open = false;
   var watching = false;
+  var menuQuietUntil = 0;
 
   var mine = {};
   var mineAt = 0;
@@ -405,6 +406,25 @@
     host.addEventListener("click", function (event) { event.stopPropagation(); });
   }
 
+  function panelTheme() {
+    var sample = document.querySelector("#main header") || document.body;
+    var color = "";
+    try { color = sample ? getComputedStyle(sample).backgroundColor || "" : ""; } catch (e) {}
+    var rgb = String(color).match(/[\d.]+/g);
+    if (!rgb || rgb.length < 3) {
+      return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }
+    var lum = 0.2126 * +rgb[0] + 0.7152 * +rgb[1] + 0.0722 * +rgb[2];
+    return lum > 150 ? "light" : "dark";
+  }
+
+  function backendLabel(id) {
+    if (id === "claude_cli") return "Claude";
+    if (id === "grok_cli") return "Grok";
+    if (id === "codex_cli") return "Codex";
+    return "the API";
+  }
+
   function ensurePanel() {
     if (panelHost) return;
     panelHost = document.createElement("div");
@@ -412,9 +432,62 @@
     panelHost.style.cssText = "position:fixed;z-index:100003;display:none;box-sizing:border-box";
     panelShadow = panelHost.attachShadow({ mode: "open" });
     var style = document.createElement("style");
-    style.textContent = ":host{all:initial}button,textarea{font:13px/1.4 system-ui} .panel{box-sizing:border-box;width:100%;max-height:calc(100vh - 120px);overflow:auto;padding:12px;border-radius:12px;background:#111b21;color:#e9edef} textarea{width:100%;min-height:120px;box-sizing:border-box} .row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px} .log{max-height:140px;overflow:auto;font-size:12px;opacity:.85}";
+    style.textContent = [
+      ":host{all:initial}",
+      ".panel{--bg:#fff;--fg:#111b21;--muted:#667781;--line:rgba(17,27,33,.1);--field:#f3f5f6;--hover:rgba(17,27,33,.06);--accent:#0b8f5a;--on:#fff;--shadow:0 18px 48px rgba(17,27,33,.16);box-sizing:border-box;width:100%;max-height:min(520px,calc(100vh - 88px));overflow:auto;padding:16px;border:1px solid var(--line);border-radius:18px;background:var(--bg);color:var(--fg);box-shadow:var(--shadow);font:13px/1.45 ui-sans-serif,system-ui,sans-serif;color-scheme:light}",
+      ".panel[data-theme=dark]{--bg:#1e2a30;--fg:#e9edef;--muted:#8b9da6;--line:rgba(255,255,255,.08);--field:#2a3942;--hover:rgba(255,255,255,.07);--accent:#1daa61;--on:#042;--shadow:0 18px 50px rgba(0,0,0,.46);color-scheme:dark}",
+      "button,textarea{font:inherit;color:inherit}",
+      ".head{display:flex;align-items:flex-start;gap:12px}",
+      ".titles{min-width:0;flex:1}",
+      ".title{font-size:15px;font-weight:600;letter-spacing:-.015em}",
+      ".sub{display:flex;align-items:center;gap:6px;margin-top:3px;color:var(--muted);font-size:12px}",
+      ".dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:none}",
+      ".dot[data-state=armed]{background:var(--accent)}",
+      ".dot[data-state=paused]{background:#e3a008}",
+      ".close{flex:none;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;margin-block-start:-4px;margin-inline-end:-4px;padding:0;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}",
+      ".close:hover{background:var(--hover);color:var(--fg)}",
+      ".close:focus-visible,.btn:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}",
+      ".hint{margin-top:14px;padding:10px 12px;border-radius:12px;background:var(--field);color:var(--muted);font-size:12px}",
+      ".row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:14px}",
+      ".btn{border:0;border-radius:10px;padding:8px 12px;background:var(--field);color:var(--fg);font-weight:600;cursor:pointer}",
+      ".btn:hover{background:var(--hover)}",
+      ".btn.primary{background:var(--accent);color:var(--on)}",
+      ".btn.primary:hover{filter:brightness(1.06)}",
+      ".btn.ghost{background:transparent;color:var(--muted);font-weight:550}",
+      ".btn.ghost:hover{background:var(--hover);color:var(--fg)}",
+      ".btn:disabled{opacity:.4;cursor:default;filter:none}",
+      ".field{display:block;margin-top:16px}",
+      ".field span{display:block;margin-bottom:6px;color:var(--muted);font-size:12px;font-weight:600}",
+      "textarea{width:100%;min-height:108px;resize:vertical;box-sizing:border-box;border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--field);color:var(--fg)}",
+      "textarea::placeholder{color:var(--muted)}",
+      ".foot{margin-top:10px}",
+      ".foot .primary{margin-inline-end:auto}",
+      ".confirm{margin-top:12px;padding:12px;border-radius:12px;background:var(--field)}",
+      ".confirm p{margin:0;font-size:12.5px}",
+      ".confirm .btn{margin-top:10px}"
+    ].join("");
     panelShadow.appendChild(style);
+    panelHost.addEventListener("mousedown", function (event) { event.stopPropagation(); });
+    panelHost.addEventListener("click", function (event) { event.stopPropagation(); });
     document.documentElement.appendChild(panelHost);
+    if (!ensurePanel.bound) {
+      ensurePanel.bound = true;
+      document.addEventListener("mousedown", function (event) {
+        if (!open || !panelHost || panelHost.style.display === "none") return;
+        var target = event.target;
+        if (target && host && (target === host || (host.contains && host.contains(target)))) return;
+        if (target && (target === panelHost || (panelHost.contains && panelHost.contains(target)))) return;
+        open = false;
+        paint();
+      }, true);
+      window.addEventListener("keydown", function (event) {
+        if (!open || event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        open = false;
+        paint();
+      }, true);
+    }
   }
 
   function hideStandin() {
@@ -475,6 +548,10 @@
   }
 
   function placeHost() {
+    // Once the pill is in the header, leave it there. Moving or removing it
+    // while a message menu is opening rewrites the header and that menu closes.
+    var headerNow = document.querySelector("#main header");
+    if (host && headerNow && headerNow.contains && headerNow.contains(host)) return true;
     var slot = videoCallButton(document) || rightClusterButton(document);
     if (!slot || !slot.parentNode) return false;
     var header = document.querySelector("#main header");
@@ -494,7 +571,7 @@
     if (!pill || !pill.getBoundingClientRect) return;
     var rect = pill.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return;
-    var width = Math.min(320, Math.max(180, window.innerWidth - 16));
+    var width = Math.min(360, Math.max(240, window.innerWidth - 16));
     var right = window.innerWidth - rect.right;
     if (right < 8) right = 8;
     if (right + width > window.innerWidth - 8) right = Math.max(8, window.innerWidth - 8 - width);
@@ -506,6 +583,13 @@
   }
 
   function paint() {
+    if (!open) {
+      var stale = panelShadow && panelShadow.querySelector(".panel");
+      if (stale) stale.remove();
+      if (panelHost) panelHost.style.display = "none";
+    }
+    if ((typeof root.__whatrustPageBusy === "function" && root.__whatrustPageBusy()) || Date.now() < menuQuietUntil) return;
+    markStandin();
     var current = activeChat();
     if (!current) {
       hideStandin();
@@ -546,59 +630,100 @@
       panel.className = "panel";
       panelShadow.appendChild(panel);
     }
-    if (panel.dataset.chat === current.id && panel.dataset.status === shown) {
-      fillLog(panel, current.id);
-      return;
-    }
+    panel.dataset.theme = panelTheme();
+    if (panel.dataset.chat === current.id && panel.dataset.status === shown) return;
     panel.dataset.chat = current.id;
     panel.dataset.status = shown;
     panel.innerHTML = "";
+    var head = document.createElement("div");
+    head.className = "head";
+    var titles = document.createElement("div");
+    titles.className = "titles";
+    var title = document.createElement("div");
+    title.className = "title";
+    title.textContent = "Stand-in";
+    var sub = document.createElement("div");
+    sub.className = "sub";
+    var dot = document.createElement("i");
+    dot.className = "dot";
+    dot.setAttribute("data-state", status === "armed" || status === "paused" ? status : "off");
+    var subText = document.createElement("span");
+    subText.textContent = !prefs.enabled
+      ? "Off in Settings"
+      : status === "armed"
+        ? "Replying in this chat"
+        : status === "paused"
+          ? "Paused in this chat"
+          : "Off for this chat";
+    sub.appendChild(dot);
+    sub.appendChild(subText);
+    titles.appendChild(title);
+    titles.appendChild(sub);
+    var close = document.createElement("button");
+    close.type = "button";
+    close.className = "close";
+    close.setAttribute("aria-label", "Close");
+    close.title = "Close";
+    close.appendChild(closeGlyph());
+    close.addEventListener("click", function () { open = false; paint(); });
+    head.appendChild(titles);
+    head.appendChild(close);
+    panel.appendChild(head);
     if (!prefs.enabled) {
       var hint = document.createElement("div");
+      hint.className = "hint";
       hint.textContent = "Turn on Allow stand-in in Settings before it can reply.";
       panel.appendChild(hint);
     }
     var row = document.createElement("div");
     row.className = "row";
-    function button(text, fn) {
+    function button(text, kind, fn) {
       var el = document.createElement("button");
       el.type = "button";
+      el.className = "btn" + (kind ? " " + kind : "");
       el.textContent = text;
       el.addEventListener("click", fn);
       row.appendChild(el);
     }
     if (status === "armed") {
-      button("Pause", function () { setChat(current, "pause", false); });
+      button("Pause", "", function () { setChat(current, "pause", false); });
     } else if (status === "paused") {
-      button("Resume", function () { setChat(current, "resume", false); });
-      button("Turn off", function () { setChat(current, "off", false); });
+      button("Resume", "primary", function () { setChat(current, "resume", false); });
+      button("Turn off", "ghost", function () { setChat(current, "off", false); });
     } else {
-      button("Turn on", function () { confirmArm(current); });
+      button("Turn on", "primary", function () { confirmArm(current); });
     }
     panel.appendChild(row);
+    var field = document.createElement("label");
+    field.className = "field";
+    var fieldLabel = document.createElement("span");
+    fieldLabel.textContent = "Instructions for this chat";
     var area = document.createElement("textarea");
-    area.placeholder = "Instructions for this chat";
+    area.placeholder = "How to reply to this person";
     area.setAttribute("aria-label", "Instructions for this chat");
-    panel.appendChild(area);
+    field.appendChild(fieldLabel);
+    field.appendChild(area);
+    panel.appendChild(field);
     var actions = document.createElement("div");
-    actions.className = "row";
-    function action(text, fn) {
+    actions.className = "row foot";
+    function action(text, kind, fn) {
       var el = document.createElement("button");
       el.type = "button";
+      el.className = "btn" + (kind ? " " + kind : "");
       el.textContent = text;
       el.addEventListener("click", fn);
       actions.appendChild(el);
       return el;
     }
-    var save = action("Save", function () {
+    var save = action("Save", "primary", function () {
       invoke("autoreply_save_chat_doc", { chat_id: current.id, text: area.value })
         .catch(function (error) { showBanner(current.id, docError(error, "Could not save the instructions. Try again.")); });
     });
-    action("Open file", function () {
+    action("Open file", "ghost", function () {
       invoke("autoreply_open_chat_doc", { chat_id: current.id })
         .catch(function (error) { showBanner(current.id, docError(error, "Could not open the instructions.")); });
     });
-    var reset = action("Reset", function () {
+    var reset = action("Reset", "ghost", function () {
       invoke("autoreply_reset_chat_doc", { chat_id: current.id }).then(function (text) {
         area.value = text || "";
       }).catch(function (error) {
@@ -616,27 +741,101 @@
       showBanner(current.id, docError(error, "Could not read the instructions."));
     });
     panel.appendChild(actions);
-    var log = document.createElement("div");
-    log.className = "log";
-    panel.appendChild(log);
-    fillLog(panel, current.id);
   }
 
-  // Refreshed in place, so a new entry does not wipe instructions mid-typing.
-  function fillLog(panel, chatId) {
-    var log = panel.querySelector(".log");
-    if (!log) return;
-    var record = rowFor(chatId);
-    var entries = record && record.log || [];
-    var stamp = entries.length + ":" + (entries[0] && entries[0].at_ms || 0);
-    if (log.dataset.stamp === stamp) return;
-    log.dataset.stamp = stamp;
-    log.innerHTML = "";
-    entries.forEach(function (entry) {
-      var line = document.createElement("div");
-      line.textContent = (entry.action || "") + " " + (entry.text || "");
-      log.appendChild(line);
+  function classText(el) {
+    if (!el) return "";
+    return typeof el.className === "string" ? el.className : "";
+  }
+
+  function hasClass(el, name) {
+    return (" " + classText(el) + " ").indexOf(" " + name + " ") !== -1;
+  }
+
+  function nestedMessage(node, main) {
+    var parent = node.parentElement;
+    while (parent && parent !== main) {
+      if (messageToken(parent.getAttribute && parent.getAttribute("data-id") || "")) return true;
+      parent = parent.parentElement;
+    }
+    return false;
+  }
+
+  function standinTokens() {
+    var known = {};
+    Object.keys(chats).forEach(function (id) {
+      var list = chats[id] && chats[id].tokens || [];
+      for (var i = 0; i < list.length; i++) if (list[i]) known[list[i]] = true;
     });
+    var now = Date.now();
+    Object.keys(recentSends).forEach(function (id) {
+      var bag = recentSends[id] || [];
+      for (var i = 0; i < bag.length; i++) {
+        if (bag[i].token && now <= bag[i].until) known[bag[i].token] = true;
+      }
+    });
+    return known;
+  }
+
+  function sentByStandin(row, token, known) {
+    if (!token || !known[token]) return false;
+    var cur = row;
+    for (var i = 0; cur && i < 8; i++) {
+      if (hasClass(cur, "message-in")) return false;
+      if (hasClass(cur, "message-out")) return true;
+      cur = cur.parentElement;
+    }
+    var id = row.getAttribute("data-id") || "";
+    return id.indexOf("false_") !== 0;
+  }
+
+  function markHost(row) {
+    var cur = row;
+    for (var i = 0; cur && i < 8; i++) {
+      if (hasClass(cur, "message-out")) return cur;
+      cur = cur.parentElement;
+    }
+    return row;
+  }
+
+  function aiMark() {
+    var mark = document.createElement("span");
+    mark.setAttribute("data-wr-standin-mark", "1");
+    mark.title = "Sent by the stand-in";
+    mark.setAttribute("aria-label", "Sent by the stand-in");
+    mark.style.cssText = "flex:none;align-self:flex-end;display:inline-flex;align-items:center;justify-content:center;height:14px;margin-block-end:3px;margin-inline-end:6px;padding:0 3px;border:1px solid #1daa61;border-radius:4px;color:#1daa61;background:transparent;font:600 9px/14px system-ui;letter-spacing:.02em;user-select:none;pointer-events:none";
+    mark.textContent = "AI";
+    return mark;
+  }
+
+  // The token list is the record of what this app sent. The mark sits beside
+  // the bubble, in the row's own layout, so it does not cover the words.
+  function markStandin() {
+    if (Date.now() < menuQuietUntil) return;
+    var main = document.getElementById("main");
+    if (!main || !main.querySelectorAll) return;
+    var known = standinTokens();
+    var rows = main.querySelectorAll("[data-id]");
+    var seen = [];
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (nestedMessage(row, main)) continue;
+      var token = messageToken(row.getAttribute("data-id") || "");
+      if (!sentByStandin(row, token, known)) continue;
+      var host = markHost(row);
+      var mark = null;
+      var kids = host.children || [];
+      for (var k = 0; k < kids.length; k++) {
+        if (kids[k].getAttribute && kids[k].getAttribute("data-wr-standin-mark")) mark = kids[k];
+      }
+      if (!mark) mark = aiMark();
+      if (mark.parentNode !== host || host.firstElementChild !== mark) host.insertBefore(mark, host.firstChild);
+      seen.push(mark);
+    }
+    var marks = main.querySelectorAll("[data-wr-standin-mark]");
+    for (var j = 0; j < marks.length; j++) {
+      if (seen.indexOf(marks[j]) === -1 && marks[j].parentNode) marks[j].parentNode.removeChild(marks[j]);
+    }
   }
 
   function confirmArm(current) {
@@ -655,18 +854,36 @@
     if (!panel) return;
     var note = document.createElement("div");
     note.className = "confirm";
-    note.textContent = "Messages in this chat will be sent to " + prefs.backend + ".";
+    var copy = document.createElement("p");
+    copy.textContent = "Messages in this chat will be sent to " + backendLabel(prefs.backend) + ".";
     var yes = document.createElement("button");
     yes.type = "button";
+    yes.className = "btn primary";
     yes.textContent = "Continue";
     yes.addEventListener("click", function () { setChat(current, "arm", true); });
     var old = panel.querySelector(".confirm");
     if (old) old.remove();
-    var oldYes = panel.querySelector(".confirm-yes");
-    if (oldYes) oldYes.remove();
-    yes.className = "confirm-yes";
-    panel.appendChild(note);
-    panel.appendChild(yes);
+    note.appendChild(copy);
+    note.appendChild(yes);
+    var actions = panel.querySelector(".row");
+    if (actions && actions.nextSibling) panel.insertBefore(note, actions.nextSibling);
+    else panel.appendChild(note);
+  }
+
+  function closeGlyph() {
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("width", "14");
+    svg.setAttribute("height", "14");
+    svg.setAttribute("aria-hidden", "true");
+    var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "1.6");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("d", "M4 4l8 8M12 4L4 12");
+    svg.appendChild(path);
+    return svg;
   }
 
   function relatedIds(chat) {
@@ -1048,17 +1265,27 @@
     }
     watchPlacement.started = true;
     var timer = 0;
+    function noteMenuGesture(event) {
+      var target = event && event.target;
+      if (!target || !target.closest || !target.closest("#main")) return;
+      menuQuietUntil = Date.now() + 1000;
+    }
+    document.addEventListener("pointerdown", noteMenuGesture, true);
+    document.addEventListener("contextmenu", noteMenuGesture, true);
     var observer = new MutationObserver(function () {
       if (timer) return;
       timer = setTimeout(function () {
         timer = 0;
+        if ((typeof root.__whatrustPageBusy === "function" && root.__whatrustPageBusy()) || Date.now() < menuQuietUntil) return;
+        markStandin();
         if (!activeChat()) {
           hideStandin();
           return;
         }
         ensureHost();
-        if (!placeHost()) hideStandin();
-        else if (open) syncPanel();
+        if (!placeHost()) {
+          if (!host || !host.parentNode) hideStandin();
+        } else if (open) syncPanel();
       }, 200);
     });
     observer.observe(document.body, { childList: true, subtree: true });

@@ -4,6 +4,73 @@
   // Interface language, injected by Rust and re-set live on a language change.
   function L(pt, en) { return window.__WR_LANG === "en" ? en : pt; }
 
+  // True while a WhatsApp menu is on screen. The chat header menu and the
+  // message menu both close if the page is rewritten underneath them.
+  window.__whatrustWaMenuOpen = function () {
+    var doc = document;
+    if (!doc || !doc.querySelectorAll) return false;
+    function ours(el) {
+      var node = el;
+      for (var i = 0; node && i < 8; i++) {
+        var id = node.id ? String(node.id) : "";
+        if (id.indexOf("__whatrust") === 0) return true;
+        if (node.getAttribute && (node.getAttribute("data-whatrust-standin") || node.getAttribute("data-wr-todo-menu") || node.getAttribute("data-wr-voice"))) return true;
+        node = node.parentElement;
+      }
+      return false;
+    }
+    function shown(el) {
+      if (!el || !el.getBoundingClientRect || ours(el)) return false;
+      if (el.closest && el.closest("#pane-side, #side")) return false;
+      var rect = el.getBoundingClientRect();
+      if (rect.width < 60 || rect.height < 14 || rect.width > 560 || rect.height > 680) return false;
+      if (el.querySelector && el.querySelector("[data-id]")) return false;
+      var viewW = window.innerWidth || 800;
+      var viewH = window.innerHeight || 800;
+      return rect.bottom > 0 && rect.right > 0 && rect.top < viewH && rect.left < viewW;
+    }
+    var nodes = [];
+    try {
+      nodes = doc.querySelectorAll("[role='menu'], [role='listbox'], [role='menuitem'], [data-animate-dropdown-item], :popover-open");
+    } catch (e) {
+      try { nodes = doc.querySelectorAll("[role='menu'], [role='listbox'], [role='menuitem'], [data-animate-dropdown-item]"); }
+      catch (e2) { return false; }
+    }
+    for (var i = 0; i < nodes.length; i++) {
+      if (shown(nodes[i])) return true;
+    }
+    return false;
+  };
+
+  window.__whatrustPageBusy = function () {
+    if (window.__whatrustMenuHold || window.__whatrustHeaderHold) return true;
+    if (Date.now() < (window.__whatrustHeaderQuietUntil || 0)) return true;
+    return window.__whatrustWaMenuOpen();
+  };
+
+  var headerHoldTimer = 0;
+  document.addEventListener("pointerdown", function (event) {
+    var target = event.target;
+    if (!target || !target.closest) return;
+    if (target.closest("[data-whatrust-standin], [data-wr-todo-menu], [data-wr-todo-badge], [data-wr-voice], [id^='__whatrust']")) return;
+    if (target.closest("#main header button, #main header [role='button']")) {
+      window.__whatrustHeaderHold = true;
+      clearTimeout(headerHoldTimer);
+      headerHoldTimer = setTimeout(function () { window.__whatrustHeaderHold = false; }, 30000);
+      return;
+    }
+    if (!window.__whatrustHeaderHold) return;
+    window.__whatrustHeaderHold = false;
+    clearTimeout(headerHoldTimer);
+    window.__whatrustHeaderQuietUntil = Date.now() + 500;
+  }, true);
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Escape" || !window.__whatrustHeaderHold) return;
+    window.__whatrustHeaderHold = false;
+    clearTimeout(headerHoldTimer);
+    window.__whatrustHeaderQuietUntil = Date.now() + 500;
+  }, true);
+
   // A held Web Lock stops Chromium from freezing the page after it has been
   // hidden for a while, which is what dropped the socket. It does not touch
   // focus or presence: WhatsApp still marks the computer unavailable when
@@ -204,6 +271,7 @@
   try {
     var bannerTimer = 0;
     function hideDownloadBanner() {
+      if (typeof window.__whatrustPageBusy === "function" && window.__whatrustPageBusy()) return;
       var roots = document.querySelectorAll("#side, #pane-side");
       if (!roots.length && document.body) roots = [document.body];
       for (var r = 0; r < roots.length; r++) {

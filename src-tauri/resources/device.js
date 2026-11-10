@@ -517,11 +517,25 @@
   }
 
   var scheduled = false;
+  var quietUntil = 0;
+  function noteMenuGesture(event) {
+    var target = event && event.target;
+    if (!target || !target.closest || !target.closest("#main")) return;
+    quietUntil = Date.now() + 1000;
+  }
+  if (root.document && root.document.addEventListener) {
+    root.document.addEventListener("pointerdown", noteMenuGesture, true);
+    root.document.addEventListener("contextmenu", noteMenuGesture, true);
+  }
   function schedule() {
     if (scheduled) return;
     scheduled = true;
     setTimeout(function () {
       scheduled = false;
+      if ((typeof root.__whatrustPageBusy === "function" && root.__whatrustPageBusy()) || Date.now() < quietUntil) {
+        schedule();
+        return;
+      }
       scan();
     }, 120);
   }

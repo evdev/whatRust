@@ -118,8 +118,32 @@ async fn finish(provider: &str, outbound: Outbound) -> Result<String, &'static s
     parse(&provider, &body)
 }
 
+/// A turn that asks for a large completion needs a matching wait. Thinking
+/// models spend most of the budget before the answer, and a 60 second cap cut
+/// those turns off as "the model could not be reached".
+fn post_timeout(max_tokens: u32) -> Duration {
+    Duration::from_secs(60 + u64::from(max_tokens) / 100)
+}
+
+async fn finish_turns(
+    provider: &str,
+    outbound: Outbound,
+    max_tokens: u32,
+) -> Result<String, &'static str> {
+    let provider = provider.to_string();
+    let body =
+        tauri::async_runtime::spawn_blocking(move || post_with(outbound, post_timeout(max_tokens)))
+            .await
+            .map_err(|_| "llm")??;
+    parse(&provider, &body)
+}
+
 fn post(outbound: Outbound) -> Result<String, &'static str> {
-    match exchange("POST", &outbound, Duration::from_secs(60)) {
+    post_with(outbound, Duration::from_secs(60))
+}
+
+fn post_with(outbound: Outbound, timeout: Duration) -> Result<String, &'static str> {
+    match exchange("POST", &outbound, timeout) {
         Ok((status, body)) if (200..300).contains(&status) => Ok(body),
         Ok((status, _)) => {
             crate::dlog::log(&format!("voice: llm status={status}"));
@@ -1120,7 +1144,7 @@ pub fn build_turns(job: &TurnJob<'_>) -> Result<Outbound, &'static str> {
 pub async fn complete_turns(job: TurnJob<'_>) -> Result<String, &'static str> {
     let provider = job.provider.to_string();
     let outbound = build_turns(&job)?;
-    finish(&provider, outbound).await
+    finish_turns(&provider, outbound, job.max_tokens).await
 }
 
 fn parsed_schema(schema: Option<&str>) -> Option<Value> {
