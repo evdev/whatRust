@@ -25,6 +25,10 @@ pub struct Completion<'a> {
     /// provider's default, which can spend the whole output budget before
     /// the visible answer.
     pub thinking_budget: Option<u32>,
+    /// `low` asks Gemini 3 and OpenRouter to keep hidden reasoning small.
+    /// Gemini 3 otherwise thinks at high and can finish the output budget
+    /// before the visible answer is done. Anthropic ignores this.
+    pub thinking_level: Option<&'a str>,
 }
 
 pub struct Outbound {
@@ -47,7 +51,9 @@ pub fn build(job: &Completion<'_>) -> Result<Outbound, &'static str> {
                     {"role": "user", "content": job.user}
                 ]
             });
-            if let Some(budget) = job.thinking_budget {
+            if let Some(level) = job.thinking_level {
+                body["reasoning"] = json!({"effort": level});
+            } else if let Some(budget) = job.thinking_budget {
                 body["reasoning"] = json!({"max_tokens": budget});
             }
             Ok(Outbound {
@@ -61,7 +67,9 @@ pub fn build(job: &Completion<'_>) -> Result<Outbound, &'static str> {
         }
         GEMINI => {
             let mut generation = json!({"maxOutputTokens": job.max_tokens});
-            if let Some(budget) = job.thinking_budget {
+            if let Some(level) = job.thinking_level {
+                generation["thinkingConfig"] = json!({"thinkingLevel": level});
+            } else if let Some(budget) = job.thinking_budget {
                 generation["thinkingConfig"] = json!({"thinkingBudget": budget});
             }
             Ok(Outbound {
@@ -520,6 +528,7 @@ fn probe_completion(provider: &str, key: &str, model: &str) -> Result<(), ApiErr
         user: "hi",
         max_tokens: 32,
         thinking_budget: None,
+        thinking_level: None,
     })
     .map_err(|_| {
         ApiError::plain(
@@ -1989,6 +1998,7 @@ mod tests {
             user: "hello",
             max_tokens: 128,
             thinking_budget: None,
+            thinking_level: None,
         }
     }
 
@@ -2012,6 +2022,30 @@ mod tests {
         let body = build(&claude).unwrap().body;
         assert!(!body.contains("thinkingBudget"));
         assert!(body.contains("\"max_tokens\":128"));
+    }
+
+    #[test]
+    fn a_thinking_level_replaces_the_budget() {
+        let mut gemini = job(GEMINI, "key");
+        gemini.model = "gemini-3.8-flash";
+        gemini.max_tokens = 65_536;
+        gemini.thinking_level = Some("low");
+        let body = build(&gemini).unwrap().body;
+        assert!(body.contains("\"maxOutputTokens\":65536"));
+        assert!(body.contains("\"thinkingLevel\":\"low\""));
+        assert!(!body.contains("thinkingBudget"));
+
+        let mut routed = job(OPENROUTER, "key");
+        routed.thinking_level = Some("low");
+        let body = build(&routed).unwrap().body;
+        assert!(body.contains("\"effort\":\"low\""));
+        assert!(!body.contains("\"max_tokens\":1024"));
+
+        let mut claude = job(ANTHROPIC, "key");
+        claude.thinking_level = Some("low");
+        let body = build(&claude).unwrap().body;
+        assert!(!body.contains("thinkingLevel"));
+        assert!(!body.contains("reasoning"));
     }
 
     #[test]

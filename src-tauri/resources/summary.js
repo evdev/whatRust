@@ -745,6 +745,7 @@
     card.style.color = paint.fg;
     card.replaceChildren();
     var body = document.createElement("div");
+    body.style.whiteSpace = "pre-wrap";
     body.textContent = text;
     card.appendChild(body);
     if (actions && actions.length) {
@@ -792,8 +793,12 @@
     return from + " – " + to;
   }
 
+  function bulletLines(points) {
+    return (points || []).map(function (point) { return "• " + point; }).join("\n");
+  }
+
   function copyText(entry) {
-    var lines = [rangeTitle(entry.range) + " · " + spanLabel(entry)].concat(entry.points || []);
+    var lines = [rangeTitle(entry.range) + " · " + spanLabel(entry), bulletLines(entry.points)];
     var text = lines.join("\n");
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).catch(function () {});
@@ -866,10 +871,12 @@
     meta.textContent = metaText;
     box.appendChild(meta);
     var list = document.createElement("ul");
-    list.style.cssText = "margin:0;padding:0 0 0 18px";
+    list.style.cssText = "margin:0;padding:0;list-style:none";
     (entry.points || []).forEach(function (point) {
       var item = document.createElement("li");
-      item.textContent = point;
+      item.setAttribute("dir", "auto");
+      item.style.cssText = "display:block;margin:3px 0;padding-inline-start:1.15em;text-indent:-1.15em";
+      item.textContent = "• " + point;
       list.appendChild(item);
     });
     box.appendChild(list);
@@ -1159,7 +1166,7 @@
     if (!current) return;
     hideCard();
     if (!document.querySelector("[data-wr-summary-block='" + cssEscape(entry.id) + "']")) {
-      paintCard(rangeTitle(entry.range) + "\n" + (entry.points || []).join("\n"), [
+      paintCard(rangeTitle(entry.range) + "\n" + bulletLines(entry.points), [
         { label: L("Fechar", "Close"), fn: hideCard },
       ]);
     }
