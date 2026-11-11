@@ -81,9 +81,34 @@
   function widText(id) {
     if (!id) return "";
     if (typeof id === "string") return id;
-    if (id._serialized) return String(id._serialized);
-    if (id.user && id.server) return String(id.user) + "@" + String(id.server);
+    try {
+      if (id._serialized) return String(id._serialized);
+    } catch (e) {}
+    try {
+      if (id.user && id.server) return String(id.user) + "@" + String(id.server);
+    } catch (e2) {}
+    if (typeof id.toString === "function") {
+      try {
+        var text = String(id.toString());
+        if (text && text !== "[object Object]") return text;
+      } catch (e3) {}
+    }
     return "";
+  }
+
+  function describeChat(chat) {
+    if (!chat || typeof chat.then === "function" && !chat.id) return null;
+    var id = "";
+    try { id = normalizeChatId(widText(chat.id)); } catch (e) { id = ""; }
+    if (!id) return null;
+    var name = id;
+    try {
+      var contact = chat.contact || null;
+      name = chat.formattedTitle || displayName(contact, chat) || chat.name || id;
+    } catch (e2) {}
+    var group = /@g\.us$/.test(id);
+    try { group = group || !!(chat.isGroup || chat.groupMetadata); } catch (e3) {}
+    return { id: id, name: String(name || id).slice(0, 80), group: !!group };
   }
 
   function messageToken(value) {
@@ -170,11 +195,7 @@
   }
 
   function widKey(wid) {
-    if (!wid) return "";
-    if (typeof wid === "string") return wid;
-    if (wid._serialized) return String(wid._serialized);
-    if (wid.user && wid.server) return String(wid.user) + "@" + String(wid.server);
-    return "";
+    return widText(wid);
   }
 
   function isGroupMsg(msg) {
@@ -444,6 +465,7 @@
       inChatHeader: inChatHeader,
       messageToken: messageToken,
       normalizeChatId: normalizeChatId,
+      describeChat: describeChat,
       senderField: senderField,
     };
     return;
@@ -515,20 +537,56 @@
   var senderLogged = false;
   var theme = "light";
 
+  var chatMissLogged = false;
+
+  function headerName() {
+    var header = document.querySelector("#main header");
+    if (!header || !header.querySelector) return "";
+    var title = header.querySelector("span[dir='auto'], span[title]");
+    var text = title && (title.getAttribute("title") || title.textContent) || "";
+    return String(text).replace(/\s+/g, " ").trim().slice(0, 80);
+  }
+
+  function firstDataChat(node) {
+    if (!node || !node.querySelectorAll) return "";
+    var rows = node.querySelectorAll("[data-id]");
+    for (var i = 0; i < rows.length && i < 40; i++) {
+      var id = normalizeChatId(rows[i].getAttribute("data-id"));
+      if (id) return id;
+    }
+    return "";
+  }
+
+  function domChat() {
+    var main = document.getElementById("main");
+    var id = firstDataChat(main);
+    if (!id) {
+      var side = document.getElementById("pane-side") || document.getElementById("side");
+      var selected = side && side.querySelector ? side.querySelector('[aria-selected="true"]') : null;
+      var node = selected;
+      for (var n = 0; node && n < 6 && !id; n++) {
+        id = normalizeChatId(node.getAttribute && node.getAttribute("data-id"));
+        if (!id && node.querySelectorAll) id = firstDataChat(node);
+        node = node.parentElement;
+      }
+    }
+    if (!id) return null;
+    return { id: id, name: headerName() || id, group: /@g\.us$/.test(id) };
+  }
+
   function activeChat() {
     var wpp = root.WPP;
-    if (!wpp || !wpp.chat || typeof wpp.chat.getActiveChat !== "function") return null;
-    try {
-      var chat = wpp.chat.getActiveChat();
-      if (!chat || typeof chat.then === "function") return null;
-      var id = normalizeChatId(widText(chat.id));
-      if (!id) return null;
-      var contact = chat.contact || null;
-      var name = chat.formattedTitle || displayName(contact, chat) || chat.name || id;
-      return { id: id, name: String(name).slice(0, 80), group: !!(chat.isGroup || chat.groupMetadata) };
-    } catch (e) {
-      return null;
+    var model = null;
+    if (wpp && wpp.chat && typeof wpp.chat.getActiveChat === "function") {
+      try { model = describeChat(wpp.chat.getActiveChat()); } catch (e) { model = null; }
     }
+    var found = model || domChat();
+    if (!found && !chatMissLogged) {
+      chatMissLogged = true;
+      crumb("summary: no active chat");
+    }
+    if (found) chatMissLogged = false;
+    return found;
   }
 
   function colors() {
@@ -982,7 +1040,7 @@
     try {
       if (typeof wpp.chat.get === "function") {
         var found = wpp.chat.get(chatId);
-        if (found && typeof found.then !== "function") return found;
+        if (found && (typeof found.then !== "function" || found.id)) return found;
       }
     } catch (e) {}
     try {

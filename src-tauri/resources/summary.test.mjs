@@ -163,6 +163,15 @@ assert(api.historyStep("m2", 50, "m2", 40, false) === "done", "the same page is 
 assert(api.historyStep("m2", 50, "", 40, false) === "done", "a page with no id is the end of the history");
 assert(api.historyStep("m2", 50, "m1", 10, true) === "done", "a message before the window ends the scan");
 assert(api.historyStep("m2", 50, "m9", 80, false) === "stall", "a page that jumps forward is not progress");
+assert(api.normalizeChatId("false_1555@c.us_ABCDEF") === "1555@c.us", "a message row still names its chat");
+assert(api.describeChat({ id: { toString() { return "1555@c.us"; } }, formattedTitle: "Ada" }).id === "1555@c.us", "a chat id that only prints as text is kept");
+const throwing = { id: "1555@g.us" };
+Object.defineProperty(throwing, "formattedTitle", { get() { throw new Error("title"); } });
+Object.defineProperty(throwing, "contact", { get() { throw new Error("contact"); } });
+const described = api.describeChat(throwing);
+assert(described && described.id === "1555@g.us" && described.group === true, "a chat is kept when its name cannot be read");
+assert(api.describeChat({ then() {}, id: "1555@c.us", formattedTitle: "Ada" }).id === "1555@c.us", "a chat model with then is still a chat");
+assert(api.describeChat({ then() {} }) === null, "a promise is not a chat");
 assert(source.includes('item.textContent = "• " + point'), "each summary point is drawn with a bullet");
 assert(source.includes("display:block;margin:3px 0"), "each bullet is on its own line");
 assert(source.includes("white-space") || source.includes("whiteSpace"), "a fallback card keeps the line breaks");
