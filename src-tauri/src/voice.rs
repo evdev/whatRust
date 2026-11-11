@@ -608,6 +608,7 @@ async fn ensure_translation(
         system: &system,
         user: &user,
         max_tokens: 2048,
+        thinking_budget: None,
     })
     .await?;
     if let Some(entry) = cache.items.get_mut(id) {
@@ -632,6 +633,7 @@ async fn run_summary(app: &AppHandle, settings: &Settings, text: &str) -> Result
         system: &system,
         user: &user,
         max_tokens: 1024,
+        thinking_budget: None,
     })
     .await
     .map_err(str::to_string)

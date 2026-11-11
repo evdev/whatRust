@@ -21,6 +21,10 @@ pub struct Completion<'a> {
     pub system: &'a str,
     pub user: &'a str,
     pub max_tokens: u32,
+    /// Cap for a thinking model's hidden reasoning. `None` leaves the
+    /// provider's default, which can spend the whole output budget before
+    /// the visible answer.
+    pub thinking_budget: Option<u32>,
 }
 
 pub struct Outbound {
@@ -34,38 +38,49 @@ pub fn build(job: &Completion<'_>) -> Result<Outbound, &'static str> {
         return Err("llm");
     }
     match job.provider {
-        OPENROUTER => Ok(Outbound {
-            url: "https://openrouter.ai/api/v1/chat/completions".into(),
-            headers: vec![
-                ("Authorization".into(), format!("Bearer {}", job.key)),
-                ("Content-Type".into(), "application/json".into()),
-            ],
-            body: json!({
+        OPENROUTER => {
+            let mut body = json!({
                 "model": job.model,
                 "max_tokens": job.max_tokens,
                 "messages": [
                     {"role": "system", "content": job.system},
                     {"role": "user", "content": job.user}
                 ]
+            });
+            if let Some(budget) = job.thinking_budget {
+                body["reasoning"] = json!({"max_tokens": budget});
+            }
+            Ok(Outbound {
+                url: "https://openrouter.ai/api/v1/chat/completions".into(),
+                headers: vec![
+                    ("Authorization".into(), format!("Bearer {}", job.key)),
+                    ("Content-Type".into(), "application/json".into()),
+                ],
+                body: body.to_string(),
             })
-            .to_string(),
-        }),
-        GEMINI => Ok(Outbound {
-            url: format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-                path_encode(job.model)
-            ),
-            headers: vec![
-                ("x-goog-api-key".into(), job.key.into()),
-                ("Content-Type".into(), "application/json".into()),
-            ],
-            body: json!({
-                "systemInstruction": {"parts": [{"text": job.system}]},
-                "contents": [{"role": "user", "parts": [{"text": job.user}]}],
-                "generationConfig": {"maxOutputTokens": job.max_tokens}
+        }
+        GEMINI => {
+            let mut generation = json!({"maxOutputTokens": job.max_tokens});
+            if let Some(budget) = job.thinking_budget {
+                generation["thinkingConfig"] = json!({"thinkingBudget": budget});
+            }
+            Ok(Outbound {
+                url: format!(
+                    "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                    path_encode(job.model)
+                ),
+                headers: vec![
+                    ("x-goog-api-key".into(), job.key.into()),
+                    ("Content-Type".into(), "application/json".into()),
+                ],
+                body: json!({
+                    "systemInstruction": {"parts": [{"text": job.system}]},
+                    "contents": [{"role": "user", "parts": [{"text": job.user}]}],
+                    "generationConfig": generation
+                })
+                .to_string(),
             })
-            .to_string(),
-        }),
+        }
         ANTHROPIC => Ok(Outbound {
             url: "https://api.anthropic.com/v1/messages".into(),
             headers: vec![
@@ -100,21 +115,33 @@ pub fn parse(provider: &str, body: &str) -> Result<String, &'static str> {
 }
 
 pub async fn complete(job: Completion<'_>) -> Result<String, &'static str> {
-    let provider = job.provider.to_string();
-    let outbound = build(&job)?;
     // Voice and summary callers have one error string. A schema rejection is
     // only meaningful to the stand-in, which uses `complete_turns`.
-    match finish(&provider, outbound).await {
+    match complete_detailed(job).await {
         Err("llm_rejected") => Err("llm"),
         other => other,
     }
 }
 
-async fn finish(provider: &str, outbound: Outbound) -> Result<String, &'static str> {
+/// Same request as `complete`, but a rejected body stays `llm_rejected` so
+/// the caller can retry without the part the provider refused.
+pub async fn complete_detailed(job: Completion<'_>) -> Result<String, &'static str> {
+    let provider = job.provider.to_string();
+    let max_tokens = job.max_tokens;
+    let outbound = build(&job)?;
+    finish(&provider, outbound, max_tokens).await
+}
+
+async fn finish(
+    provider: &str,
+    outbound: Outbound,
+    max_tokens: u32,
+) -> Result<String, &'static str> {
     let provider = provider.to_string();
-    let body = tauri::async_runtime::spawn_blocking(move || post(outbound))
-        .await
-        .map_err(|_| "llm")??;
+    let body =
+        tauri::async_runtime::spawn_blocking(move || post_with(outbound, post_timeout(max_tokens)))
+            .await
+            .map_err(|_| "llm")??;
     parse(&provider, &body)
 }
 
@@ -122,7 +149,10 @@ async fn finish(provider: &str, outbound: Outbound) -> Result<String, &'static s
 /// models spend most of the budget before the answer, and a 60 second cap cut
 /// those turns off as "the model could not be reached".
 fn post_timeout(max_tokens: u32) -> Duration {
-    Duration::from_secs(60 + u64::from(max_tokens) / 100)
+    // The output cap can be the model's maximum (65k). The wait stays bounded
+    // so a stalled request does not sit for the time that many tokens would take.
+    let secs = 60 + u64::from(max_tokens) / 100;
+    Duration::from_secs(secs.min(180))
 }
 
 async fn finish_turns(
@@ -136,10 +166,6 @@ async fn finish_turns(
             .await
             .map_err(|_| "llm")??;
     parse(&provider, &body)
-}
-
-fn post(outbound: Outbound) -> Result<String, &'static str> {
-    post_with(outbound, Duration::from_secs(60))
 }
 
 fn post_with(outbound: Outbound, timeout: Duration) -> Result<String, &'static str> {
@@ -493,6 +519,7 @@ fn probe_completion(provider: &str, key: &str, model: &str) -> Result<(), ApiErr
         system: "Reply with ok.",
         user: "hi",
         max_tokens: 32,
+        thinking_budget: None,
     })
     .map_err(|_| {
         ApiError::plain(
@@ -1961,7 +1988,30 @@ mod tests {
             system: "system",
             user: "hello",
             max_tokens: 128,
+            thinking_budget: None,
         }
+    }
+
+    #[test]
+    fn a_thinking_budget_is_sent_only_when_asked() {
+        let mut plain = job(GEMINI, "key");
+        let body = build(&plain).unwrap().body;
+        assert!(body.contains("\"maxOutputTokens\":128"));
+        assert!(!body.contains("thinkingBudget"));
+        plain.thinking_budget = Some(1024);
+        let body = build(&plain).unwrap().body;
+        assert!(body.contains("\"thinkingBudget\":1024"));
+
+        let mut routed = job(OPENROUTER, "key");
+        assert!(!build(&routed).unwrap().body.contains("reasoning"));
+        routed.thinking_budget = Some(1024);
+        assert!(build(&routed).unwrap().body.contains("\"max_tokens\":1024"));
+
+        let mut claude = job(ANTHROPIC, "key");
+        claude.thinking_budget = Some(1024);
+        let body = build(&claude).unwrap().body;
+        assert!(!body.contains("thinkingBudget"));
+        assert!(body.contains("\"max_tokens\":128"));
     }
 
     #[test]
