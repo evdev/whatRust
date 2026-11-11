@@ -1182,12 +1182,14 @@ fn ranked_voice_hits(
     lines.join("")
 }
 
+#[cfg(test)]
 fn search_voice_notes(notes: &[VoiceNote], asks: &[SearchAsk]) -> String {
     let docs = docs_of(notes);
     let vectors = crate::rag::Vectors::none(asks.len());
     ranked_voice_hits(notes, asks, &docs, &vectors, 0)
 }
 
+#[cfg(test)]
 fn search_text(exchanges: &[Exchange], notes: &[VoiceNote]) -> String {
     let chat = exchanges
         .iter()

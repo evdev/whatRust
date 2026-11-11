@@ -1832,10 +1832,7 @@ fn push_grok_value(value: &Value, models: &mut Vec<ModelChoice>) {
 }
 
 fn model_token(text: &str) -> Option<&str> {
-    let text = text
-        .trim()
-        .trim_start_matches(|c: char| matches!(c, '-' | '*' | '•'))
-        .trim();
+    let text = text.trim().trim_start_matches(['-', '*', '•']).trim();
     let token = text
         .split_whitespace()
         .next()?

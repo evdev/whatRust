@@ -1452,7 +1452,12 @@ fn disable_hidden_timer_throttling(settings: &webkit2gtk::Settings) {
         if list.is_null() {
             return;
         }
-        let stash = settings.to_glib_none();
+        // The pointer type has to be named. Casting `.0` straight to `c_void`
+        // leaves the glib translation's pointer parameter unconstrained.
+        let stash: webkit2gtk::glib::translate::Stash<
+            *mut webkit2gtk::ffi::WebKitSettings,
+            webkit2gtk::Settings,
+        > = settings.to_glib_none();
         let settings_ptr = stash.0 as *mut c_void;
         let mut turned_off = 0u32;
         for index in 0..webkit_feature_list_get_length(list) {

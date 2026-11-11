@@ -122,7 +122,7 @@ pub fn attach(store_uuid: Option<[u8; 16]>) {
     }
     let delegate = delegate();
     let crypto_sel = sel!(webCryptoMasterKey:);
-    let has_crypto: Bool = unsafe { msg_send![&*delegate, respondsToSelector: crypto_sel] };
+    let has_crypto: Bool = unsafe { msg_send![delegate, respondsToSelector: crypto_sel] };
     if !has_crypto.as_bool() {
         crate::dlog::log("webcrypto: master-key delegate method is missing");
         return;

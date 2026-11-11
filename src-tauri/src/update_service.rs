@@ -22,10 +22,16 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
+// The fork does not call `start` (see lib.rs). These stay so the scheduler can
+// be turned back on, and the tests still exercise them.
+#[allow(dead_code)]
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(60);
 /// With `WHATRUST_UPDATE_FEED` set (tests, local end-to-end runs) nobody waits a minute.
+#[allow(dead_code)]
 const FIRST_CHECK_DELAY_OVERRIDDEN: Duration = Duration::from_secs(3);
+#[allow(dead_code)]
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+#[allow(dead_code)]
 const TICK: Duration = Duration::from_secs(5 * 60);
 
 // ---- persisted bookkeeping --------------------------------------------------------------------
@@ -481,10 +487,12 @@ pub fn release_page_url(app: &AppHandle) -> Option<tauri::Url> {
 // ---- background loop ------------------------------------------------------------------------------
 
 /// Whether a background check is due: never checked this run, or six hours ago.
+#[allow(dead_code)]
 fn due(last: Option<std::time::Instant>) -> bool {
     last.is_none_or(|t| t.elapsed() >= CHECK_EVERY)
 }
 
+#[allow(dead_code)]
 fn first_delay(feed_overridden: bool) -> Duration {
     if feed_overridden {
         FIRST_CHECK_DELAY_OVERRIDDEN
@@ -493,6 +501,7 @@ fn first_delay(feed_overridden: bool) -> Duration {
     }
 }
 
+#[allow(dead_code)]
 pub fn start(app: &AppHandle) {
     updater::clean_stale();
     method(); // decide while the executable is still the one we started from

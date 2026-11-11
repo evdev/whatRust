@@ -720,6 +720,7 @@ fn private_dir() -> std::io::Result<PathBuf> {
 }
 
 /// Remove private update folders a crashed or finished run left behind (older than a day).
+#[allow(dead_code)]
 pub fn clean_stale() {
     let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) else {
         return;

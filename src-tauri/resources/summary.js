@@ -639,30 +639,35 @@
     entries = next;
   }
 
+  function findBlock(row, id) {
+    var kids = row.children || [];
+    for (var i = 0; i < kids.length; i++) {
+      if (kids[i].getAttribute && kids[i].getAttribute("data-wr-summary-block") === id) return kids[i];
+    }
+    return null;
+  }
+
   function paintBlock(row, entry) {
+    var id = String(entry.id);
+    var box = findBlock(row, id);
+    var paint = colors();
+    var sig = theme + ":" + entry.updated_at + ":" + (entry.points || []).join("|");
+    if (box && box.getAttribute("data-sig") === sig) return;
     var host = row.ownerDocument && row.ownerDocument.getElementById ? row.ownerDocument.getElementById("main") : null;
     if (host && host.querySelectorAll) {
-      var copies = host.querySelectorAll("[data-wr-chat-summary]");
+      var copies = host.querySelectorAll("[data-wr-summary-block]");
       for (var c = 0; c < copies.length; c++) {
-        if (copies[c].getAttribute("data-wr-chat-summary") !== String(entry.id)) continue;
-        if (row.contains(copies[c])) continue;
+        if (copies[c].getAttribute("data-wr-summary-block") !== id || copies[c] === box) continue;
         if (copies[c].parentNode) copies[c].parentNode.removeChild(copies[c]);
       }
     }
-    var box = null;
-    var existing = row.querySelectorAll("[data-wr-chat-summary]");
-    for (var i = 0; i < existing.length; i++) {
-      if (existing[i].getAttribute("data-wr-chat-summary") === entry.id) box = existing[i];
-    }
     if (!box) {
       box = document.createElement("div");
-      box.setAttribute("data-wr-chat-summary", entry.id);
+      box.setAttribute("data-wr-summary-block", id);
+      box.setAttribute("data-wr-chat-summary", id);
       box.setAttribute("dir", "auto");
       row.appendChild(box);
     }
-    var paint = colors();
-    var sig = theme + ":" + entry.updated_at + ":" + (entry.points || []).join("|");
-    if (box.getAttribute("data-sig") === sig) return;
     box.setAttribute("data-sig", sig);
     box.style.cssText = "margin:6px 8px;padding:8px 10px;border-radius:8px;background:" + paint.bg + ";color:" + paint.fg + ";font:13px/1.4 system-ui;box-shadow:inset 0 0 0 1px " + paint.line;
     box.replaceChildren();
@@ -691,7 +696,7 @@
       var button = document.createElement("button");
       button.type = "button";
       button.textContent = label;
-      button.setAttribute("data-wr-chat-summary", entry.id);
+      button.setAttribute("data-wr-chat-summary", "action");
       button.style.cssText = "margin:8px 8px 0 0;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-decoration:underline;cursor:pointer";
       button.addEventListener("click", function (event) {
         event.preventDefault();
@@ -749,10 +754,10 @@
       keep[entry.id] = true;
       paintBlock(row, entry);
     });
-    var boxes = main.querySelectorAll("[data-wr-chat-summary]");
+    var boxes = main.querySelectorAll("[data-wr-summary-block]");
     for (var n = 0; n < boxes.length; n++) {
-      var id = boxes[n].getAttribute("data-wr-chat-summary");
-      if (id !== "card" && !keep[id] && boxes[n].parentNode) boxes[n].parentNode.removeChild(boxes[n]);
+      var id = boxes[n].getAttribute("data-wr-summary-block");
+      if (!keep[id] && boxes[n].parentNode) boxes[n].parentNode.removeChild(boxes[n]);
     }
   }
 
@@ -858,7 +863,7 @@
     paintAll();
     if (!current) return;
     hideCard();
-    if (!document.querySelector("[data-wr-chat-summary='" + cssEscape(entry.id) + "']")) {
+    if (!document.querySelector("[data-wr-summary-block='" + cssEscape(entry.id) + "']")) {
       paintCard(rangeTitle(entry.range) + "\n" + (entry.points || []).join("\n"), [
         { label: L("Fechar", "Close"), fn: hideCard },
       ]);

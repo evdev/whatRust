@@ -399,6 +399,7 @@ pub fn chat_summary_consent(window: Webview, app: AppHandle) -> Result<ConsentVi
 }
 
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 pub async fn summarize_chat(
     window: Webview,
     app: AppHandle,

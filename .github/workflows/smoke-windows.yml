@@ -19,9 +19,10 @@ on:
 
 jobs:
   smoke:
-    # ARM64 is on-demand only. A push of this file still smokes the x64 release;
-    # the ARM64 installer is published later and may not exist yet.
-    if: matrix.token != 'arm64' || github.event_name == 'workflow_dispatch'
+    # ARM64 is on-demand only. The condition is on each step: a job-level `if`
+    # cannot read `matrix`, and that rejected the whole workflow before it ran.
+    # A push of this file still smokes the x64 release. The ARM64 installer is
+    # published later and may not exist yet.
     strategy:
       fail-fast: false
       matrix:
@@ -39,6 +40,7 @@ jobs:
       PE_MACHINE: ${{ matrix.machine }}
     steps:
       - name: Download and install the release
+        if: matrix.token != 'arm64' || github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -78,6 +80,7 @@ jobs:
           "EXE=$($exe.FullName)" | Out-File -Append $env:GITHUB_ENV
 
       - name: whatsapp:// is registered
+        if: matrix.token != 'arm64' || github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
           foreach ($root in 'HKCU:\Software\Classes\whatsapp', 'HKLM:\Software\Classes\whatsapp') {
@@ -87,6 +90,7 @@ jobs:
           }
 
       - name: Launch, click a link, open a whatsapp:// link
+        if: matrix.token != 'arm64' || github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -144,12 +148,12 @@ jobs:
           "whatRust processes: $(@(Get-Process whatRust -ErrorAction SilentlyContinue).Count) (single instance expected: 1)"
 
       - name: App log
-        if: always()
+        if: always() && (matrix.token != 'arm64' || github.event_name == 'workflow_dispatch')
         shell: pwsh
         run: Get-Content "$env:LOCALAPPDATA\whatRust\logs\whatrust.log"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
+        if: always() && (matrix.token != 'arm64' || github.event_name == 'workflow_dispatch')
         with:
           name: smoke-windows-${{ matrix.token }}
           path: shots/
