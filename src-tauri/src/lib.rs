@@ -5,6 +5,7 @@ mod aumid;
 mod autoreply;
 mod badge;
 mod biometric;
+mod chat_summary;
 mod commands;
 mod decorations;
 mod dlog;
@@ -27,6 +28,7 @@ mod notif_icon;
 mod notify;
 mod opener;
 mod proxy;
+mod rag;
 mod scrollbars;
 mod sessions;
 mod settings;
@@ -205,6 +207,7 @@ pub fn run() {
         .manage(integration::Integration::default())
         .manage(accounts::ActiveAccount::new("wa-default".into()))
         .manage(voice::VoiceState::default())
+        .manage(chat_summary::ChatSummaryState::default())
         .manage(todo::TodoState::default())
         .manage(autoreply::AutoreplyState::default())
         .invoke_handler(tauri::generate_handler![
@@ -260,6 +263,12 @@ pub fn run() {
             voice::voice_lookup,
             voice::transcribe_voice,
             voice::summarize_voice,
+            voice::voice_transcripts,
+            chat_summary::chat_summary_consent,
+            chat_summary::summarize_chat,
+            chat_summary::chat_summaries,
+            chat_summary::chat_summary_delete,
+            chat_summary::clear_chat_summary_consent,
             voice::fluidvoice_status,
             voice::open_fluidvoice_windows,
             voice::set_ai_key,

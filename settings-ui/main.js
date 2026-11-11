@@ -130,6 +130,14 @@ async function resetIcon() {
 
 let hostPlatform = "";
 
+function paintChatSummaryConsent(on) {
+  const state = document.getElementById("chat_summary_consent_state");
+  const revoke = document.getElementById("chat_summary_revoke");
+  if (!state || !revoke) return;
+  state.textContent = on ? "Permitido neste computador." : "Ainda não permitido.";
+  revoke.hidden = !on;
+}
+
 async function load() {
   const s = await invoke("get_settings");
   hostPlatform = s.platform;
@@ -189,6 +197,7 @@ async function load() {
     anthropic: s.summary_model_anthropic || translateModels.anthropic,
   };
   document.getElementById("ai_provider").value = AI_PROVIDERS.includes(s.ai_provider) ? s.ai_provider : "openrouter";
+  paintChatSummaryConsent(!!s.chat_summary_consent);
   shownProvider = document.getElementById("ai_provider").value;
   standinCli = !!s.standin_cli_available;
   standinModels = {
@@ -521,6 +530,13 @@ window.addEventListener("DOMContentLoaded", () => {
     showStandinFields();
     // The old program's result would otherwise be read as this one's.
     document.getElementById("standin_cli_state").textContent = "Not checked yet.";
+  });
+  document.getElementById("chat_summary_revoke").addEventListener("click", async () => {
+    try {
+      await invoke("clear_chat_summary_consent");
+      paintChatSummaryConsent(false);
+      flash("Alterações salvas ✓", 1500);
+    } catch (e) { flash(String(e), 6000); }
   });
   document.getElementById("save_persona").addEventListener("click", savePersona);
   document.getElementById("open_persona").addEventListener("click", () => {

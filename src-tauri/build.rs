@@ -32,6 +32,11 @@ fn main() {
             "voice_lookup",
             "transcribe_voice",
             "summarize_voice",
+            "voice_transcripts",
+            "chat_summary_consent",
+            "summarize_chat",
+            "chat_summaries",
+            "chat_summary_delete",
             "todo_list",
             "todo_add",
             "todo_update",
@@ -90,6 +95,7 @@ fn main() {
             "open_fluidvoice_windows",
             "set_ai_key",
             "list_ai_models",
+            "clear_chat_summary_consent",
         ]),
     ))
     .expect("failed to run tauri-build");

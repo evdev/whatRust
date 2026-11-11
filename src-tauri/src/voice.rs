@@ -144,6 +144,80 @@ pub async fn voice_lookup(
     lookup_cached(&app, id).await
 }
 
+#[derive(Serialize)]
+pub struct VoiceTranscriptHit {
+    pub id: String,
+    pub text: String,
+}
+
+const TRANSCRIPT_LIMIT: usize = 500;
+const TRANSCRIPT_CHARS: usize = 2_000;
+
+/// Cached transcripts for the ids a chat summary already has. One cache load.
+/// Unknown ids are omitted. More than 500 ids keeps the newest, which the page
+/// sends last.
+pub fn select_transcripts(stored: &[StoredTranscript], ids: &[String]) -> Vec<VoiceTranscriptHit> {
+    let ids = if ids.len() > TRANSCRIPT_LIMIT {
+        &ids[ids.len() - TRANSCRIPT_LIMIT..]
+    } else {
+        ids
+    };
+    let mut out = Vec::new();
+    for id in ids {
+        let needle = id.trim();
+        if needle.is_empty() || needle.len() > 180 {
+            continue;
+        }
+        let Some(text) = stored.iter().find_map(|note| {
+            if same_voice(note.id.as_str(), needle) {
+                Some(note.text.as_str())
+            } else {
+                None
+            }
+        }) else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        out.push(VoiceTranscriptHit {
+            id: needle.to_string(),
+            text: clip_chars(text, TRANSCRIPT_CHARS),
+        });
+    }
+    out
+}
+
+fn same_voice(stored_id: &str, asked: &str) -> bool {
+    if stored_id == asked {
+        return true;
+    }
+    let stored_token = crate::todo::message_token(stored_id);
+    let asked_token = crate::todo::message_token(asked);
+    !stored_token.is_empty() && (stored_token == asked_token || stored_token == asked)
+}
+
+fn clip_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    text.chars().take(max).collect()
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn voice_transcripts(
+    window: Webview,
+    app: AppHandle,
+    ids: Vec<String>,
+) -> Result<Vec<VoiceTranscriptHit>, String> {
+    page(&window)?;
+    crate::lock::require_unlocked(&app)?;
+    let state = app.state::<VoiceState>();
+    let _gate = state.gate.lock().await;
+    Ok(select_transcripts(&stored_transcripts(&app), &ids))
+}
+
 #[tauri::command]
 pub async fn transcribe_voice(
     window: Webview,
@@ -576,6 +650,39 @@ fn summary_key(settings: &Settings) -> String {
     format!("{}|{}", settings.ai_provider, settings.summary_model())
 }
 
+#[derive(Clone)]
+pub(crate) struct StoredTranscript {
+    pub id: String,
+    pub at: u64,
+    pub text: String,
+}
+
+/// Every non-empty transcript, oldest first. The stand-in reads and searches
+/// these; the page never receives the whole cache.
+pub(crate) fn stored_transcripts(app: &AppHandle) -> Vec<StoredTranscript> {
+    let Ok(path) = cache_path(app) else {
+        return Vec::new();
+    };
+    let cache = load_cache(&path);
+    let mut notes: Vec<StoredTranscript> = cache
+        .items
+        .into_iter()
+        .filter_map(|(id, entry)| {
+            let text = entry.text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            Some(StoredTranscript {
+                id,
+                at: entry.at,
+                text: text.to_string(),
+            })
+        })
+        .collect();
+    notes.sort_by(|left, right| left.at.cmp(&right.at).then_with(|| left.id.cmp(&right.id)));
+    notes
+}
+
 pub(crate) fn cached_transcript(app: &AppHandle, id_or_token: &str) -> Option<String> {
     let needle = id_or_token.trim();
     if needle.is_empty() {
@@ -616,6 +723,10 @@ fn cache_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("voice-transcripts.json"))
+}
+
+pub(crate) fn embed_cache_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(cache_path(app)?.with_file_name("voice-embeddings.json"))
 }
 
 fn load_cache(path: &Path) -> Cache {
@@ -1294,5 +1405,38 @@ mod tests {
         let value = Value::Array(framed.iter().map(|b| Value::from(*b)).collect());
         let bytes = json_bytes(&value).unwrap();
         assert_eq!(split_payload(&bytes).unwrap().0, "false_123@c.us_ABC");
+    }
+
+    #[test]
+    fn transcript_lookup_returns_only_the_requested_ids_from_one_list() {
+        let stored = vec![
+            StoredTranscript {
+                id: "false_1@c.us_AAA".into(),
+                at: 1,
+                text: "  hello  ".into(),
+            },
+            StoredTranscript {
+                id: "false_1@c.us_BBB".into(),
+                at: 2,
+                text: "other".into(),
+            },
+        ];
+        let hits = select_transcripts(
+            &stored,
+            &[
+                "false_1@c.us_AAA".into(),
+                "nope".into(),
+                "false_9@c.us_ZZZ".into(),
+            ],
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "false_1@c.us_AAA");
+        assert_eq!(hits[0].text, "hello");
+        let mut ids: Vec<String> = (0..TRANSCRIPT_LIMIT + 1)
+            .map(|n| format!("false_1@c.us_{n:04}"))
+            .collect();
+        ids[0] = "false_1@c.us_BBB".into();
+        let hits = select_transcripts(&stored, &ids);
+        assert!(hits.iter().all(|hit| hit.id != "false_1@c.us_BBB"));
     }
 }

@@ -14,7 +14,7 @@
       for (var i = 0; node && i < 8; i++) {
         var id = node.id ? String(node.id) : "";
         if (id.indexOf("__whatrust") === 0) return true;
-        if (node.getAttribute && (node.getAttribute("data-whatrust-standin") || node.getAttribute("data-wr-todo-menu") || node.getAttribute("data-wr-voice"))) return true;
+        if (node.getAttribute && (node.getAttribute("data-whatrust-standin") || node.getAttribute("data-wr-todo-menu") || node.getAttribute("data-wr-voice") || node.getAttribute("data-wr-summary-menu") || node.getAttribute("data-wr-chat-summary"))) return true;
         node = node.parentElement;
       }
       return false;
@@ -42,8 +42,23 @@
     return false;
   };
 
+  // Several scripts pause page rewrites while a menu is open. A single shared
+  // boolean lets whichever script finishes first release the other's hold.
+  var menuHolds = Object.create(null);
+  window.__whatrustMenuHold = function (owner, on) {
+    if (typeof owner !== "string" || !owner) return false;
+    if (arguments.length < 2) return !!menuHolds[owner];
+    if (on) menuHolds[owner] = 1;
+    else delete menuHolds[owner];
+    return true;
+  };
+  function menuHeld() {
+    for (var key in menuHolds) if (menuHolds[key]) return true;
+    return false;
+  }
+
   window.__whatrustPageBusy = function () {
-    if (window.__whatrustMenuHold || window.__whatrustHeaderHold) return true;
+    if (menuHeld() || window.__whatrustHeaderHold) return true;
     if (Date.now() < (window.__whatrustHeaderQuietUntil || 0)) return true;
     return window.__whatrustWaMenuOpen();
   };
@@ -52,7 +67,7 @@
   document.addEventListener("pointerdown", function (event) {
     var target = event.target;
     if (!target || !target.closest) return;
-    if (target.closest("[data-whatrust-standin], [data-wr-todo-menu], [data-wr-todo-badge], [data-wr-voice], [id^='__whatrust']")) return;
+    if (target.closest("[data-whatrust-standin], [data-wr-todo-menu], [data-wr-todo-badge], [data-wr-voice], [data-wr-summary-menu], [data-wr-chat-summary], [id^='__whatrust']")) return;
     if (target.closest("#main header button, #main header [role='button']")) {
       window.__whatrustHeaderHold = true;
       clearTimeout(headerHoldTimer);

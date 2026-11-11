@@ -148,7 +148,7 @@ OS supports it — before showing your chats. Enable it under **Settings → Sec
 | OS | Webview engine | Notes |
 |---|---|---|
 | **Linux** | WebKitGTK | Requires WebKitGTK **≥ 2.46.1** (older versions hang WhatsApp's QR login). AppImage may need `libfuse2`. |
-| **Windows 10/11** | WebView2 | Uses the Evergreen WebView2 runtime (preinstalled on Windows 11). |
+| **Windows 10/11** | WebView2 | x64 and ARM64. Uses the Evergreen WebView2 runtime (preinstalled on Windows 11, including ARM64). |
 | **macOS** | WKWebView | macOS 12.1+ (SharedArrayBuffer for video upload needs Safari/WebKit 15.2; running **multiple accounts** needs macOS 14+); the current build is Apple Silicon (arm64). |
 
 ## Installation
@@ -181,7 +181,7 @@ Installs the AppImage to `~/.local/bin` on Linux (with an application-menu entry
 ```powershell
 irm https://raw.githubusercontent.com/karem505/whatRust/master/install.ps1 | iex
 ```
-Downloads and runs the latest NSIS installer (`.exe`); an `.msi` is also available on the release page.
+Downloads and runs the NSIS installer (`.exe`) that matches this PC (x64 or ARM64); an `.msi` for the same architecture is also on the release page. The ARM64 files are built separately and can appear a few minutes after the rest of the release. The NSIS setup program itself is x86 and installs a native ARM64 app.
 
 **Manual download** — grab a `.flatpak`, `.AppImage`/`.deb`, `.dmg`, `.exe`, or `.msi` from the [latest release](https://github.com/karem505/whatRust/releases/latest).
 
@@ -226,7 +226,7 @@ whatRust's own native shell is small — around 90 MB. Your **total** memory use
 Its native shell is lighter because it doesn't bundle a Chromium browser engine the way the Electron-based official app does, so it has less baseline overhead. The WhatsApp Web content itself uses a similar amount in either app.
 
 ### Which operating systems does whatRust support?
-Linux (WebKitGTK), Windows 10/11 (WebView2), and macOS 12.1+ (WKWebView).
+Linux (WebKitGTK), Windows 10/11 x64 and ARM64 (WebView2), and macOS 12.1+ (WKWebView). Windows ARM64 installers are published alongside each release, a few minutes after the other files.
 
 ### Can I use a proxy (SOCKS5 or HTTP)?
 
@@ -299,6 +299,7 @@ whatRust doesn't talk to WhatsApp's servers itself: it shows the official `web.w
 - **Linux launcher/dock badge**: the unread count is also sent to the launcher icon via the Unity `LauncherEntry` D-Bus API (.deb, AppImage with its `install.sh` desktop entry, and Flatpak). It shows on KDE Plasma's task manager, Dash to Dock / Ubuntu Dock, Plank and Latte; stock GNOME shows no app-icon badge without one of those extensions.
 - **Notification click** focuses the window on Windows only — elsewhere use the tray icon or the global shortcut.
 - **macOS** builds are unsigned and currently Apple Silicon (arm64) only. A `.dmg` downloaded with a browser shows "whatRust is damaged" until its quarantine flag is cleared (see Install).
+- **Windows ARM64** is a separate build attached after the rest of a release, so a brand-new release can lack the ARM64 installer for a few minutes. The one-line installer picks x64 or ARM64 from the PC's CPU. Voice-note transcription downloads FluidVoice's x64 Windows installer, which runs under emulation on ARM64.
 - **macOS and Windows file drops** go directly to WhatsApp through the native webview. Drag files from Finder/File Explorer onto the open conversation; use the attach (+) button if a drag source does not provide a file the webview can read.
 - **Linux drag-and-drop limits**: up to 200 files per drop, 500 MB per file, and 500 MB per drop total. Base64 transport is decoded incrementally while files stream in, but the page must still hold the final `File` data in memory. Larger batches can always be sent via WhatsApp's attach (+) → Document picker, which is not routed through these limits. Skipped files are reported in a notification. Native drops on macOS and Windows follow WhatsApp's own attachment limits.
 - **Multiple accounts on macOS** require macOS 14+ (older macOS runs a single account); Linux and Windows are unrestricted.

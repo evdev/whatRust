@@ -29,13 +29,24 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const REPO: &str = "karem505/whatRust";
+/// GitHub `owner/name` the updater and installer talk to. `WHATRUST_REPO` overrides
+/// it at compile time so a build can publish and update from another repository
+/// without forking this file. Empty is ignored.
+pub const REPO: &str = match option_env!("WHATRUST_REPO") {
+    Some(repo) if !repo.is_empty() => repo,
+    _ => "karem505/whatRust",
+};
 pub const FEED_ENV: &str = "WHATRUST_UPDATE_FEED";
 /// Where the Flatpak fallback sends people who cannot use the bundle directly.
 pub const FLATPAK_COMMAND: &str =
     "curl -fsSL https://raw.githubusercontent.com/karem505/whatRust/master/install-flatpak.sh | sh";
-const ASSET_PREFIX: &str = "https://github.com/karem505/whatRust/releases/download/";
 const NOTES_LIMIT: usize = 60_000;
+
+/// Release-asset URL prefix. Derived from [`REPO`] so the download allow-list and
+/// the feed cannot point at different repositories.
+pub fn asset_prefix() -> String {
+    format!("https://github.com/{REPO}/releases/download/")
+}
 
 // ---- errors ---------------------------------------------------------------------------------
 
@@ -440,7 +451,7 @@ fn local_path(url: &str) -> Option<PathBuf> {
 /// Real downloads only come from this repository's releases; a feed override
 /// (explicitly set by whoever runs the app) may point anywhere.
 pub fn asset_url_ok(url: &str, overridden: bool) -> bool {
-    overridden || url.starts_with(ASSET_PREFIX)
+    overridden || url.starts_with(&asset_prefix())
 }
 
 /// How HTTP requests leave this machine.
@@ -1129,11 +1140,14 @@ mod tests {
         })
     }
 
-    /// The asset names of a real release (v0.6.10), for one version.
+    /// The asset names a release is expected to carry, for one version.
+    /// Windows ARM64 installers are published by the separate workflow.
     fn real_assets(v: &str) -> Vec<(String, String)> {
         [
             format!("whatRust_{v}_x64-setup.exe"),
             format!("whatRust_{v}_x64_en-US.msi"),
+            format!("whatRust_{v}_arm64-setup.exe"),
+            format!("whatRust_{v}_arm64_en-US.msi"),
             format!("whatRust_{v}_aarch64.dmg"),
             "whatRust_aarch64.app.tar.gz".to_string(),
             format!("whatRust_{v}_amd64.deb"),
@@ -1144,7 +1158,7 @@ mod tests {
         ]
         .into_iter()
         .map(|n| {
-            let u = format!("{ASSET_PREFIX}v{v}/{n}");
+            let u = format!("{}v{v}/{n}", asset_prefix());
             (n, u)
         })
         .collect()
@@ -1224,6 +1238,14 @@ mod tests {
             Some("whatRust_1.2.3_x64_en-US.msi")
         );
         assert_eq!(
+            pick(AssetKind::Nsis, Arch::Arm64),
+            Some("whatRust_1.2.3_arm64-setup.exe")
+        );
+        assert_eq!(
+            pick(AssetKind::Msi, Arch::Arm64),
+            Some("whatRust_1.2.3_arm64_en-US.msi")
+        );
+        assert_eq!(
             pick(AssetKind::MacTar, Arch::Arm64),
             Some("whatRust_aarch64.app.tar.gz")
         );
@@ -1242,7 +1264,6 @@ mod tests {
         // there is no build for these combinations: never fall back to another arch
         assert_eq!(pick(AssetKind::AppImage, Arch::Arm64), None);
         assert_eq!(pick(AssetKind::Deb, Arch::Arm64), None);
-        assert_eq!(pick(AssetKind::Nsis, Arch::Arm64), None);
         assert_eq!(pick(AssetKind::MacTar, Arch::X64), None);
         assert_eq!(pick(AssetKind::MacDmg, Arch::X64), None);
         assert_eq!(pick(AssetKind::Flatpak, Arch::Other), None);
@@ -1297,7 +1318,8 @@ mod tests {
 
     #[test]
     fn real_downloads_must_come_from_the_repository() {
-        assert!(asset_url_ok(&format!("{ASSET_PREFIX}v1.0.0/x"), false));
+        assert!(asset_url_ok(&format!("{}v1.0.0/x", asset_prefix()), false));
+        assert!(asset_prefix().contains(REPO));
         assert!(!asset_url_ok("https://evil.example/x", false));
         assert!(!asset_url_ok(
             "https://github.com/someone/else/releases/download/v1/x",

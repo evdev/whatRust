@@ -1,0 +1,194 @@
+name: windows-arm64
+
+# Separate from release.yml so an ARM64 failure cannot block a release.
+# After `release` succeeds, this builds the ARM64 NSIS and MSI, uploads them
+# onto that tag, and rewrites SHA256SUMS to include them. The in-app updater
+# refuses an asset missing from SHA256SUMS. The files show up a few minutes
+# after the rest of the release.
+on:
+  workflow_run:
+    workflows: ["release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published release tag to attach ARM64 builds to (e.g. v0.6.14)"
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: Build ARM64 installers
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: windows-11-arm
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      skip: ${{ steps.tag.outputs.skip }}
+    steps:
+      - name: Resolve the release tag
+        id: tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          skip=false
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            tag="$INPUT_TAG"
+            if [ -z "$tag" ]; then
+              echo "::error::tag is required"
+              exit 1
+            fi
+          else
+            tag=""
+            # A tag push reports the tag as head_branch (v0.6.14). A manual
+            # release.yml run reports the branch, so find a version tag on that
+            # commit. Annotated tags point at a tag object, not the commit.
+            if [[ ${HEAD_BRANCH:-} =~ ^v[0-9] ]]; then
+              tag="$HEAD_BRANCH"
+            elif [ -n "${HEAD_SHA:-}" ]; then
+              rows=$(gh api --paginate "repos/$GH_REPO/git/matching-refs/tags/v" \
+                --jq '.[] | [.ref, .object.type, .object.sha] | @tsv')
+              newest=""
+              while IFS=$'\t' read -r ref typ sha; do
+                [ -n "${ref:-}" ] || continue
+                case "$ref" in
+                  refs/tags/v[0-9]*) ;;
+                  *) continue ;;
+                esac
+                commit=$sha
+                if [ "$typ" = "tag" ]; then
+                  commit=$(gh api "repos/$GH_REPO/git/tags/$sha" --jq '.object.sha')
+                fi
+                [ "$commit" = "$HEAD_SHA" ] || continue
+                name=${ref#refs/tags/}
+                # No release for this tag is normal. Any other failure should
+                # stop the job instead of looking like "no release to build".
+                errf=$(mktemp)
+                if ! published=$(gh release view "$name" --json isDraft,publishedAt --jq 'if .isDraft then "" else (.publishedAt // "") end' 2>"$errf"); then
+                  if grep -qi 'not found' "$errf"; then
+                    rm -f "$errf"
+                    continue
+                  fi
+                  cat "$errf" >&2
+                  rm -f "$errf"
+                  exit 1
+                fi
+                rm -f "$errf"
+                [ -n "$published" ] || continue
+                if [ -z "$newest" ] || [[ $published > $newest ]]; then
+                  newest=$published
+                  tag=$name
+                fi
+              done <<< "$rows"
+            fi
+            if [ -z "$tag" ]; then
+              echo "no version tag for this release run (branch: ${HEAD_BRANCH:-<none>}); skipping"
+              skip=true
+            fi
+          fi
+          if [ "$skip" = false ]; then
+            draft=$(gh release view "$tag" --json isDraft --jq '.isDraft')
+            if [ "$draft" != false ]; then
+              echo "::error::release $tag is not a published release"
+              exit 1
+            fi
+            echo "building ARM64 for $tag"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: steps.tag.outputs.skip != 'true'
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      # ring builds aarch64-pc-windows-msvc with clang, and looks it up by name.
+      - name: Put clang on PATH
+        if: steps.tag.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $clang = Get-Command clang.exe -ErrorAction SilentlyContinue
+          if (-not $clang) {
+            $roots = @(
+              "$env:ProgramFiles\LLVM",
+              "$env:ProgramFiles\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm"
+            )
+            $found = Get-ChildItem -Path $roots -Filter clang.exe -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if (-not $found) { throw 'clang.exe not found; ring cannot build Windows ARM64 without it' }
+            $clang = $found
+          }
+          $dir = if ($clang.Source) { Split-Path $clang.Source } else { Split-Path $clang.FullName }
+          # Add-Content does not wrap at the console width. Out-File does, and a
+          # wrapped path never reaches later steps.
+          Add-Content -Path $env:GITHUB_PATH -Value $dir -Encoding utf8NoBOM
+          & (Join-Path $dir 'clang.exe') --version
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: steps.tag.outputs.skip != 'true'
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: steps.tag.outputs.skip != 'true'
+        with:
+          workspaces: "./src-tauri -> target"
+
+      # tagName selects the existing release. releaseDraft false looks that
+      # release up and does not create or edit it. No --target: this runner's
+      # process.arch is arm64, which the action maps to the arm64 bundle names.
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        if: steps.tag.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ steps.tag.outputs.tag }}
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: false
+
+  rehash:
+    name: Refresh SHA256SUMS
+    needs: build
+    if: needs.build.result == 'success' && needs.build.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Rewrite SHA256SUMS over every asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          rid=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" --jq '.id')
+          [ -n "$rid" ] || { echo "::error::no release found for $RELEASE_TAG"; exit 1; }
+          mkdir -p release-assets
+          gh api --paginate "repos/$GH_REPO/releases/$rid/assets?per_page=100" \
+            --jq '.[] | "\(.id) \(.size) \(.name)"' > assets.txt
+          while read -r id size name; do
+            case "$name" in
+              SHA256SUMS) continue ;;
+              */* | *\ * | .*) echo "::error::unexpected asset name: $name"; exit 1 ;;
+            esac
+            gh api -H "Accept: application/octet-stream" \
+              "repos/$GH_REPO/releases/assets/$id" > "release-assets/$name"
+            got=$(stat -c %s "release-assets/$name")
+            [ "$got" = "$size" ] || { echo "::error::$name: downloaded $got bytes, release lists $size"; exit 1; }
+          done < assets.txt
+          for pattern in '*_arm64-setup.exe' '*_arm64_en-US.msi'; do
+            compgen -G "release-assets/$pattern" >/dev/null \
+              || { echo "::error::release $RELEASE_TAG has no asset matching $pattern"; exit 1; }
+          done
+          rm -f release-assets/SHA256SUMS
+          (cd release-assets && sha256sum -- * > SHA256SUMS)
+          echo "--- SHA256SUMS ---"; cat release-assets/SHA256SUMS
+          gh release upload "$RELEASE_TAG" release-assets/SHA256SUMS --clobber

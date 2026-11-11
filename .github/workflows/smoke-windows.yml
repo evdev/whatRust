@@ -19,9 +19,24 @@ on:
 
 jobs:
   smoke:
-    runs-on: windows-latest
+    # ARM64 is on-demand only. A push of this file still smokes the x64 release;
+    # the ARM64 installer is published later and may not exist yet.
+    if: matrix.token != 'arm64' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            token: x64
+            machine: 34404 # IMAGE_FILE_MACHINE_AMD64
+          - runner: windows-11-arm
+            token: arm64
+            machine: 43620 # IMAGE_FILE_MACHINE_ARM64
+    runs-on: ${{ matrix.runner }}
     env:
       VERSION: ${{ inputs.version }}
+      ARCH_TOKEN: ${{ matrix.token }}
+      PE_MACHINE: ${{ matrix.machine }}
     steps:
       - name: Download and install the release
         shell: pwsh
@@ -30,12 +45,36 @@ jobs:
           $rel = if ($env:VERSION) { "tags/$env:VERSION" } else { 'latest' }
           $r = Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases/$rel"
           "Testing $($r.tag_name)"
-          $asset = $r.assets | Where-Object { $_.name -like '*_x64-setup.exe' } | Select-Object -First 1
+          $asset = $r.assets | Where-Object { $_.name -like "*_$env:ARCH_TOKEN-setup.exe" } | Select-Object -First 1
+          if (-not $asset) { throw "no *_$env:ARCH_TOKEN-setup.exe in $($r.tag_name)" }
           Invoke-WebRequest $asset.browser_download_url -OutFile setup.exe
           Start-Process .\setup.exe -ArgumentList '/S' -Wait
           $exe = Get-ChildItem "$env:LOCALAPPDATA\whatRust", "$env:ProgramFiles\whatRust" -Filter whatRust.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $exe) { throw 'whatRust.exe not found after install' }
           "Installed: $($exe.FullName)"
+          $fs = [System.IO.File]::Open($exe.FullName, 'Open', 'Read', 'Read')
+          $br = New-Object System.IO.BinaryReader $fs
+          $fs.Seek(0x3C, 'Begin') | Out-Null
+          $peOff = $br.ReadInt32()
+          $fs.Seek($peOff + 4, 'Begin') | Out-Null
+          $machine = $br.ReadUInt16()
+          $br.Close()
+          "PE machine: 0x{0:X4}" -f $machine
+          if ($machine -ne [uint16]$env:PE_MACHINE) {
+            throw "whatRust.exe is machine 0x$('{0:X4}' -f $machine); this runner expects $env:PE_MACHINE ($env:ARCH_TOKEN)"
+          }
+          $guid = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          foreach ($root in @(
+            "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$guid",
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid",
+            "HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$guid"
+          )) {
+            if (Test-Path $root) {
+              "$root pv=$((Get-ItemProperty $root).pv)"
+            } else {
+              "$root <absent>"
+            }
+          }
           "EXE=$($exe.FullName)" | Out-File -Append $env:GITHUB_ENV
 
       - name: whatsapp:// is registered
@@ -112,5 +151,5 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: smoke-windows-screenshots
+          name: smoke-windows-${{ matrix.token }}
           path: shots/

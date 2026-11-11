@@ -235,6 +235,8 @@ pub fn set_settings(
     }
     // The icon is only switched through choose_app_icon / reset_app_icon.
     settings.custom_icon = stored.custom_icon;
+    // Recorded from the chat after the notice, cleared by clear_chat_summary_consent.
+    crate::settings::preserve_chat_summary_consent(&mut settings, &stored);
     crate::proxy::validate(&mut settings)?;
     crate::settings::save(&app, &settings).map_err(|e| e.to_string())?;
     let warning = crate::settings::apply(&app, &settings);
@@ -1040,6 +1042,7 @@ mod tests {
             include_str!("../resources/integration.js"),
             include_str!("../resources/todo.js"),
             include_str!("../resources/voice.js"),
+            include_str!("../resources/summary.js"),
             include_str!("../../settings-ui/lock.js"),
             include_str!("../../settings-ui/main.js"),
             include_str!("../../settings-ui/panel.js"),
@@ -1052,6 +1055,7 @@ mod tests {
             include_str!("integration.rs"),
             include_str!("todo.rs"),
             include_str!("voice.rs"),
+            include_str!("chat_summary.rs"),
         ]
         .join("\n");
         let mut found = 0;

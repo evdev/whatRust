@@ -561,14 +561,26 @@ Function .onInit
 FunctionEnd
 
 Section WebView2
-  ; Check if Webview2 is already installed and skip this section
-  ${If} ${RunningX64}
+  ; Check if Webview2 is already installed and skip this section.
+  ; The NSIS stub is x86. On ARM64, ${RunningX64} is true and WOW6432Node is the
+  ; 32-bit view, which does not contain the native ARM64 WebView2 registration.
+  ${If} ${IsNativeARM64}
+    SetRegView 64
+    ReadRegStr $4 HKLM "SOFTWARE\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
+    SetRegView lastused
+  ${ElseIf} ${RunningX64}
     ReadRegStr $4 HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
   ${Else}
     ReadRegStr $4 HKLM "SOFTWARE\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
   ${EndIf}
   ${If} $4 == ""
-    ReadRegStr $4 HKCU "SOFTWARE\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
+    ${If} ${IsNativeARM64}
+      SetRegView 64
+      ReadRegStr $4 HKCU "SOFTWARE\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
+      SetRegView lastused
+    ${Else}
+      ReadRegStr $4 HKCU "SOFTWARE\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
+    ${EndIf}
   ${EndIf}
 
   ${If} $4 == ""
@@ -627,13 +639,23 @@ Section WebView2
       ${If} $R0 = 1
         update_webview:
           DetailPrint "$(installingWebview2)"
-          ${If} ${RunningX64}
+          ${If} ${IsNativeARM64}
+            SetRegView 64
+            ReadRegStr $R1 HKLM "SOFTWARE\Microsoft\EdgeUpdate" "path"
+            SetRegView lastused
+          ${ElseIf} ${RunningX64}
             ReadRegStr $R1 HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate" "path"
           ${Else}
             ReadRegStr $R1 HKLM "SOFTWARE\Microsoft\EdgeUpdate" "path"
           ${EndIf}
           ${If} $R1 == ""
-            ReadRegStr $R1 HKCU "SOFTWARE\Microsoft\EdgeUpdate" "path"
+            ${If} ${IsNativeARM64}
+              SetRegView 64
+              ReadRegStr $R1 HKCU "SOFTWARE\Microsoft\EdgeUpdate" "path"
+              SetRegView lastused
+            ${Else}
+              ReadRegStr $R1 HKCU "SOFTWARE\Microsoft\EdgeUpdate" "path"
+            ${EndIf}
           ${EndIf}
           ${If} $R1 != ""
             ; Chromium updater docs: https://source.chromium.org/chromium/chromium/src/+/main:docs/updater/user_manual.md

@@ -1081,7 +1081,7 @@ fn valid_chat_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'@' | b'.' | b'_' | b'-' | b'+'))
 }
 
-fn chat_from_compound(id: &str) -> Option<String> {
+pub(crate) fn chat_from_compound(id: &str) -> Option<String> {
     let rest = id
         .strip_prefix("true_")
         .or_else(|| id.strip_prefix("false_"))?;

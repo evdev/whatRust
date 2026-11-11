@@ -3261,7 +3261,8 @@
   function stopMenuWatch() {
     pending = null;
     menuFound = false;
-    root.__whatrustMenuHold = false;
+    if (typeof root.__whatrustMenuHold === "function") root.__whatrustMenuHold("todo", false);
+    else root.__whatrustMenuHold = false;
     recentNodes = [];
     clearTimeout(menuTimer);
     menuTimer = 0;
@@ -3277,7 +3278,8 @@
     pending = { extract: extract, at: Date.now(), x: x, y: y, fallback: !!fallback };
     menuFound = false;
     menuGone = 0;
-    root.__whatrustMenuHold = true;
+    if (typeof root.__whatrustMenuHold === "function") root.__whatrustMenuHold("todo", true);
+    else root.__whatrustMenuHold = true;
     recentNodes = [];
     if (!menuObserver && typeof MutationObserver === "function") {
       menuObserver = new MutationObserver(function (records) {

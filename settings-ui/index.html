@@ -122,7 +122,7 @@
           </div>
           <div class="row">
             <span class="row-text"><span class="row-title">Modelo do resumo</span>
-              <span class="row-subtitle" id="summary_model_hint">Usado pelo botão Resumir em cada transcrição.</span></span>
+              <span class="row-subtitle" id="summary_model_hint">Usado pelo botão Resumir em cada transcrição e pelos resumos de conversa.</span></span>
             <input type="text" class="model-choice" id="summary_model" aria-label="Modelo do resumo" />
             <select class="model-choice" id="summary_model_select" aria-label="Modelo do resumo" hidden></select>
           </div>
@@ -136,7 +136,12 @@
           <button type="button" id="remove_ai_key" class="secondary">Remover chave</button>
         </div>
         <p id="ai_key_state" class="key-status" role="status">Nenhuma chave guardada.</p>
-        <p class="group-note">A chave fica neste computador e nunca entra na página do WhatsApp. A tradução e o botão Resumir usam o modelo escolhido para cada um.</p>
+        <div class="row">
+          <span class="row-text"><span class="row-title">Resumos de conversa</span>
+            <span class="row-subtitle" id="chat_summary_consent_state">Ainda não permitido.</span></span>
+          <button type="button" id="chat_summary_revoke" class="secondary" hidden>Revogar</button>
+        </div>
+        <p class="group-note">A chave fica neste computador e nunca entra na página do WhatsApp. A tradução e o botão Resumir usam o modelo escolhido para cada um. Um resumo de conversa fica neste computador, não no telefone, e não é enviado no chat.</p>
       </section>
 
       <section class="group" id="sec-standin">

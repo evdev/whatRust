@@ -40,6 +40,7 @@
     "allow-open-fluidvoice-windows",
     "allow-set-ai-key",
     "allow-list-ai-models",
+    "allow-clear-chat-summary-consent",
     "allow-autoreply-get-persona",
     "allow-autoreply-save-persona",
     "allow-autoreply-reset-persona",

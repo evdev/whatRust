@@ -103,6 +103,11 @@ pub struct Settings {
     /// password (AppImage, macOS app: replaced in place; Windows: downloaded and
     /// verified, installed on a click). On by default; never for .deb or Flatpak.
     pub auto_update_install: bool,
+    /// The user allowed chat summaries to send the selected messages to the
+    /// configured AI provider. Set from the chat after the notice, cleared
+    /// only from Settings. `set_settings` does not change it.
+    #[serde(default)]
+    pub chat_summary_consent: bool,
     /// Linux: window title bar. `auto` hides it on tiling window managers
     /// (Hyprland, Sway, i3, ...) where the compositor draws none and GTK's
     /// fallback buttons do nothing useful; `show` / `hide` force it.
@@ -168,6 +173,7 @@ impl Default for Settings {
             proxy_port: 0,
             auto_update_check: true,
             auto_update_install: true,
+            chat_summary_consent: false,
             title_bar: crate::decorations::AUTO.to_string(),
         }
     }
@@ -561,6 +567,13 @@ pub fn load(app: &AppHandle) -> Settings {
     }
 }
 
+/// A settings save round-trips the whole file. Consent is recorded from the
+/// chat and cleared by its own command, so a save must not put back the value
+/// the settings window loaded earlier.
+pub fn preserve_chat_summary_consent(incoming: &mut Settings, stored: &Settings) {
+    incoming.chat_summary_consent = stored.chat_summary_consent;
+}
+
 pub fn save(app: &AppHandle, s: &Settings) -> tauri::Result<()> {
     let path = settings_path(app)?;
     crate::jsonfile::save(&path, s)?;
@@ -729,6 +742,29 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(blank.sanitized().download_dir, None);
+    }
+
+    #[test]
+    fn old_settings_have_no_chat_summary_consent() {
+        let s: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        assert!(!s.chat_summary_consent);
+    }
+
+    #[test]
+    fn a_settings_save_does_not_change_chat_summary_consent() {
+        let stored = Settings {
+            chat_summary_consent: true,
+            ..Settings::default()
+        };
+        let mut incoming = Settings::default();
+        super::preserve_chat_summary_consent(&mut incoming, &stored);
+        assert!(incoming.chat_summary_consent);
+        let mut incoming = Settings {
+            chat_summary_consent: true,
+            ..Settings::default()
+        };
+        super::preserve_chat_summary_consent(&mut incoming, &Settings::default());
+        assert!(!incoming.chat_summary_consent);
     }
 
     #[test]

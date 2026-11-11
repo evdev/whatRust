@@ -5,8 +5,9 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Compile-check on all three desktop targets. Catches platform-specific code
-# (WebKitGTK / WebView2 / WKWebView paths) that can't be built on a single OS.
+# Compile-check on Linux, Windows x64, Windows ARM64, and macOS. Catches
+# platform-specific code (WebKitGTK / WebView2 / WKWebView paths) that can't
+# be built on a single OS. The ARM64 job is not a release gate.
 jobs:
   build:
     strategy:
@@ -14,11 +15,36 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-22.04
+            js: true
           - platform: windows-latest
+          - platform: windows-11-arm
           - platform: macos-latest
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # ring builds aarch64-pc-windows-msvc with clang, and looks it up by name.
+      - name: Put clang on PATH
+        if: matrix.platform == 'windows-11-arm'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $clang = Get-Command clang.exe -ErrorAction SilentlyContinue
+          if (-not $clang) {
+            $roots = @(
+              "$env:ProgramFiles\LLVM",
+              "$env:ProgramFiles\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm"
+            )
+            $found = Get-ChildItem -Path $roots -Filter clang.exe -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if (-not $found) { throw 'clang.exe not found; ring cannot build Windows ARM64 without it' }
+            $clang = $found
+          }
+          $dir = if ($clang.Source) { Split-Path $clang.Source } else { Split-Path $clang.FullName }
+          # Add-Content does not wrap at the console width. Out-File does, and a
+          # wrapped path never reaches later steps.
+          Add-Content -Path $env:GITHUB_PATH -Value $dir -Encoding utf8NoBOM
+          & (Join-Path $dir 'clang.exe') --version
 
       - name: Install Linux deps
         if: matrix.platform == 'ubuntu-22.04'
@@ -55,38 +81,49 @@ jobs:
         run: cargo test --locked
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: matrix.js
         with:
           node-version: 20
 
       - name: bridge.js tests — notifications, downloads, drop injector (mock DOM, zero deps)
+        if: matrix.js
         run: node src-tauri/resources/bridge.test.mjs
 
       - name: voice.js tests — queue and transcript box
+        if: matrix.js
         run: node src-tauri/resources/voice.test.mjs
 
       - name: device.js tests — source-device icon
+        if: matrix.js
         run: node src-tauri/resources/device.test.mjs
 
       - name: todo.js tests — message capture, rail, filters
+        if: matrix.js
         run: node src-tauri/resources/todo.test.mjs
 
       - name: autoreply.js tests — 1:1 chats, echo, and search
+        if: matrix.js
         run: node src-tauri/resources/autoreply.test.mjs
 
       - name: settings-ui hotkey tests
+        if: matrix.js
         run: node settings-ui/comboToAccelerator.test.mjs
 
       # The in-page dialogs replace alert/confirm/prompt, which do nothing under
       # WKWebView. A regression here is invisible on Linux and Windows CI runners
       # and shows up only as a dead button on macOS, so it needs a test.
       - name: settings-ui dialog tests
+        if: matrix.js
         run: node settings-ui/dialog.test.mjs
 
       - name: settings-ui language tests (every UI string has an English entry)
+        if: matrix.js
         run: node settings-ui/i18n.test.mjs
 
       - name: notification tests
+        if: matrix.js
         run: node src-tauri/resources/notifications.test.mjs
 
       - name: release-notes renderer tests (HTML in a release body stays text)
+        if: matrix.js
         run: node settings-ui/notes.test.mjs
