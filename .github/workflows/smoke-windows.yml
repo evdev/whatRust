@@ -40,12 +40,22 @@ jobs:
       PE_MACHINE: ${{ matrix.machine }}
     steps:
       - name: Download and install the release
+        id: install
         if: matrix.token != 'arm64' || github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $rel = if ($env:VERSION) { "tags/$env:VERSION" } else { 'latest' }
-          $r = Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases/$rel"
+          $resp = Invoke-WebRequest "https://api.github.com/repos/${{ github.repository }}/releases/$rel" -Headers @{ 'User-Agent' = 'whatrust-smoke'; Accept = 'application/vnd.github+json' } -SkipHttpErrorCheck
+          if ($resp.StatusCode -eq 404 -and -not $env:VERSION) {
+            "No published release on ${{ github.repository }}; skipping smoke."
+            "skip=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8NoBOM
+            exit 0
+          }
+          if ($resp.StatusCode -ne 200) {
+            throw "GitHub releases API returned $($resp.StatusCode) for $rel"
+          }
+          $r = $resp.Content | ConvertFrom-Json
           "Testing $($r.tag_name)"
           $asset = $r.assets | Where-Object { $_.name -like "*_$env:ARCH_TOKEN-setup.exe" } | Select-Object -First 1
           if (-not $asset) { throw "no *_$env:ARCH_TOKEN-setup.exe in $($r.tag_name)" }
@@ -80,7 +90,7 @@ jobs:
           "EXE=$($exe.FullName)" | Out-File -Append $env:GITHUB_ENV
 
       - name: whatsapp:// is registered
-        if: matrix.token != 'arm64' || github.event_name == 'workflow_dispatch'
+        if: steps.install.outputs.skip != 'true' && (matrix.token != 'arm64' || github.event_name == 'workflow_dispatch')
         shell: pwsh
         run: |
           foreach ($root in 'HKCU:\Software\Classes\whatsapp', 'HKLM:\Software\Classes\whatsapp') {
@@ -90,7 +100,7 @@ jobs:
           }
 
       - name: Launch, click a link, open a whatsapp:// link
-        if: matrix.token != 'arm64' || github.event_name == 'workflow_dispatch'
+        if: steps.install.outputs.skip != 'true' && (matrix.token != 'arm64' || github.event_name == 'workflow_dispatch')
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -148,12 +158,14 @@ jobs:
           "whatRust processes: $(@(Get-Process whatRust -ErrorAction SilentlyContinue).Count) (single instance expected: 1)"
 
       - name: App log
-        if: always() && (matrix.token != 'arm64' || github.event_name == 'workflow_dispatch')
+        if: always() && steps.install.outputs.skip != 'true' && (matrix.token != 'arm64' || github.event_name == 'workflow_dispatch')
         shell: pwsh
-        run: Get-Content "$env:LOCALAPPDATA\whatRust\logs\whatrust.log"
+        run: |
+          $path = "$env:LOCALAPPDATA\whatRust\logs\whatrust.log"
+          if (Test-Path $path) { Get-Content $path } else { "no log at $path" }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always() && (matrix.token != 'arm64' || github.event_name == 'workflow_dispatch')
+        if: always() && steps.install.outputs.skip != 'true' && (matrix.token != 'arm64' || github.event_name == 'workflow_dispatch')
         with:
           name: smoke-windows-${{ matrix.token }}
           path: shots/

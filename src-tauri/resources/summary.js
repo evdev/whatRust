@@ -116,8 +116,10 @@
   function senderName(msg) {
     var sender = msg && msg.sender;
     var name = "";
-    if (sender && typeof sender === "object") name = sender.pushname || sender.name || sender.shortName || "";
-    if (!name && msg) name = msg.notifyName || "";
+    if (sender && typeof sender === "object") {
+      name = sender.pushname || sender.name || sender.shortName || sender.verifiedName || sender.formattedName || "";
+    }
+    if (!name && msg) name = msg.notifyName || msg.verifiedName || "";
     return String(name || "").replace(/\s+/g, " ").trim().slice(0, 80);
   }
 
@@ -145,9 +147,14 @@
     }
     else if (/sticker/.test(type)) text = "[sticker]";
     else if (/call/.test(type)) text = "[call]";
-    else if (/image|video|document/.test(type)) {
+    else if (/poll/.test(type)) {
+      var poll = String(msg.pollName || msg.name || msg.body || "").trim();
+      text = poll ? "[poll] " + poll : "[poll]";
+    } else if (/location/.test(type)) text = "[location]";
+    else if (/vcard/.test(type)) text = "[contact]";
+    else if (/image|video|document|album/.test(type)) {
       var caption = String(msg.body || msg.caption || "").trim();
-      var kind = /image/.test(type) ? "image" : /video/.test(type) ? "video" : "document";
+      var kind = /image/.test(type) ? "image" : /video/.test(type) ? "video" : /album/.test(type) ? "album" : "document";
       text = caption ? "[" + kind + "] " + caption : "[" + kind + "]";
     } else text = String(msg.body || msg.caption || "").trim();
     if (!text) return null;
@@ -777,54 +784,94 @@
     crumb("summary: sender " + field);
   }
 
+  function modelList(collection) {
+    if (!collection) return [];
+    try {
+      if (typeof collection.getModelsArray === "function") return collection.getModelsArray() || [];
+    } catch (e) {}
+    if (collection.models) return collection.models;
+    if (collection._models) return collection._models;
+    return [];
+  }
+
+  function rawChat(chatId) {
+    var wpp = root.WPP;
+    if (!wpp || !wpp.chat) return null;
+    try {
+      if (typeof wpp.chat.get === "function") {
+        var found = wpp.chat.get(chatId);
+        if (found && typeof found.then !== "function") return found;
+      }
+    } catch (e) {}
+    try {
+      var active = wpp.chat.getActiveChat && wpp.chat.getActiveChat();
+      if (active && typeof active.then !== "function" && normalizeChatId(widText(active.id)) === chatId) return active;
+    } catch (e2) {}
+    return null;
+  }
+
   function collect(chatId, start, runId) {
     var wpp = root.WPP;
-    if (!wpp || !wpp.chat || typeof wpp.chat.getMessages !== "function") return Promise.resolve([]);
+    if (!wpp || !wpp.chat || typeof wpp.chat.getMessages !== "function") {
+      return Promise.resolve({ messages: [], partial: false });
+    }
     var seen = Object.create(null);
     var all = [];
     var cursor = "";
     var pages = 0;
     var chars = 0;
+    var reached = false;
+    function take(raw) {
+      noteSender(raw);
+      var at = stampOf(raw);
+      if (at && at < start) reached = true;
+      var msg = mapMessage(raw);
+      if (!msg || seen[msg.id]) return false;
+      seen[msg.id] = true;
+      if (msg.at < start) return false;
+      all.push(msg);
+      chars += msg.text.length + 24;
+      return true;
+    }
+    function addLoaded() {
+      var chat = rawChat(chatId);
+      var models = modelList(chat && chat.msgs);
+      for (var i = 0; i < models.length; i++) take(models[i]);
+    }
+    function pack(partial) {
+      addLoaded();
+      return { messages: all, partial: !!(partial && !reached) };
+    }
     function step() {
       var run = runs[runId];
-      if (!run || run.drop || currentRun !== runId) return Promise.resolve(all);
-      if (pages >= 25 || all.length >= 2000 || chars >= MAX_CHARS) return Promise.resolve(all);
+      if (!run || run.drop || currentRun !== runId) return Promise.resolve(pack(true));
+      if (pages >= 25 || all.length >= 2000 || chars >= MAX_CHARS) return Promise.resolve(pack(true));
       pages += 1;
-      var args = { count: 100 };
+      var args = { count: 100, includeCallMessages: true };
       if (cursor) {
         args.direction = "before";
         args.id = cursor;
       }
       return Promise.resolve(wpp.chat.getMessages(chatId, args)).then(function (list) {
         var batch = list || [];
-        if (!batch.length) return all;
+        if (!batch.length) return pack(false);
         var oldestId = "";
         var oldestAt = Infinity;
-        var crossed = false;
         for (var i = 0; i < batch.length; i++) {
           var raw = batch[i];
-          noteSender(raw);
           var at = stampOf(raw);
           var id = typeof raw.id === "string" ? raw.id : widText(raw.id);
           if (id && at && at < oldestAt) {
             oldestAt = at;
             oldestId = id;
           }
-          var msg = mapMessage(raw);
-          if (!msg || seen[msg.id]) continue;
-          seen[msg.id] = true;
-          if (msg.at < start) {
-            crossed = true;
-            continue;
-          }
-          all.push(msg);
-          chars += msg.text.length + 24;
+          take(raw);
           if (all.length >= 2000 || chars >= MAX_CHARS) break;
         }
-        if (!oldestId || oldestId === cursor || crossed) return all;
+        if (!oldestId || oldestId === cursor || reached) return pack(false);
         cursor = oldestId;
         return step();
-      }).catch(function () { return all; });
+      }).catch(function () { return pack(true); });
     }
     return step();
   }
@@ -881,11 +928,13 @@
     paintCard(L("Lendo as mensagens…", "Reading messages…"), [
       { label: L("Cancelar", "Cancel"), fn: function () { dropRun(runId); inflight = false; currentRun = 0; hideCard(); } },
     ]);
-    collect(chat.id, bounds.start, runId).then(function (messages) {
+    collect(chat.id, bounds.start, runId).then(function (result) {
+      var messages = result && result.messages || [];
       if (runId !== currentRun || (runs[runId] && runs[runId].drop)) return finish(runId, null);
       return attachVoice(messages).then(function () {
         if (runId !== currentRun || (runs[runId] && runs[runId].drop)) return finish(runId, null);
         var built = buildTranscript(messages, bounds.start, bounds.end, MAX_CHARS, offset);
+        if (result && result.partial) built.sampled = true;
         if (!built.text) {
           delete runs[runId];
           if (currentRun === runId) {

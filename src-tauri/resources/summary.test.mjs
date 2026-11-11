@@ -79,6 +79,8 @@ assert(!api.inChatHeader(chevron), "a message chevron is not in the chat header"
 
 const protocol = api.mapMessage({ id: "false_1@c.us_AAA", t: 100, type: "e2e_notification", body: "encrypted" });
 assert(protocol === null, "protocol lines are dropped");
+const poll = api.mapMessage({ id: "false_1@c.us_POL", t: 150, type: "poll_creation", pollName: "Lunch?" });
+assert(poll && poll.text === "[poll] Lunch?", "a poll keeps its question");
 const image = api.mapMessage({ id: "false_1@c.us_BBB", t: 200, type: "image", body: "see this" });
 assert(image.text === "[image] see this", "an image keeps its caption");
 const unnamed = api.mapMessage({ id: "false_1@g.us_CCC", t: 300, type: "chat", body: "hello" });
