@@ -11,7 +11,14 @@
 
   var DAY = 86400000;
   var HOUR = 3600000;
-  var MAX_CHARS = 80000;
+  // One model call. Matches the Rust context budget: two characters per token
+  // inside Claude Haiku's 200k window, which is the smallest offered here.
+  var CONTEXT_CHARS = 300000;
+  var MAX_CHUNKS = 2;
+  var MAX_CHARS = CONTEXT_CHARS * MAX_CHUNKS;
+  var PAGE_WAIT_MS = 20000;
+  var NAME_WAIT_MS = 5000;
+  var VOICE_WAIT_MS = 8000;
   var WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
   function L(pt, en) {
@@ -113,23 +120,166 @@
     return at > 0 ? at : 0;
   }
 
-  function senderName(msg) {
-    var sender = msg && msg.sender;
-    var name = "";
-    if (sender && typeof sender === "object") {
-      name = sender.pushname || sender.name || sender.shortName || sender.verifiedName || sender.formattedName || "";
+  function textOf(value) {
+    if (value == null) return "";
+    if (typeof value === "string") return value.replace(/\s+/g, " ").trim();
+    return "";
+  }
+
+  function looksLikePhone(value) {
+    return /^\+?\d[\d\s().-]{5,}$/.test(textOf(value));
+  }
+
+  function clipName(value) {
+    var text = textOf(value);
+    if (!text || text === "[object Object]" || looksLikePhone(text)) return "";
+    return text.slice(0, 80);
+  }
+
+  function readField(obj, key, nested) {
+    if (!obj || !key) return "";
+    var value;
+    try { value = obj[key]; } catch (e) { return ""; }
+    if (typeof value === "function") {
+      try { value = value.call(obj); } catch (e2) { return ""; }
     }
-    if (!name && msg) name = msg.notifyName || msg.verifiedName || "";
-    return String(name || "").replace(/\s+/g, " ").trim().slice(0, 80);
+    var text = clipName(value);
+    if (text) return text;
+    if (!nested && obj.attributes && obj.attributes !== obj) return readField(obj.attributes, key, true);
+    return "";
+  }
+
+  function readName(obj, keys) {
+    for (var i = 0; i < keys.length; i++) {
+      var text = readField(obj, keys[i]);
+      if (text) return text;
+    }
+    return "";
+  }
+
+  var CARD_FIELDS = ["name", "shortName", "formattedShortName", "mentionName", "verifiedName"];
+  var OWN_FIELDS = ["pushname", "notifyName"];
+  var SHOWN_FIELDS = ["formattedName", "displayName", "displayNameOrPnForLid"];
+
+  function displayName(contact, msg) {
+    var card = readName(contact, CARD_FIELDS);
+    var own = readName(contact, OWN_FIELDS) || readName(msg, OWN_FIELDS);
+    var shown = readName(contact, SHOWN_FIELDS);
+    if (shown && (shown === own || shown === card)) shown = "";
+    return card || own || shown;
+  }
+
+  function widKey(wid) {
+    if (!wid) return "";
+    if (typeof wid === "string") return wid;
+    if (wid._serialized) return String(wid._serialized);
+    if (wid.user && wid.server) return String(wid.user) + "@" + String(wid.server);
+    return "";
+  }
+
+  function isGroupMsg(msg) {
+    if (!msg) return false;
+    if (msg.isGroupMsg) return true;
+    var id = typeof msg.id === "string" ? msg.id : widText(msg.id);
+    if (/@g\.us/.test(id)) return true;
+    return /@g\.us$/.test(widKey(msg.from));
+  }
+
+  function candidateWids(msg) {
+    var list = [];
+    function add(wid) { if (wid) list.push(wid); }
+    if (!msg) return list;
+    add(msg.id && msg.id.participant);
+    add(msg.author);
+    add(msg.participant);
+    if (!isGroupMsg(msg)) add(msg.from);
+    var sender = msg.sender;
+    if (sender && typeof sender === "object") add(sender.id || sender);
+    return list;
+  }
+
+  function personKey(msg) {
+    var wids = candidateWids(msg);
+    for (var i = 0; i < wids.length; i++) {
+      var key = widKey(wids[i]);
+      if (key && !/@g\.us$/.test(key)) return key;
+    }
+    return "";
+  }
+
+  function storeContact(wid) {
+    var store = root.WPP && root.WPP.whatsapp && root.WPP.whatsapp.ContactStore;
+    if (!store || !wid || typeof store.get !== "function") return null;
+    var keys = [wid];
+    var serial = widKey(wid);
+    if (serial && serial !== wid) keys.push(serial);
+    for (var i = 0; i < keys.length; i++) {
+      try {
+        var found = store.get(keys[i]);
+        if (found && typeof found.then !== "function") return found;
+      } catch (e) {}
+    }
+    return null;
+  }
+
+  function contactOf(msg) {
+    var sender = msg && msg.sender;
+    var direct = sender && typeof sender === "object" ? sender : null;
+    if (direct && readName(direct, CARD_FIELDS)) return direct;
+    var wids = candidateWids(msg);
+    var i;
+    for (i = 0; i < wids.length; i++) {
+      var card = storeContact(wids[i]);
+      if (card && readName(card, CARD_FIELDS)) return card;
+    }
+    for (i = 0; i < wids.length; i++) {
+      var any = storeContact(wids[i]);
+      if (any && displayName(any, msg)) return any;
+    }
+    if (direct && displayName(direct, msg)) return direct;
+    return null;
+  }
+
+  function senderName(msg) {
+    return displayName(contactOf(msg), msg);
   }
 
   function senderField(msg) {
-    var sender = msg && msg.sender;
-    if (sender && sender.pushname) return "pushname";
-    if (sender && sender.name) return "name";
-    if (sender && sender.shortName) return "shortName";
-    if (msg && msg.notifyName) return "notifyName";
+    var contact = contactOf(msg) || {};
+    if (readName(contact, ["name"])) return "name";
+    if (readName(contact, ["shortName", "formattedShortName", "mentionName", "verifiedName"])) return "name";
+    if (readName(contact, ["pushname"]) || readName(msg, ["pushname"])) return "pushname";
+    if (readName(contact, ["notifyName"]) || readName(msg, ["notifyName"])) return "notifyName";
+    if (readName(contact, SHOWN_FIELDS)) return "formattedName";
     return "none";
+  }
+
+  function nameFromPlain(value) {
+    var text = String(value || "").replace(/[\u200e\u200f\u200b\u2066-\u2069]/g, "");
+    var match = /^\[(\d{1,2}:\d{2}(?:\s*[AP]M)?)[,\s]+([^\]]+)\]\s*([^:\n]{0,160})/.exec(text);
+    if (!match) return "";
+    return clipName(match[3]);
+  }
+
+  function visibleSenderNames() {
+    var map = Object.create(null);
+    var main = document.getElementById && document.getElementById("main");
+    if (!main || !main.querySelectorAll) return map;
+    var rows = main.querySelectorAll("[data-id]");
+    for (var i = 0; i < rows.length; i++) {
+      var id = attr(rows[i], "data-id");
+      var token = messageToken(id) || id;
+      var plain = attr(rows[i], "data-pre-plain-text");
+      if (!plain && rows[i].querySelector) {
+        var node = rows[i].querySelector("[data-pre-plain-text]");
+        plain = attr(node, "data-pre-plain-text");
+      }
+      var name = nameFromPlain(plain);
+      if (!name) continue;
+      if (token) map[token] = name;
+      if (id) map[id] = name;
+    }
+    return map;
   }
 
   function mapMessage(msg) {
@@ -146,7 +296,7 @@
       text = typeof msg.transcript === "string" && msg.transcript.trim() ? msg.transcript.trim() : "[voice note]";
     }
     else if (/sticker/.test(type)) text = "[sticker]";
-    else if (/call/.test(type)) text = "[call]";
+    else if (/call/.test(type)) return null;
     else if (/poll/.test(type)) {
       var poll = String(msg.pollName || msg.name || msg.body || "").trim();
       text = poll ? "[poll] " + poll : "[poll]";
@@ -169,6 +319,7 @@
       at: at,
       from_me: fromMe,
       sender: senderName(msg),
+      person: personKey(msg),
       text: text.slice(0, 2000),
       quote: quote,
       kind: type,
@@ -185,13 +336,13 @@
       start = i + 1;
       var n = line.length;
       if (!n) continue;
-      if (n > 20000) {
+      if (n > CONTEXT_CHARS) {
         if (buf) count += 1;
-        count += Math.floor(n / 20000);
-        buf = n % 20000;
+        count += Math.floor(n / CONTEXT_CHARS);
+        buf = n % CONTEXT_CHARS;
         continue;
       }
-      if (buf && buf + n > 20000) {
+      if (buf && buf + n > CONTEXT_CHARS) {
         count += 1;
         buf = 0;
       }
@@ -223,15 +374,15 @@
         var parts = localParts(rows[i].at, offsetMin);
         var when = parts.dayKey !== prev ? parts.day + " " + parts.clock : parts.clock;
         prev = parts.dayKey;
-        var who = rows[i].from_me ? "You" : (rows[i].sender || "Member");
+        var who = rows[i].from_me ? "You" : rows[i].sender;
         var body = rows[i].text;
         if (rows[i].quote) body += ' — re: "' + rows[i].quote + '"';
-        lines.push(when + " " + who + ": " + body);
+        lines.push(who ? when + " " + who + ": " + body : when + ": " + body);
       }
       return lines.join("\n");
     }
     var text = render(list);
-    while (list.length > 1 && (text.length > maxChars || packedChunks(text) > 4)) {
+    while (list.length > 1 && (text.length > maxChars || packedChunks(text) > MAX_CHUNKS)) {
       list.shift();
       sampled = true;
       text = render(list);
@@ -284,9 +435,11 @@
       windowBounds: windowBounds,
       sinceLabel: sinceLabel,
       mapMessage: mapMessage,
+      displayName: displayName,
       buildTranscript: buildTranscript,
       packedChunks: packedChunks,
       newestNotes: newestNotes,
+      historyStep: historyStep,
       controlKind: controlKind,
       inChatHeader: inChatHeader,
       messageToken: messageToken,
@@ -306,6 +459,27 @@
     var tauri = root.__TAURI__;
     if (!tauri || !tauri.core || typeof tauri.core.invoke !== "function") return Promise.reject("no_tauri");
     return tauri.core.invoke(cmd, args === undefined ? {} : args);
+  }
+
+  function withTimeout(promise, ms) {
+    var timer;
+    var wrapped = Promise.resolve(promise).then(
+      function (value) { return { ok: true, value: value }; },
+      function () { return { ok: false }; }
+    );
+    var timeout = new Promise(function (resolve) {
+      timer = setTimeout(function () { resolve({ ok: false, timedOut: true }); }, ms);
+    });
+    return Promise.race([wrapped, timeout]).then(function (result) {
+      clearTimeout(timer);
+      return result;
+    });
+  }
+
+  function historyStep(cursor, cursorAt, oldestId, oldestAt, reached) {
+    if (!oldestId || oldestId === cursor || reached) return "done";
+    if (cursor && oldestAt > cursorAt) return "stall";
+    return "next";
   }
 
   function hold(on) {
@@ -349,7 +523,8 @@
       if (!chat || typeof chat.then === "function") return null;
       var id = normalizeChatId(widText(chat.id));
       if (!id) return null;
-      var name = chat.formattedTitle || chat.name || (chat.contact && (chat.contact.pushname || chat.contact.name)) || id;
+      var contact = chat.contact || null;
+      var name = chat.formattedTitle || displayName(contact, chat) || chat.name || id;
       return { id: id, name: String(name).slice(0, 80), group: !!(chat.isGroup || chat.groupMetadata) };
     } catch (e) {
       return null;
@@ -818,6 +993,7 @@
     var seen = Object.create(null);
     var all = [];
     var cursor = "";
+    var cursorAt = Infinity;
     var pages = 0;
     var chars = 0;
     var reached = false;
@@ -847,13 +1023,17 @@
       if (!run || run.drop || currentRun !== runId) return Promise.resolve(pack(true));
       if (pages >= 25 || all.length >= 2000 || chars >= MAX_CHARS) return Promise.resolve(pack(true));
       pages += 1;
-      var args = { count: 100, includeCallMessages: true };
+      var args = { count: 100 };
       if (cursor) {
         args.direction = "before";
         args.id = cursor;
       }
-      return Promise.resolve(wpp.chat.getMessages(chatId, args)).then(function (list) {
-        var batch = list || [];
+      return withTimeout(wpp.chat.getMessages(chatId, args), PAGE_WAIT_MS).then(function (result) {
+        if (!result.ok) {
+          crumb("summary: history timed out");
+          return pack(true);
+        }
+        var batch = result.value || [];
         if (!batch.length) return pack(false);
         var oldestId = "";
         var oldestAt = Infinity;
@@ -868,27 +1048,95 @@
           take(raw);
           if (all.length >= 2000 || chars >= MAX_CHARS) break;
         }
-        if (!oldestId || oldestId === cursor || reached) return pack(false);
+        var move = historyStep(cursor, cursorAt, oldestId, oldestAt, reached);
+        if (move === "stall") return pack(true);
+        if (move !== "next") return pack(false);
         cursor = oldestId;
+        cursorAt = oldestAt;
         return step();
-      }).catch(function () { return pack(true); });
+      });
     }
     return step();
+  }
+
+  function fillNames(messages, chat) {
+    var visible = visibleSenderNames();
+    var shownFor = Object.create(null);
+    var cardFor = Object.create(null);
+    var profileFor = Object.create(null);
+    messages.forEach(function (msg) {
+      if (!msg || msg.from_me || !msg.person) return;
+      var shown = visible[msg.token] || visible[msg.id];
+      if (shown) shownFor[msg.person] = shown;
+    });
+    function apply() {
+      messages.forEach(function (msg) {
+        if (!msg || msg.from_me) return;
+        var shown = visible[msg.token] || visible[msg.id] || (msg.person && shownFor[msg.person]);
+        if (shown) {
+          msg.sender = shown;
+          return;
+        }
+        if (msg.person && cardFor[msg.person]) {
+          msg.sender = cardFor[msg.person];
+          return;
+        }
+        if (msg.sender) return;
+        if (msg.person && profileFor[msg.person]) msg.sender = profileFor[msg.person];
+      });
+      if (!chat || chat.group) return;
+      var title = clipName(chat.name);
+      if (!title || title === chat.id) return;
+      messages.forEach(function (msg) {
+        if (msg && !msg.from_me && !msg.sender) msg.sender = title;
+      });
+    }
+    var people = Object.create(null);
+    messages.forEach(function (msg) {
+      if (msg && !msg.from_me && !msg.sender && msg.person && !shownFor[msg.person]) people[msg.person] = true;
+    });
+    var keys = Object.keys(people);
+    var get = root.WPP && root.WPP.contact && root.WPP.contact.get;
+    if (!keys.length || typeof get !== "function") {
+      apply();
+      return Promise.resolve();
+    }
+    var pending = Promise.all(keys.map(function (key) {
+      return Promise.resolve().then(function () { return get(key); }).then(function (contact) {
+        var card = readName(contact, CARD_FIELDS);
+        if (card) cardFor[key] = card;
+        else {
+          var own = displayName(contact, null);
+          if (own) profileFor[key] = own;
+        }
+      }).catch(function () {});
+    }));
+    return withTimeout(pending, NAME_WAIT_MS).then(function (result) {
+      if (!result.ok) crumb("summary: names timed out");
+      apply();
+    });
   }
 
   function attachVoice(messages) {
     var notes = newestNotes(messages);
     if (!notes.length) return Promise.resolve();
-    return invoke("voice_transcripts", { ids: notes.map(function (msg) { return msg.id; }) }).then(function (hits) {
+    return withTimeout(
+      invoke("voice_transcripts", { ids: notes.map(function (msg) { return msg.id; }) }),
+      VOICE_WAIT_MS
+    ).then(function (result) {
+      if (!result.ok) {
+        crumb("summary: voice timed out");
+        return;
+      }
       var byId = Object.create(null);
-      (hits || []).forEach(function (hit) {
+      (result.value || []).forEach(function (hit) {
         if (hit && hit.id && hit.text) byId[hit.id] = hit.text;
       });
       messages.forEach(function (msg) {
         if (byId[msg.id]) msg.text = String(byId[msg.id]).slice(0, 2000);
         else if (byId[msg.token]) msg.text = String(byId[msg.token]).slice(0, 2000);
       });
-    }).catch(function () {});
+    });
   }
 
   function finish(runId, entry) {
@@ -933,6 +1181,8 @@
       if (runId !== currentRun || (runs[runId] && runs[runId].drop)) return finish(runId, null);
       return attachVoice(messages).then(function () {
         if (runId !== currentRun || (runs[runId] && runs[runId].drop)) return finish(runId, null);
+        return fillNames(messages, chat).then(function () {
+        if (runId !== currentRun || (runs[runId] && runs[runId].drop)) return finish(runId, null);
         var built = buildTranscript(messages, bounds.start, bounds.end, MAX_CHARS, offset);
         if (result && result.partial) built.sampled = true;
         if (!built.text) {
@@ -962,6 +1212,7 @@
           sampled: built.sampled,
           message_count: built.count,
         }).then(function (entry) { finish(runId, entry); });
+        });
       });
     }).catch(function (error) {
       var dropped = runs[runId] && runs[runId].drop;

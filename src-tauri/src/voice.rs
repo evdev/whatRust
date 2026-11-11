@@ -206,15 +206,15 @@ fn clip_chars(text: &str, max: usize) -> String {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn voice_transcripts(
+pub fn voice_transcripts(
     window: Webview,
     app: AppHandle,
     ids: Vec<String>,
 ) -> Result<Vec<VoiceTranscriptHit>, String> {
     page(&window)?;
     crate::lock::require_unlocked(&app)?;
-    let state = app.state::<VoiceState>();
-    let _gate = state.gate.lock().await;
+    // A transcription holds the voice gate for minutes. This is a read of a
+    // file that is replaced atomically, so it does not wait for that gate.
     Ok(select_transcripts(&stored_transcripts(&app), &ids))
 }
 

@@ -84,7 +84,14 @@ assert(poll && poll.text === "[poll] Lunch?", "a poll keeps its question");
 const image = api.mapMessage({ id: "false_1@c.us_BBB", t: 200, type: "image", body: "see this" });
 assert(image.text === "[image] see this", "an image keeps its caption");
 const unnamed = api.mapMessage({ id: "false_1@g.us_CCC", t: 300, type: "chat", body: "hello" });
-assert(unnamed.sender === "", "a missing sender is left blank for the fallback");
+assert(unnamed.sender === "", "a missing sender is left blank");
+const call = api.mapMessage({ id: "false_1@c.us_CALL", t: 180, type: "call_log", body: "Voice call" });
+assert(call === null, "a call log is left out of the transcript");
+assert(api.displayName({ name: "Ada Lovelace", pushname: "Ada" }, {}) === "Ada Lovelace", "the contact card name wins over the profile name");
+assert(api.displayName({ pushname: "Ada" }, {}) === "Ada", "an unsaved contact uses the name they set");
+assert(api.displayName({}, { notifyName: "Ada" }) === "Ada", "the message profile name is the fallback");
+assert(api.displayName({ name: "+1 555 0100", pushname: "Ada" }, {}) === "Ada", "a phone number is not used as the name");
+assert(api.displayName({ mentionName: function () { return "Ada Card"; }, pushname: "Ada" }, {}) === "Ada Card", "a contact-card getter wins");
 const quote = "q".repeat(200);
 const replied = api.mapMessage({
   id: "true_1@c.us_DDD",
@@ -94,12 +101,22 @@ const replied = api.mapMessage({
   quotedMsg: { body: quote },
 });
 assert(replied.from_me && replied.quote.length === 120, "a quote is capped at 120 characters");
-assert(api.senderField({ sender: { pushname: "Ada" } }) === "pushname", "pushname is the first sender field");
+assert(api.senderField({ sender: { pushname: "Ada" } }) === "pushname", "the profile name is used when there is no saved name");
+assert(api.senderField({ sender: { name: "Ada Lovelace", pushname: "Ada" } }) === "name", "the saved name is the field that wins");
 
-const first = { id: "a", token: "a", at: day + hour, from_me: false, sender: "", text: "morning", quote: "", kind: "chat" };
+const first = { id: "a", token: "a", at: day + hour, from_me: false, sender: "Ada", text: "morning", quote: "", kind: "chat" };
 const second = { id: "b", token: "b", at: day + 26 * hour, from_me: true, sender: "Me", text: "later", quote: "", kind: "chat" };
 const built = api.buildTranscript([second, first], day, day + 30 * hour, 80000, 0);
-assert(built.text.indexOf("Fri 01:00 Member: morning") === 0, "the first day names the weekday and falls back to Member");
+assert(built.text.indexOf("Fri 01:00 Ada: morning") === 0, "the first day names the weekday and the person");
+const unnamedLine = api.buildTranscript(
+  [{ id: "c", token: "c", at: day + hour, from_me: false, sender: "", text: "hi", quote: "", kind: "chat" }],
+  day,
+  day + 2 * hour,
+  80000,
+  0,
+);
+assert(unnamedLine.text.indexOf("Member") < 0, "a missing name is not called Member");
+assert(unnamedLine.text.indexOf("01:00: hi") >= 0, "a missing name still keeps the line");
 assert(built.text.indexOf("Sat 02:00 You: later") > 0, "a later day is named and your messages say You");
 assert(built.anchor === "b" && built.count === 2 && !built.sampled, "the anchor is the newest message");
 
@@ -117,10 +134,16 @@ const wide = [];
 for (let n = 0; n < 5; n++) {
   wide.push({ id: String(n), token: String(n), at: n + 1, from_me: false, sender: "Ada", text: "x".repeat(15000), quote: "", kind: "chat" });
 }
-const four = api.buildTranscript(wide, 0, 100, 80000, 0);
-assert(four.sampled && four.coveredFrom === 2, "a fifth model chunk is dropped before the call");
-assert(four.text.split("\n").length === 4, "only four chunks of lines are sent");
-assert(api.packedChunks(four.text) <= 4, "the sent text fits in four model calls");
+const one = api.buildTranscript(wide, 0, 100, 80000, 0);
+assert(!one.sampled && one.text.split("\n").length === 5, "a normal stretch is one call, not several chunks");
+assert(api.packedChunks(one.text) === 1, "seventy-five thousand characters fit in one context window");
+const huge = [];
+for (let n = 0; n < 3; n++) {
+  huge.push({ id: String(n), token: String(n), at: n + 1, from_me: false, sender: "Ada", text: "x".repeat(200000), quote: "", kind: "chat" });
+}
+const two = api.buildTranscript(huge, 0, 100, 600000, 0);
+assert(two.sampled && two.coveredFrom === 2, "only the newest text past two context windows is dropped");
+assert(api.packedChunks(two.text) <= 2, "the sent text fits in two model calls");
 
 const notes = [];
 for (let n = 0; n < 501; n++) notes.push({ id: "n" + n, at: n, kind: n % 2 ? "audio" : "ptt", text: "[voice note]" });
@@ -132,6 +155,14 @@ const ordered = api.newestNotes([
   { id: "a", at: 1, kind: "ptt", text: "[voice note]" },
 ]);
 assert(ordered[0].id === "a" && ordered[1].id === "b", "voice notes are requested oldest first");
+
+assert(api.historyStep("", Infinity, "m2", 50, false) === "next", "the first history page moves backward");
+assert(api.historyStep("m2", 50, "m1", 40, false) === "next", "an older page is progress");
+assert(api.historyStep("m2", 50, "m1", 50, false) === "next", "the same second still moves when the id does");
+assert(api.historyStep("m2", 50, "m2", 40, false) === "done", "the same page is the end of the history");
+assert(api.historyStep("m2", 50, "", 40, false) === "done", "a page with no id is the end of the history");
+assert(api.historyStep("m2", 50, "m1", 10, true) === "done", "a message before the window ends the scan");
+assert(api.historyStep("m2", 50, "m9", 80, false) === "stall", "a page that jumps forward is not progress");
 
 if (failures) {
   console.error(failures + " failed");
