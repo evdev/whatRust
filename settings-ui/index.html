@@ -231,7 +231,7 @@
             <p class="group-note">In Grok Bot, make a routine with a webhook and no schedule. Paste its address and key here. Paste the instructions below into the routine, and allow that routine to run commands on this computer. Each reply is one run of that routine.</p>
             <pre class="standin-prompt" id="grok_routine_prompt">You are deciding a WhatsApp reply for whatRust. whatRust sends the WhatsApp message. You do not.
 
-A webhook starts each run. Read its context. That text is the whole task: the stand-in rules, this chat, and one line that begins with CALLBACK followed by an http://127.0.0.1 address. The stand-in rules in that context outrank these instructions.
+A webhook starts each run. The first line of its context is CALLBACK followed by an http://127.0.0.1 address. The messages to answer come next, then the stand-in rules. Those rules outrank these instructions.
 
 Decide reply or skip from those rules. Then, from this computer, POST exactly one JSON object to that CALLBACK address. Use curl on this computer and Content-Type: application/json. The body is only the object.
 

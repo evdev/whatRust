@@ -24,6 +24,9 @@ use tauri::{AppHandle, Manager};
 
 const BODY_CAP: usize = 16 * 1024;
 const REPLY_CAP: usize = 256 * 1024;
+/// The webhook text Grok Bot shows the routine. A long transcript was cut off
+/// at the end, which is where the callback address used to sit.
+const GROK_CONTEXT_CAP: usize = 16 * 1024;
 const HERMES_PORT: u16 = 8642;
 const KEY_MIN: usize = 16;
 const KEY_MAX: usize = 512;
@@ -178,6 +181,52 @@ pub fn callback_line(port: u16, token: &str) -> String {
     format!("CALLBACK http://127.0.0.1:{port}/{token}")
 }
 
+/// The callback address is the first line, then the messages that need an
+/// answer, then as much of the rules and recent history as fit. Older history
+/// and voice-note archives are what get left out.
+pub fn grok_context(callback: &str, system: &str, user: &str) -> String {
+    let incoming = tagged(user, "incoming_messages").unwrap_or("");
+    let history = tagged(user, "chat_history").unwrap_or("");
+    let contact = user
+        .lines()
+        .find(|line| line.starts_with("Contact:"))
+        .unwrap_or("");
+    let preface = format!(
+        "{callback}\nPOST one JSON object, and nothing else, to that CALLBACK address from this computer. Content-Type: application/json. Do not message anyone.\n\n{contact}\n<incoming_messages>\n"
+    );
+    let close_incoming = "\n</incoming_messages>\n\n";
+    let incoming = tail_str(
+        incoming,
+        GROK_CONTEXT_CAP
+            .saturating_sub(preface.len() + close_incoming.len())
+            .min(4_000),
+    );
+    let mut out = String::with_capacity(GROK_CONTEXT_CAP);
+    out.push_str(&preface);
+    out.push_str(incoming);
+    out.push_str(close_incoming);
+    let room = GROK_CONTEXT_CAP.saturating_sub(out.len());
+    let wrap = "\n\n<chat_history>\n\n</chat_history>\n";
+    let rules_room = room.saturating_sub(wrap.len());
+    let rules = head_str(system, rules_room.min(4_500));
+    let history = tail_str(
+        history,
+        room.saturating_sub(rules.len()).saturating_sub(wrap.len()),
+    );
+    out.push_str(rules);
+    out.push_str("\n\n<chat_history>\n");
+    out.push_str(history);
+    out.push_str("\n</chat_history>\n");
+    if out.len() > GROK_CONTEXT_CAP {
+        let mut end = GROK_CONTEXT_CAP;
+        while end > 0 && !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
+    out
+}
+
 pub fn ready(app: &AppHandle, backend: &str, hermes_url: &str) -> Result<(), AgentError> {
     let secrets = load_secrets(app);
     match backend {
@@ -288,10 +337,7 @@ pub fn run_grok(
         return Err(AgentError::Cancelled);
     }
     let (listener, port, token) = listen_local()?;
-    let context = format!(
-        "{system}\n\n{user}\n\n{}\nPOST that JSON object, and nothing else, to the CALLBACK address with Content-Type: application/json. Send it from this computer. Do not message anyone.",
-        callback_line(port, &token)
-    );
+    let context = grok_context(&callback_line(port, &token), system, user);
     let call = prepare_grok(webhook, bearer, &context)?;
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
@@ -608,6 +654,41 @@ fn grok_webhook(raw: &str, bearer: &str) -> Option<String> {
     Some(raw.to_string())
 }
 
+fn tagged<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let start = format!("<{name}>");
+    let end = format!("</{name}>");
+    let from = text.find(&start)? + start.len();
+    let rest = text.get(from..)?;
+    let to = rest.find(&end)?;
+    Some(rest[..to].trim())
+}
+
+fn head_str(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.get(..end).unwrap_or("")
+}
+
+fn tail_str(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut start = text.len().saturating_sub(max);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let slice = text.get(start..).unwrap_or("");
+    slice
+        .find('\n')
+        .map(|index| &slice[index + 1..])
+        .unwrap_or(slice)
+}
+
 fn host_of(url: &str) -> Option<String> {
     let rest = url.split_once("://")?.1;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -835,6 +916,22 @@ mod tests {
         assert!(!call.url.contains("Bearer"));
         let body: Value = serde_json::from_str(&call.body).unwrap();
         assert_eq!(body["context"], "hello");
+        let long = format!(
+            "Contact: A\n<chat_history>\nSENTINEL-START\n{}NEW-LINE from me\n</chat_history>\n<incoming_messages>\nhello from them\n</incoming_messages>\n<voice_notes>\n{}</voice_notes>",
+            "x".repeat(80_000),
+            "v".repeat(80_000)
+        );
+        let context = grok_context(
+            "CALLBACK http://127.0.0.1:9/abc",
+            &format!("rules {}", "y".repeat(20_000)),
+            &long,
+        );
+        assert!(context.starts_with("CALLBACK http://127.0.0.1:9/abc\n"));
+        assert!(context.contains("hello from them"));
+        assert!(context.contains("NEW-LINE from me"));
+        assert!(!context.contains("SENTINEL-START"));
+        assert!(!context.contains("voice_notes"));
+        assert!(context.len() <= GROK_CONTEXT_CAP);
         assert!(prepare_grok(
             "http://api2.cursor.sh/hook",
             "crsr_example_key_value_123456",

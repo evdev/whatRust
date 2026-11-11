@@ -382,8 +382,20 @@
     paint();
   }
 
+  var stateLoaded = false;
+  var caughtUp = false;
+
   function refresh() {
-    return invoke("autoreply_state").then(applySnapshot).catch(function () {});
+    return invoke("autoreply_state").then(function (snapshot) {
+      var first = !stateLoaded;
+      stateLoaded = true;
+      applySnapshot(snapshot);
+      if (first) {
+        armWatch();
+        catchUp();
+      }
+      return snapshot;
+    }).catch(function () {});
   }
 
   root.__whatrustStandinPrefs = function (next) {
@@ -1339,6 +1351,12 @@
   }
 
   function schedule(chatId, name, msg) {
+    if (!stateLoaded) {
+      refresh().then(function () {
+        if (stateLoaded) schedule(chatId, name, msg);
+      });
+      return;
+    }
     if (!prefs.enabled || statusOf(chatId) !== "armed") return;
     if (!msg.id && !msg.msg_token) return;
     if (alreadyAnswered(chatId, msg)) return;
@@ -1408,14 +1426,43 @@
       setTimeout(armWatch, 500);
       return;
     }
-    if (watching) return;
-    watching = true;
-    try {
-      wpp.on("chat.new_message", onMessage);
-    } catch (e) {
-      watching = false;
-      setTimeout(armWatch, 1000);
+    if (!watching) {
+      watching = true;
+      try {
+        wpp.on("chat.new_message", onMessage);
+      } catch (e) {
+        watching = false;
+        setTimeout(armWatch, 1000);
+        return;
+      }
     }
+    catchUp();
+  }
+
+  // Messages that arrive while WhatsApp is still opening never emit
+  // chat.new_message to a listener that was not attached yet. Once the saved
+  // armed chats are known, look at the newest ones and answer any that are
+  // still fresh.
+  function catchUp() {
+    if (caughtUp || !stateLoaded || !prefs.enabled) return;
+    var wpp = root.WPP;
+    if (!wpp || !wpp.isReady || !wpp.chat || typeof wpp.chat.getMessages !== "function") return;
+    var ids = [];
+    Object.keys(chats).forEach(function (id) {
+      var row = chats[id];
+      if (!row || row.status !== "armed" || !row.id || ids.indexOf(row.id) !== -1) return;
+      ids.push(row.id);
+    });
+    caughtUp = true;
+    ids.forEach(function (id) {
+      Promise.resolve(wpp.chat.getMessages(id, { count: 5 })).then(function (list) {
+        var name = (chats[id] && chats[id].name) || "";
+        (list || []).map(mapMessage).forEach(function (msg) {
+          if (!msg || msg.from_me) return;
+          schedule(id, name, msg);
+        });
+      }).catch(function () {});
+    });
   }
 
   function watchPlacement() {
@@ -1456,5 +1503,16 @@
 
   setInterval(paint, 2000);
   watchPlacement();
-  refresh().then(armWatch);
+  // The first ask often runs before the app can answer. Keep asking until the
+  // saved stand-in state, including which chats are armed, has loaded.
+  var bootTries = 0;
+  var bootTimer = setInterval(function () {
+    if (stateLoaded || bootTries > 120) {
+      clearInterval(bootTimer);
+      return;
+    }
+    bootTries += 1;
+    refresh();
+  }, 1000);
+  refresh();
 })();
