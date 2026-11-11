@@ -83,6 +83,8 @@ const poll = api.mapMessage({ id: "false_1@c.us_POL", t: 150, type: "poll_creati
 assert(poll && poll.text === "[poll] Lunch?", "a poll keeps its question");
 const image = api.mapMessage({ id: "false_1@c.us_BBB", t: 200, type: "image", body: "see this" });
 assert(image.text === "[image] see this", "an image keeps its caption");
+const clip = api.mapMessage({ id: "false_1@c.us_VID", t: 210, type: "video", body: "see this" });
+assert(clip.text === "[video] see this" && clip.caption === "see this", "a video keeps its caption beside the placeholder");
 const unnamed = api.mapMessage({ id: "false_1@g.us_CCC", t: 300, type: "chat", body: "hello" });
 assert(unnamed.sender === "", "a missing sender is left blank");
 const call = api.mapMessage({ id: "false_1@c.us_CALL", t: 180, type: "call_log", body: "Voice call" });
@@ -155,6 +157,16 @@ const ordered = api.newestNotes([
   { id: "a", at: 1, kind: "ptt", text: "[voice note]" },
 ]);
 assert(ordered[0].id === "a" && ordered[1].id === "b", "voice notes are requested oldest first");
+const crowded = [{ id: "voice", at: 1, kind: "ptt", text: "[voice note]" }];
+for (let n = 0; n < 500; n++) crowded.push({ id: "v" + n, at: 1000 + n, kind: n % 2 ? "ptv" : "video", text: "[video]" });
+const keptVoice = api.newestNotes(crowded);
+assert(keptVoice.length === 500, "voice notes and videos share the 500-message cap");
+assert(keptVoice.some((note) => note.id === "voice"), "newer videos do not crowd out a voice note");
+assert(keptVoice[0].id === "voice", "the mixed list stays in time order");
+const onlyVideos = [];
+for (let n = 0; n < 501; n++) onlyVideos.push({ id: "v" + n, at: n, kind: "video", text: "[video]" });
+const keptVideos = api.newestNotes(onlyVideos);
+assert(keptVideos.length === 500 && keptVideos[0].id === "v1" && keptVideos[499].id === "v500", "videos alone still keep the newest 500");
 
 assert(api.historyStep("", Infinity, "m2", 50, false) === "next", "the first history page moves backward");
 assert(api.historyStep("m2", 50, "m1", 40, false) === "next", "an older page is progress");
@@ -172,6 +184,26 @@ const described = api.describeChat(throwing);
 assert(described && described.id === "1555@g.us" && described.group === true, "a chat is kept when its name cannot be read");
 assert(api.describeChat({ then() {}, id: "1555@c.us", formattedTitle: "Ada" }).id === "1555@c.us", "a chat model with then is still a chat");
 assert(api.describeChat({ then() {} }) === null, "a promise is not a chat");
+const placed = [
+  { token: "false_1@c.us_OLD", at: 1000 },
+  { token: "false_1@c.us_MID", at: 2000 },
+  { token: "false_1@c.us_NEW", at: 3000 },
+];
+assert(api.summarySlot(placed, { anchor_token: "MID", window_end_ms: 2000 }) === 1, "the summary stays on the last message it covers");
+assert(api.summarySlot(placed, { anchor_token: "missing", window_end_ms: 2000 }) === 1, "a missing anchor still stops where later messages begin");
+assert(api.summarySlot(placed, { anchor_token: "missing", window_end_ms: 500 }) === -1, "a summary above the loaded messages is not pinned to the bottom");
+assert(api.summarySlot([
+  { token: "false_1@c.us_A", at: 1000 },
+  { token: "false_1@c.us_B", at: 1500 },
+], { anchor_token: "gone", window_end_ms: 4000 }) === -1, "a summary below the loaded messages stays hidden");
+assert(api.summarySlot(placed, { anchor_token: "NEW", window_end_ms: 3000 }) === 2, "a summary with nothing after it stays on its own message");
+function fakeRow(top, bottom) {
+  return { getBoundingClientRect() { return { top: top, bottom: bottom, left: 0, right: 100, height: bottom - top, width: 100 }; } };
+}
+assert(api.nearViewport(fakeRow(100, 200)), "a message on screen is close enough to show its summary");
+assert(api.nearViewport(fakeRow(-700, -100)), "a message just above the screen is shown before you reach it");
+assert(!api.nearViewport(fakeRow(-5000, -4000)), "a message far above the screen waits until you scroll there");
+assert(!api.nearViewport(fakeRow(3000, 3200)), "a message far below the screen waits until you scroll there");
 assert(source.includes('item.textContent = "• " + point'), "each summary point is drawn with a bullet");
 assert(source.includes("display:block;margin:3px 0"), "each bullet is on its own line");
 assert(source.includes("white-space") || source.includes("whiteSpace"), "a fallback card keeps the line breaks");

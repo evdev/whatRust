@@ -313,6 +313,7 @@
     if (!at) return null;
     var fromMe = !!(msg.id && msg.id.fromMe) || String(id).indexOf("true_") === 0 || !!msg.fromMe;
     var text = "";
+    var captionText = "";
     if (/ptt|audio/.test(type)) {
       text = typeof msg.transcript === "string" && msg.transcript.trim() ? msg.transcript.trim() : "[voice note]";
     }
@@ -323,9 +324,12 @@
       text = poll ? "[poll] " + poll : "[poll]";
     } else if (/location/.test(type)) text = "[location]";
     else if (/vcard/.test(type)) text = "[contact]";
-    else if (/image|video|document|album/.test(type)) {
+    else if (type === "video" || type === "ptv") {
+      captionText = String(msg.body || msg.caption || "").trim();
+      text = captionText ? "[" + type + "] " + captionText : "[" + type + "]";
+    } else if (/image|document|album/.test(type)) {
       var caption = String(msg.body || msg.caption || "").trim();
-      var kind = /image/.test(type) ? "image" : /video/.test(type) ? "video" : /album/.test(type) ? "album" : "document";
+      var kind = /image/.test(type) ? "image" : /album/.test(type) ? "album" : "document";
       text = caption ? "[" + kind + "] " + caption : "[" + kind + "]";
     } else text = String(msg.body || msg.caption || "").trim();
     if (!text) return null;
@@ -342,6 +346,7 @@
       sender: senderName(msg),
       person: personKey(msg),
       text: text.slice(0, 2000),
+      caption: captionText,
       quote: quote,
       kind: type,
     };
@@ -374,12 +379,21 @@
   }
 
   function newestNotes(messages) {
-    var notes = (messages || []).filter(function (msg) {
-      return msg && /ptt|audio/.test(msg.kind || "");
+    var voice = [];
+    var videos = [];
+    (messages || []).forEach(function (msg) {
+      if (!msg) return;
+      if (msg.kind === "ptt" || msg.kind === "audio") voice.push(msg);
+      else if (msg.kind === "video" || msg.kind === "ptv") videos.push(msg);
     });
-    notes.sort(function (a, b) { return a.at - b.at; });
-    if (notes.length > 500) notes = notes.slice(notes.length - 500);
-    return notes;
+    function byTime(a, b) { return a.at - b.at; }
+    voice.sort(byTime);
+    videos.sort(byTime);
+    // A burst of videos used to push older voice notes out of this cap.
+    if (voice.length > 500) voice = voice.slice(voice.length - 500);
+    var room = 500 - voice.length;
+    if (videos.length > room) videos = videos.slice(videos.length - room);
+    return voice.concat(videos).sort(byTime);
   }
 
   function buildTranscript(messages, start, end, maxChars, offsetMin) {
@@ -424,6 +438,45 @@
     };
   }
 
+  function sameMessage(rowToken, anchor) {
+    if (!rowToken || !anchor) return false;
+    if (rowToken === anchor) return true;
+    var rowBare = messageToken(rowToken) || rowToken;
+    var anchorBare = messageToken(anchor) || anchor;
+    return rowBare === anchorBare;
+  }
+
+  // The row the summary belongs under. -1 when that moment is not in the
+  // mounted stretch, so a summary never jumps to the newest message.
+  function summarySlot(rows, entry) {
+    var anchor = entry && entry.anchor_token || "";
+    var end = Number(entry && entry.window_end_ms) || 0;
+    var anchorIndex = -1;
+    var lastBefore = -1;
+    var sawAfter = false;
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i] || {};
+      if (sameMessage(row.token, anchor)) anchorIndex = i;
+      var at = Number(row.at) || 0;
+      if (!at || !end) continue;
+      if (at <= end) lastBefore = i;
+      else sawAfter = true;
+    }
+    if (lastBefore >= 0 && sawAfter) return lastBefore;
+    if (anchorIndex >= 0) return anchorIndex;
+    return -1;
+  }
+
+  function nearViewport(row) {
+    if (!row || typeof row.getBoundingClientRect !== "function") return false;
+    var rect = row.getBoundingClientRect();
+    var height = root.innerHeight || 800;
+    var width = root.innerWidth || 800;
+    if (!(rect.height > 0) || !(rect.width > 0)) return false;
+    if (rect.right < 0 || rect.left > width) return false;
+    return rect.bottom > -height && rect.top < height + height;
+  }
+
   function controlKind(node) {
     var bits = [];
     var cur = node;
@@ -466,6 +519,8 @@
       messageToken: messageToken,
       normalizeChatId: normalizeChatId,
       describeChat: describeChat,
+      summarySlot: summarySlot,
+      nearViewport: nearViewport,
       senderField: senderField,
     };
     return;
@@ -526,6 +581,11 @@
 
   var openId = "";
   var entries = [];
+  var ENTRY_CAP = 40;
+
+  function trimEntries() {
+    if (entries.length > ENTRY_CAP) entries = entries.slice(entries.length - ENTRY_CAP);
+  }
   var companion = null;
   var card = null;
   var pending = null;
@@ -882,6 +942,7 @@
     }
     if (!replaced) next.push(entry);
     entries = next;
+    trimEntries();
   }
 
   function findBlock(row, id) {
@@ -967,37 +1028,66 @@
     box.appendChild(actions);
   }
 
-  function atBottom() {
-    var main = document.getElementById("main");
-    if (!main || !main.querySelector) return false;
-    var node = main.querySelector("[data-id]");
-    for (var i = 0; node && node !== document.body && i < 10; i++) {
-      if (node.scrollHeight > node.clientHeight + 80) {
-        return node.scrollTop + node.clientHeight >= node.scrollHeight - 160;
-      }
-      node = node.parentElement;
+  function mountedMessages(main) {
+    var all = main.querySelectorAll("[data-id]");
+    var rows = [];
+    for (var i = 0; i < all.length; i++) {
+      var node = all[i];
+      var parent = node.parentElement;
+      if (parent && parent.closest && parent.closest("[data-id]")) continue;
+      var data = attr(node, "data-id");
+      if (!data || !messageToken(data)) continue;
+      rows.push(node);
     }
-    return false;
+    return rows;
+  }
+
+  function messageTimes() {
+    var map = Object.create(null);
+    var chat = rawChat(openId);
+    var models = modelList(chat && chat.msgs);
+    for (var i = 0; i < models.length; i++) {
+      var msg = models[i];
+      if (!msg) continue;
+      var id = typeof msg.id === "string" ? msg.id : widText(msg.id);
+      var at = stampOf(msg);
+      if (!id || !at) continue;
+      map[id] = at;
+      var token = messageToken(id);
+      if (token) map[token] = at;
+    }
+    return map;
   }
 
   function paintAll() {
     var main = document.getElementById("main");
     if (!main || !main.querySelectorAll) return;
     if (typeof root.__whatrustPageBusy === "function" && root.__whatrustPageBusy()) return;
-    var rows = main.querySelectorAll("[data-id]");
-    var byId = Object.create(null);
-    for (var i = 0; i < rows.length; i++) {
-      var data = attr(rows[i], "data-id");
-      if (data) byId[data] = rows[i];
-      var token = messageToken(data);
-      if (token) byId[token] = rows[i];
+    var mine = [];
+    for (var e = 0; e < entries.length; e++) {
+      if (entries[e] && entries[e].chat_id === openId) mine.push(entries[e]);
+    }
+    if (!mine.length) {
+      var stale = main.querySelectorAll("[data-wr-summary-block]");
+      for (var s = 0; s < stale.length; s++) {
+        if (stale[s].parentNode) stale[s].parentNode.removeChild(stale[s]);
+      }
+      return;
+    }
+    var nodes = mountedMessages(main);
+    var times = messageTimes();
+    var described = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var data = attr(nodes[i], "data-id");
+      var token = messageToken(data) || data;
+      described.push({ row: nodes[i], token: data, at: times[data] || times[token] || 0 });
     }
     var keep = Object.create(null);
-    entries.forEach(function (entry) {
-      if (!entry || entry.chat_id !== openId) return;
-      var row = entry.anchor_token ? byId[entry.anchor_token] || byId[messageToken(entry.anchor_token)] : null;
-      if (!row && atBottom() && rows.length) row = rows[rows.length - 1];
-      if (!row) return;
+    mine.forEach(function (entry) {
+      var index = summarySlot(described, entry);
+      if (index < 0) return;
+      var row = described[index].row;
+      if (!nearViewport(row)) return;
       keep[entry.id] = true;
       paintBlock(row, entry);
     });
@@ -1011,7 +1101,9 @@
   function loadEntries(chatId) {
     return invoke("chat_summaries", { chat_id: chatId }).then(function (list) {
       if (chatId !== openId) return;
+      entriesChat = chatId;
       entries = entries.filter(function (item) { return item.chat_id !== chatId; }).concat(list || []);
+      trimEntries();
       paintAll();
     }).catch(function () {});
   }
@@ -1198,8 +1290,12 @@
         if (hit && hit.id && hit.text) byId[hit.id] = hit.text;
       });
       messages.forEach(function (msg) {
-        if (byId[msg.id]) msg.text = String(byId[msg.id]).slice(0, 2000);
-        else if (byId[msg.token]) msg.text = String(byId[msg.token]).slice(0, 2000);
+        var spoken = byId[msg.id] || byId[msg.token];
+        if (!spoken) return;
+        spoken = String(spoken).slice(0, 2000);
+        if ((msg.kind === "video" || msg.kind === "ptv") && msg.caption) {
+          msg.text = (msg.caption + " — " + spoken).slice(0, 2000);
+        } else msg.text = spoken;
       });
     });
   }
@@ -1391,7 +1487,26 @@
       currentRun = 0;
       inflight = false;
     }
-    if (id && id !== previous) loadEntries(id);
+    paintAll();
+  }
+
+  var entriesChat = "";
+  var entriesLoading = "";
+
+  function ensureEntries() {
+    if (!openId) return;
+    if (entriesChat === openId) {
+      schedulePaint();
+      return;
+    }
+    if (entriesLoading === openId) return;
+    var chatId = openId;
+    entriesLoading = chatId;
+    Promise.resolve(loadEntries(chatId)).then(function () {
+      if (entriesLoading === chatId) entriesLoading = "";
+    }, function () {
+      if (entriesLoading === chatId) entriesLoading = "";
+    });
   }
 
   var paintTimer = 0;
@@ -1419,7 +1534,7 @@
     if (typeof MutationObserver === "function") {
       new MutationObserver(function () { setTimeout(schedulePaint, 300); }).observe(document.documentElement, { childList: true, subtree: true });
     }
-    document.addEventListener("scroll", function () { setTimeout(schedulePaint, 200); }, true);
+    document.addEventListener("scroll", function () { ensureEntries(); }, true);
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);

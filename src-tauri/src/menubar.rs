@@ -1,12 +1,12 @@
 //! macOS menu-bar mode (`menubar_only`).
 //!
-//! The panel is the account's window (`wa-<id>`), restyled: one webview
-//! per account, one session per store, one notification per message. A
-//! dismissed panel is a hidden window whose page keeps running: account
-//! windows set the WKWebView inactive-scheduling policy to `disabled`
-//! (macOS 14+, Tauri's `background_throttling`), so WhatsApp's socket stays
-//! up while nothing is on screen. The geometry captured before the first
-//! restyle is replayed when the window goes back to normal.
+//! The panel is the open account's window (`wa-<id>`), restyled. A dismissed
+//! panel is a hidden window whose page keeps running: that window sets the
+//! WKWebView inactive-scheduling policy to `disabled` (macOS 14+, Tauri's
+//! `background_throttling`), so WhatsApp's socket stays up while nothing is
+//! on screen. Other accounts are not kept loaded — each is its own WebKit
+//! process. The geometry captured before the first restyle is replayed when
+//! the window goes back to normal.
 
 /// Pure helpers, unit-tested on every platform (the panel is macOS-only).
 pub(crate) mod geom {
@@ -158,6 +158,16 @@ mod imp {
     /// hidden (`is_visible()` is false and it cannot take clicks).
     pub fn is_dismissed(label: &str) -> bool {
         is_restyled(label) && presented().as_deref() != Some(label)
+    }
+
+    /// Drop panel bookkeeping for a window that is about to be destroyed.
+    pub fn forget_window(label: &str) {
+        if presented().as_deref() == Some(label) {
+            set_presented(None);
+        }
+        with_restyled(|m| {
+            m.remove(label);
+        });
     }
 
     fn presented() -> Option<String> {
@@ -425,19 +435,13 @@ mod imp {
         tray_click(app, None);
     }
 
-    /// Menu-bar-only mode: no standard windows. Every account KEEPS its
-    /// webview, hidden and connected (the inactive-scheduling policy keeps
-    /// the page running), so notifications keep arriving. A presented panel
-    /// stays up and hides on its next focus loss.
+    /// Menu-bar-only mode: no standard windows. Do not create a webview per
+    /// account. Hide the windows that already exist; the open account stays
+    /// loaded and the rest are released. A presented panel stays up and hides
+    /// on its next focus loss.
     pub fn enter_only(app: &AppHandle) {
         if !supported() {
             return; // macOS < 14: a hidden webview would be suspended
-        }
-        for a in crate::accounts::load(app).accounts {
-            let label = crate::accounts::window_label(&a.id);
-            if app.get_webview_window(&label).is_none() {
-                let _ = crate::window::open_account_window(app, &a, true);
-            }
         }
         let presented = presented();
         for (label, win) in app.webview_windows() {
@@ -452,6 +456,9 @@ mod imp {
             }
         }
         ONLY_MODE.store(true, Ordering::Release);
+        if let Some(label) = target_label(app) {
+            crate::window::schedule_release_other_accounts(app, &label);
+        }
     }
 
     /// Leave menu-bar-only mode if it was on. True on the transition.

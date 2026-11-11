@@ -1,4 +1,5 @@
 mod accounts;
+mod agents;
 mod appicon;
 mod applock;
 mod aumid;
@@ -23,6 +24,7 @@ mod llm;
 mod lock;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod menubar;
+mod mp4audio;
 mod native_icon;
 mod notif_icon;
 mod notify;
@@ -35,6 +37,7 @@ mod settings;
 #[cfg(all(windows, debug_assertions))]
 mod smoke;
 mod todo;
+mod transcript_store;
 mod tray;
 mod ui_health;
 mod unread;
@@ -206,7 +209,6 @@ pub fn run() {
         .manage(native_icon::Broker::default())
         .manage(integration::Integration::default())
         .manage(accounts::ActiveAccount::new("wa-default".into()))
-        .manage(voice::VoiceState::default())
         .manage(chat_summary::ChatSummaryState::default())
         .manage(todo::TodoState::default())
         .manage(autoreply::AutoreplyState::default())
@@ -262,6 +264,7 @@ pub fn run() {
             voice::voice_prefs,
             voice::voice_lookup,
             voice::transcribe_voice,
+            voice::transcribe_video,
             voice::summarize_voice,
             voice::voice_transcripts,
             chat_summary::chat_summary_consent,
@@ -283,6 +286,7 @@ pub fn run() {
             todo::todo_clear_done,
             autoreply::autoreply_state,
             autoreply::autoreply_set_chat,
+            autoreply::autoreply_set_access,
             autoreply::autoreply_get_chat_doc,
             autoreply::autoreply_save_chat_doc,
             autoreply::autoreply_reset_chat_doc,
@@ -296,6 +300,8 @@ pub fn run() {
             autoreply::autoreply_open_persona,
             autoreply::list_standin_cli_models,
             autoreply::standin_cli_status,
+            autoreply::set_standin_secret,
+            autoreply::standin_agent_status,
         ])
         .setup(move |app| {
             // Menu-bar-only on macOS: load settings early (the rest of setup needs them
@@ -313,6 +319,7 @@ pub fn run() {
             // way to see notification failures on a Windows GUI build with no
             // console. See dlog.rs.
             dlog::init();
+            voice::sweep_note_files();
             #[cfg(target_os = "macos")]
             dlog::log(if scrollers_forced {
                 "scrollers: forced overlay (AppleShowScrollBars=WhenScrolling in app domain)"
@@ -386,9 +393,9 @@ pub fn run() {
                 menubar::set_keep_alive(true);
             }
 
-            // In menu-bar-only mode every account window starts hidden: the
-            // inactive-scheduling policy keeps each one connected while hidden,
-            // and the tray opens them as panels.
+            // Menu-bar mode starts the one live account hidden. That webview
+            // keeps running while its panel is dismissed; other accounts are
+            // created when the tray opens them.
             #[cfg(target_os = "macos")]
             let open_hidden = open_hidden || s.menubar_only;
 
@@ -397,16 +404,11 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             webcrypto::prepare(handle);
 
-            // Build windows while Tauri is still on its UI thread. On Windows a
-            // WebView2 controller is created lazily for a hidden window, so the
-            // preferred account must be the one made visible here. This keeps
-            // every other account connected in the background and guarantees the
-            // selected startup account is the first usable window.
-            for account in &f.accounts {
-                let is_startup = startup_label
-                    .as_deref()
-                    .is_some_and(|label| label == accounts::window_label(&account.id));
-                window::open_account_window(handle, account, open_hidden || !is_startup)?;
+            // Each account webview is its own browser process, and a signed-in
+            // WhatsApp Web tab holds about a gigabyte. Only the startup account
+            // is created here. The others stay signed in on disk until opened.
+            if let Some(account) = accounts::startup_account(&f) {
+                window::open_account_window(handle, account, open_hidden)?;
             }
             dlog::log("startup: account windows built");
             // tao's content view must not re-interpret keys the webview left

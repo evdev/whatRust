@@ -375,6 +375,18 @@ static EN_TABLE: &[(&str, &str)] = &[
     ("The stand-in stayed quiet in {0} about \"{1}\".", "The stand-in stayed quiet in {0} about \"{1}\"."),
     ("Stand-in", "Stand-in"),
     ("this chat", "this chat"),
+    ("The agent is not set up.", "The agent is not set up."),
+    ("The agent returned status {0}.", "The agent returned status {0}."),
+    ("The agent did not answer in time.", "The agent did not answer in time."),
+    ("The agent did not return a decision.", "The agent did not return a decision."),
+    ("Agent run limit reached in this chat.", "Agent run limit reached in this chat."),
+    ("The reply arrived too late.", "The reply arrived too late."),
+    ("The reply arrived too late in {0}.", "The reply arrived too late in {0}."),
+    ("Type allow tools to use the agent's own tools.", "Type allow tools to use the agent's own tools."),
+    ("That access level is not valid.", "That access level is not valid."),
+    ("The webhook address must be https.", "The webhook address must be https."),
+    ("The key was not accepted.", "The key was not accepted."),
+    ("That address is not on this network.", "That address is not on this network."),
 ];
 
 #[cfg(test)]

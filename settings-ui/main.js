@@ -1,7 +1,7 @@
 const invoke = window.__TAURI__.core.invoke;
 const LANGS = ["pt-BR", "en"];
-const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "translate_enabled", "show_message_device", "standin_enabled"];
-const STANDIN_BACKENDS = ["api", "claude_cli", "grok_cli", "codex_cli"];
+const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "standin_enabled"];
+const STANDIN_BACKENDS = ["api", "claude_cli", "grok_cli", "codex_cli", "hermes", "grok_bot"];
 const AI_PROVIDERS = ["openrouter", "gemini", "anthropic"];
 const LIST_PROVIDERS = ["gemini", "anthropic"];
 let translateModels = { openrouter: "", gemini: "", anthropic: "" };
@@ -24,7 +24,7 @@ let catalogToken = 0;
 let cliCatalogToken = 0;
 let catalogLoading = false;
 const ZOOM_DEFAULT = 1;
-const SINGLE_WINDOW_SUBTITLE = "Uma janela com um seletor de contas; as contas ocultas continuam conectadas. Requer reiniciar o whatRust.";
+const SINGLE_WINDOW_SUBTITLE = "Uma janela com um seletor de contas. Só a conta aberta fica carregada; as outras abrem quando você as escolhe. Requer reiniciar o whatRust.";
 
 // The menu-bar rows are macOS-only. get_settings reports the OS this build targets
 // in `platform`; the rows start hidden and appear here once it is known.
@@ -221,6 +221,9 @@ async function load() {
   standinShown = standinBackend;
   document.getElementById("standin_delay_secs").value = String(s.standin_delay_secs || 10);
   document.getElementById("standin_hourly_limit").value = String(s.standin_hourly_limit || 12);
+  document.getElementById("standin_hermes_url").value = s.standin_hermes_url || "";
+  document.getElementById("standin_agent_timeout_secs").value = String(s.standin_agent_timeout_secs || 150);
+  document.getElementById("standin_agent_runs_per_hour").value = String(s.standin_agent_runs_per_hour || 20);
   syncStandinAvailability();
   showStandinFields();
   loadPersona();
@@ -324,6 +327,9 @@ async function save() {
   s.standin_codex_bin = standinBins.codex_cli;
   s.standin_delay_secs = parseInt(document.getElementById("standin_delay_secs").value, 10) || 10;
   s.standin_hourly_limit = parseInt(document.getElementById("standin_hourly_limit").value, 10) || 12;
+  s.standin_hermes_url = document.getElementById("standin_hermes_url").value.trim();
+  s.standin_agent_timeout_secs = parseInt(document.getElementById("standin_agent_timeout_secs").value, 10) || 150;
+  s.standin_agent_runs_per_hour = parseInt(document.getElementById("standin_agent_runs_per_hour").value, 10) || 20;
   s.download_dir = downloadDir;
   if (proxySupported) {
     s.proxy_mode = document.getElementById("proxy_mode").value;
@@ -343,6 +349,9 @@ async function save() {
     const saved = await invoke("get_settings");
     proxySaved = { proxy_mode: saved.proxy_mode, proxy_host: saved.proxy_host, proxy_port: saved.proxy_port };
     document.getElementById("proxy_host").value = saved.proxy_host;
+    document.getElementById("standin_hermes_url").value = saved.standin_hermes_url || "";
+    document.getElementById("standin_agent_timeout_secs").value = String(saved.standin_agent_timeout_secs || 150);
+    document.getElementById("standin_agent_runs_per_hour").value = String(saved.standin_agent_runs_per_hour || 20);
     syncProxyRestart();
     if (warn) {
       note.textContent = t("Salvo com observação: {0}", [warn]);
@@ -531,6 +540,10 @@ window.addEventListener("DOMContentLoaded", () => {
     // The old program's result would otherwise be read as this one's.
     document.getElementById("standin_cli_state").textContent = "Not checked yet.";
   });
+  document.getElementById("save_hermes_key").addEventListener("click", () => saveStandinSecret("hermes", false));
+  document.getElementById("remove_hermes_key").addEventListener("click", () => saveStandinSecret("hermes", true));
+  document.getElementById("save_grok").addEventListener("click", () => saveStandinSecret("grok_bot", false));
+  document.getElementById("remove_grok").addEventListener("click", () => saveStandinSecret("grok_bot", true));
   document.getElementById("chat_summary_revoke").addEventListener("click", async () => {
     try {
       await invoke("clear_chat_summary_consent");
@@ -570,6 +583,11 @@ window.addEventListener("DOMContentLoaded", () => {
       offerFluidVoiceIfMissing();
     }
   });
+  document.getElementById("video_transcribe").addEventListener("change", () => {
+    if (hostPlatform === "windows" && document.getElementById("video_transcribe").checked) {
+      offerFluidVoiceIfMissing();
+    }
+  });
   document.getElementById("save_ai_key").addEventListener("click", saveAiKey);
   document.getElementById("remove_ai_key").addEventListener("click", removeAiKey);
   document.getElementById("ai_key").addEventListener("keydown", (e) => {
@@ -598,32 +616,78 @@ function commitStandinFields() {
 
 function showStandinFields() {
   const backend = document.getElementById("standin_backend").value;
-  const cli = backend !== "api";
-  const listed = cli || usesModelList(shownProvider);
+  const cli = backend === "claude_cli" || backend === "grok_cli" || backend === "codex_cli";
+  const agent = backend === "hermes" || backend === "grok_bot";
+  const listed = cli || (!agent && usesModelList(shownProvider));
   const input = document.getElementById("standin_model");
   const select = document.getElementById("standin_model_select");
-  input.hidden = listed;
-  select.hidden = !listed;
+  document.getElementById("standin_model_row").hidden = agent;
+  input.hidden = listed || agent;
+  select.hidden = !listed || agent;
   if (cli) fillCliModelSelect(backend);
   else if (listed) fillStandinModelSelect();
-  else input.value = standinModels[shownProvider] || "";
+  else if (!agent) input.value = standinModels[shownProvider] || "";
   document.getElementById("standin_bin").closest("label").hidden = !cli;
   document.getElementById("standin_bin").value = cli ? (standinBins[backend] || "") : "";
   document.getElementById("check_standin_cli").disabled = !cli || !standinCli;
   document.getElementById("standin_session_row").hidden = !cli;
+  document.getElementById("standin_hermes_row").hidden = backend !== "hermes";
+  document.getElementById("standin_hermes_key_row").hidden = backend !== "hermes";
+  document.getElementById("standin_grok_row").hidden = backend !== "grok_bot";
+  document.getElementById("standin_timeout_row").hidden = !agent;
+  document.getElementById("standin_runs_row").hidden = !agent;
   standinShown = backend;
   if (cli) loadCliModelCatalog(backend);
+  if (agent) refreshAgentStatus();
 }
 
 function syncStandinAvailability() {
   const select = document.getElementById("standin_backend");
+  const cliIds = ["claude_cli", "grok_cli", "codex_cli"];
   for (const opt of select.options) {
-    if (opt.value !== "api") opt.disabled = !standinCli;
+    if (cliIds.includes(opt.value)) opt.disabled = !standinCli;
   }
-  if (!standinCli && select.value !== "api") select.value = "api";
+  if (!standinCli && cliIds.includes(select.value)) select.value = "api";
   if (!standinCli) {
     document.getElementById("standin_backend_hint").textContent =
-      "In this install, only the API key is available.";
+      "In this install, the command-line programs are not available. The API key, Hermes, and Grok Bot still work.";
+  }
+}
+
+async function refreshAgentStatus() {
+  try {
+    const status = await invoke("standin_agent_status");
+    const host = document.getElementById("standin_grok_host");
+    if (status.grok_ready && status.grok_host) {
+      host.textContent = "Webhook host: " + status.grok_host + ". The routine reads the webhook text, then from this computer POSTs the decision JSON to the CALLBACK address in that text.";
+    } else {
+      host.textContent = "No webhook saved yet. The routine reads the webhook text, then from this computer POSTs the decision JSON to the CALLBACK address in that text.";
+    }
+    document.getElementById("standin_hermes_key_state").textContent = status.hermes_key_stored
+      ? "A key is stored on this computer, not in settings and not in WhatsApp."
+      : "Stored on this computer, not in settings and not in WhatsApp.";
+  } catch (e) {}
+}
+
+async function saveStandinSecret(kind, remove) {
+  const note = document.getElementById("note");
+  try {
+    await invoke("set_standin_secret", {
+      kind,
+      secret: remove ? "" : (kind === "hermes"
+        ? document.getElementById("standin_hermes_key").value
+        : document.getElementById("standin_grok_key").value),
+      url: kind === "grok_bot" ? document.getElementById("standin_grok_url").value : "",
+      remove,
+    });
+    document.getElementById("standin_hermes_key").value = "";
+    document.getElementById("standin_grok_key").value = "";
+    document.getElementById("standin_grok_url").value = "";
+    await refreshAgentStatus();
+    note.textContent = "Saved ✓";
+    setTimeout(() => (note.textContent = ""), 1500);
+  } catch (e) {
+    note.textContent = errorText(e);
   }
 }
 

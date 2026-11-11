@@ -740,15 +740,27 @@ fn choose_remaining(app: &AppHandle, exclude: Option<&str>) {
     }
 }
 
-pub fn remove_view(app: &AppHandle, id: &str) -> tauri::Result<()> {
-    if let Some(v) = app.get_webview(&accounts::window_label(id)) {
-        let owner = v.window();
-        v.close()?;
-        crate::lock::guard(&state(app).view_visibility).remove(v.label());
-        if owner.label().starts_with("detached-") {
+/// Drop one account webview without selecting a replacement. The parent
+/// `main` window stays; a detached owner is destroyed with its view.
+pub fn close_account_view(app: &AppHandle, id: &str) -> tauri::Result<()> {
+    let label = accounts::window_label(id);
+    let Some(v) = app.get_webview(&label) else {
+        return Ok(());
+    };
+    let owner_label = v.window().label().to_string();
+    set_view_visible(app, &v, false);
+    forget_view_geometry(app, &label);
+    v.close()?;
+    if owner_label.starts_with("detached-") {
+        if let Some(owner) = app.get_window(&owner_label) {
             let _ = owner.destroy();
         }
     }
+    Ok(())
+}
+
+pub fn remove_view(app: &AppHandle, id: &str) -> tauri::Result<()> {
+    close_account_view(app, id)?;
     choose_remaining(app, None);
     Ok(())
 }

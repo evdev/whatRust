@@ -87,9 +87,18 @@ row.getBoundingClientRect = () => ({ top: 10, bottom: 40, left: 0, right: 80, wi
 assert(api.intersectsViewport(row, { width: 400, height: 300 }), "on-screen row is visible");
 assert(!api.intersectsViewport(row, { width: 400, height: 5 }), "a row below the viewport is not visible");
 
-const packed = api.pack(id, new Uint8Array([1, 2, 3]));
+const packed = api.pack(id, new Uint8Array([1, 2, 3]), 1_700_000_000_000);
 assert(packed[0] === 0 && packed[1] === id.length, "frame length is a big-endian u16");
-assert(packed.length === 2 + id.length + 3 && packed[packed.length - 1] === 3, "frame ends with the audio");
+assert(packed.length === 2 + id.length + 8 + 3 && packed[packed.length - 1] === 3, "frame ends with the audio");
+const timeAt = 2 + id.length;
+const hi = (packed[timeAt] * 16777216) + (packed[timeAt + 1] * 65536) + (packed[timeAt + 2] * 256) + packed[timeAt + 3];
+const lo = (packed[timeAt + 4] * 16777216) + (packed[timeAt + 5] * 65536) + (packed[timeAt + 6] * 256) + packed[timeAt + 7];
+assert(hi * 4294967296 + lo === 1_700_000_000_000, "frame carries the message time");
+const seconds = api.pack(id, new Uint8Array([9]), 5);
+const secondsAt = 2 + id.length;
+const secondsHi = (seconds[secondsAt] * 16777216) + (seconds[secondsAt + 1] * 65536) + (seconds[secondsAt + 2] * 256) + seconds[secondsAt + 3];
+const secondsLo = (seconds[secondsAt + 4] * 16777216) + (seconds[secondsAt + 5] * 65536) + (seconds[secondsAt + 6] * 256) + seconds[secondsAt + 7];
+assert(secondsHi * 4294967296 + secondsLo === 5000, "a WhatsApp second timestamp is stored as milliseconds");
 
 const view = { id, status: "ready", text: "olá", translation: "hello" };
 api.renderBox(row, view, { translate: true });
@@ -177,6 +186,48 @@ release.c();
 await flush();
 assert(queue.forget("a"), "a finished id can be retried");
 assert(queue.add("a"), "retry queues it again");
+await flush();
+release.a();
+await flush();
+assert(queue.state("a") === "done", "the retry finishes");
+assert(api.enqueueMissing(queue, "a"), "a finished id is queued again when the note is missing");
+const heldRun = api.createQueue(1, () => new Promise(() => {}));
+assert(heldRun.add("busy"), "a held transcription is accepted");
+await flush();
+assert(heldRun.state("busy") === "run", "the held transcription is running");
+assert(api.enqueueMissing(heldRun, "busy") === false, "a running transcription is not started twice");
+
+const held = {
+  shown: { id: "shown", status: "ready", text: "on screen" },
+  gone: { id: "gone", status: "ready", text: "released" },
+  failed: { id: "failed", status: "error", notice: "llm" },
+  running: { id: "running", status: "ready", text: "still working" },
+};
+const heldAnchors = {
+  shown: { isConnected: true },
+  gone: { isConnected: false },
+  failed: { isConnected: false },
+  running: { isConnected: false },
+};
+const paintCache = [];
+api.retainVisible(held, heldAnchors, { shown: true }, { running: true }, paintCache);
+assert(held.shown && held.shown.text === "on screen", "a visible transcript stays");
+assert(!held.gone && paintCache.some((view) => view.id === "gone" && view.text === "released"), "a detached transcript is released");
+assert(api.releasedView(paintCache, "gone").text === "released", "a released transcript can be painted again");
+assert(held.failed && held.failed.status === "error", "an error marker is kept");
+assert(held.running && held.running.text === "still working", "a running note survives the sweep");
+assert(!heldAnchors.gone && !heldAnchors.failed, "a detached row is not kept alive");
+assert(heldAnchors.shown, "a connected row stays anchored");
+const overflow = [];
+const many = {};
+for (let n = 0; n < 33; n++) many["n" + n] = { id: "n" + n, status: "ready", text: String(n) };
+api.retainVisible(many, {}, {}, {}, overflow);
+assert(overflow.length === 32 && overflow[0].text === "1" && overflow[31].text === "32", "the paint cache keeps the newest 32");
+const stale = {};
+for (let n = 0; n < 405; n++) stale["s" + n] = { skip: true };
+stale.keep = { skip: true };
+api.capIdMap(stale, { keep: true }, 400);
+assert(Object.keys(stale).length === 400 && stale.keep.skip === true, "stale markers stay under the cap and a kept id survives");
 
 if (failures) {
   console.error(`\n${failures} failed`);

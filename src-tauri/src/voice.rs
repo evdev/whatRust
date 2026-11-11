@@ -1,17 +1,19 @@
 //! Voice-note transcription for the WhatsApp webview.
 //!
-//! `voice.js` frames each decrypted note as `[u16 id length][id][audio]` and
-//! `invoke`s it as raw bytes. Audio is posted to FluidVoice on `127.0.0.1`.
-//! Translation and summaries go out from here, so the page never holds an API key.
+//! `voice.js` frames each decrypted note as `[u16 id length][id][u64 message
+//! time][audio]` and `invoke`s it as raw bytes. A frame from an older page,
+//! without the time, is still accepted. Audio is posted to FluidVoice on
+//! `127.0.0.1`. Translation and summaries go out from here, so the page never
+//! holds an API key. The text is stored per account in [`crate::transcript_store`].
 
 use crate::i18n::tr;
-use crate::jsonfile::Loaded;
 use crate::keys;
 use crate::llm::{self, Completion};
 use crate::settings::{self, Settings};
-use serde::{Deserialize, Serialize};
+use crate::transcript_store::{self, Claim, NewNote};
+use serde::Serialize;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,28 +21,19 @@ use tauri::ipc::{InvokeBody, Request};
 use tauri::{AppHandle, Manager, Webview};
 
 pub const MAX_AUDIO: usize = 20 * 1024 * 1024;
+pub const MAX_VIDEO: usize = 64 * 1024 * 1024;
 
 /// The Windows beta button on fluidvoice.com. It redirects to the current
 /// official `FluidVoice_*_x64-setup.exe`. The page cannot supply another address.
 const FLUIDVOICE_WINDOWS_SETUP: &str = "https://fluidvoice.com/fluid/download/windows";
-const MAX_ITEMS: usize = 2_000;
 const FLUID_TRANSCRIBE_SECS: u64 = 180;
-
-pub struct VoiceState {
-    gate: tokio::sync::Mutex<()>,
-}
-
-impl Default for VoiceState {
-    fn default() -> Self {
-        Self {
-            gate: tokio::sync::Mutex::new(()),
-        }
-    }
-}
+/// Two length bytes, a 180-byte id, and an 8-byte message time.
+const FRAME_SLACK: usize = 190;
 
 #[derive(Clone, Serialize)]
 pub struct VoicePrefs {
     pub enabled: bool,
+    pub video: bool,
     pub translate: bool,
     pub target: String,
 }
@@ -69,25 +62,6 @@ pub struct FluidStatus {
     pub detail: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-struct Entry {
-    text: String,
-    at: u64,
-    #[serde(default)]
-    translation: Option<String>,
-    #[serde(default)]
-    translation_key: Option<String>,
-    #[serde(default)]
-    summary: Option<String>,
-    #[serde(default)]
-    summary_key: Option<String>,
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct Cache {
-    items: BTreeMap<String, Entry>,
-}
-
 pub fn push_prefs(app: &AppHandle, settings: &Settings) {
     let prefs = prefs_for(app, settings);
     let Ok(json) = serde_json::to_string(&prefs) else {
@@ -104,6 +78,7 @@ pub fn push_prefs(app: &AppHandle, settings: &Settings) {
 fn prefs_for(app: &AppHandle, settings: &Settings) -> VoicePrefs {
     VoicePrefs {
         enabled: settings.voice_transcribe && crate::lock::is_unlocked(app),
+        video: settings.video_transcribe && crate::lock::is_unlocked(app),
         translate: settings.translate_enabled,
         target: settings.translate_target_lang.clone(),
     }
@@ -126,22 +101,28 @@ pub fn voice_prefs(window: Webview, app: AppHandle) -> Result<VoicePrefs, String
     Ok(prefs_for(&app, &settings::load(&app)))
 }
 
+fn account_of(window: &Webview) -> Result<String, String> {
+    page(window)?;
+    crate::accounts::id_from_label(window.label())
+        .filter(|id| crate::todo::valid_account_id(id))
+        .map(str::to_string)
+        .ok_or_else(|| "forbidden".into())
+}
+
 #[tauri::command]
 pub async fn voice_lookup(
     window: Webview,
     app: AppHandle,
     id: String,
 ) -> Result<VoiceView, String> {
-    page(&window)?;
+    let account = account_of(&window)?;
     if !valid_message_id(&id) {
         return Err("bad_id".into());
     }
     if !crate::lock::is_unlocked(&app) {
         return Ok(disabled(id));
     }
-    let state = app.state::<VoiceState>();
-    let _gate = state.gate.lock().await;
-    lookup_cached(&app, id).await
+    lookup_stored(&app, &account, id).await
 }
 
 #[derive(Serialize)]
@@ -211,11 +192,18 @@ pub fn voice_transcripts(
     app: AppHandle,
     ids: Vec<String>,
 ) -> Result<Vec<VoiceTranscriptHit>, String> {
-    page(&window)?;
+    let account = account_of(&window)?;
     crate::lock::require_unlocked(&app)?;
-    // A transcription holds the voice gate for minutes. This is a read of a
-    // file that is replaced atomically, so it does not wait for that gate.
-    Ok(select_transcripts(&stored_transcripts(&app), &ids))
+    prepare_store(&app);
+    let Ok(dir) = transcripts_dir(&app) else {
+        return Ok(Vec::new());
+    };
+    let notes = transcript_store::by_tokens(&dir, &account, &ids).map_err(|err| {
+        crate::dlog::log(&format!("voice: read {err}"));
+        err
+    })?;
+    let stored: Vec<StoredTranscript> = notes.iter().filter_map(stored_of).collect();
+    Ok(select_transcripts(&stored, &ids))
 }
 
 #[tauri::command]
@@ -224,16 +212,39 @@ pub async fn transcribe_voice(
     app: AppHandle,
     request: Request<'_>,
 ) -> Result<VoiceView, String> {
-    page(&window)?;
-    let packed = payload_bytes(request.body())?;
-    let (id, audio) = split_payload(&packed).map_err(str::to_string)?;
+    let account = account_of(&window)?;
+    let packed = payload_limited(request.body(), MAX_AUDIO)?;
+    let framed = split_media(&packed, MAX_AUDIO).map_err(str::to_string)?;
     let settings = settings::load(&app);
     if !crate::lock::is_unlocked(&app) || !settings.voice_transcribe {
-        return Ok(disabled(id));
+        return Ok(disabled(framed.id));
     }
-    let state = app.state::<VoiceState>();
-    let _gate = state.gate.lock().await;
-    transcribe_locked(&app, &settings, id, audio).await
+    transcribe_locked(&app, &account, &settings, framed, "voice").await
+}
+
+#[tauri::command]
+pub async fn transcribe_video(
+    window: Webview,
+    app: AppHandle,
+    request: Request<'_>,
+) -> Result<VoiceView, String> {
+    let account = account_of(&window)?;
+    let packed = payload_limited(request.body(), MAX_VIDEO)?;
+    let framed = split_media(&packed, MAX_VIDEO).map_err(str::to_string)?;
+    drop(packed);
+    let settings = settings::load(&app);
+    if !crate::lock::is_unlocked(&app) || !settings.video_transcribe {
+        return Ok(disabled(framed.id));
+    }
+    let audio = crate::mp4audio::aac_m4a(&framed.audio).map_err(|err| err.code().to_string())?;
+    // The await below keeps every live local. Drop the picture before waiting
+    // on FluidVoice, which can take minutes.
+    let framed = Framed {
+        id: framed.id,
+        at_ms: framed.at_ms,
+        audio,
+    };
+    transcribe_locked(&app, &account, &settings, framed, "video").await
 }
 
 #[tauri::command]
@@ -242,39 +253,25 @@ pub async fn summarize_voice(
     app: AppHandle,
     id: String,
 ) -> Result<SummaryView, String> {
-    page(&window)?;
+    let account = account_of(&window)?;
     if !valid_message_id(&id) {
         return Err("bad_id".into());
     }
     crate::lock::require_unlocked(&app)?;
-    let state = app.state::<VoiceState>();
-    let _gate = state.gate.lock().await;
+    prepare_store(&app);
     let settings = settings::load(&app);
-    let path = cache_path(&app)?;
-    let mut cache = load_cache(&path);
-    let text = cache
-        .items
-        .get(&id)
-        .map(|entry| entry.text.clone())
-        .filter(|text| !text.trim().is_empty())
+    let dir = transcripts_dir(&app)?;
+    let note = transcript_store::load(&dir, &account, &id)?
+        .filter(|note| note.state == "ready" && !note.text.trim().is_empty())
         .ok_or_else(|| "no_transcript".to_string())?;
     let sum_key = summary_key(&settings);
-    if let Some(entry) = cache.items.get(&id) {
-        if entry.summary_key.as_deref() == Some(sum_key.as_str()) {
-            if let Some(summary) = &entry.summary {
-                return Ok(SummaryView {
-                    id,
-                    summary: summary.clone(),
-                });
-            }
+    if note.summary_key.as_deref() == Some(sum_key.as_str()) {
+        if let Some(summary) = note.summary.clone() {
+            return Ok(SummaryView { id, summary });
         }
     }
-    let summary = run_summary(&app, &settings, &text).await?;
-    if let Some(entry) = cache.items.get_mut(&id) {
-        entry.summary = Some(summary.clone());
-        entry.summary_key = Some(sum_key);
-    }
-    save_cache(&path, &mut cache)?;
+    let summary = run_summary(&app, &settings, &note.text).await?;
+    transcript_store::save_summary(&dir, &account, &id, &summary, &sum_key)?;
     Ok(SummaryView { id, summary })
 }
 
@@ -459,35 +456,86 @@ fn disabled(id: String) -> VoiceView {
     }
 }
 
-/// Cache hit, including a translation refresh. `Ok(None)` means there is no transcript yet.
-async fn lookup_cached(app: &AppHandle, id: String) -> Result<VoiceView, String> {
+fn missing(id: String) -> VoiceView {
+    VoiceView {
+        id,
+        status: "missing".into(),
+        text: String::new(),
+        translation: None,
+        notice: None,
+    }
+}
+
+fn loading(id: String) -> VoiceView {
+    VoiceView {
+        id,
+        status: "loading".into(),
+        text: String::new(),
+        translation: None,
+        notice: None,
+    }
+}
+
+fn transcripts_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| err.to_string())?
+        .join("transcripts");
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    Ok(dir)
+}
+
+fn config_file(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|err| err.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    Ok(dir.join(name))
+}
+
+fn prepare_store(app: &AppHandle) {
+    let (Ok(dir), Ok(json), Ok(marker)) = (
+        transcripts_dir(app),
+        config_file(app, transcript_store::LEGACY_JSON),
+        config_file(app, transcript_store::LEGACY_MARKER),
+    ) else {
+        return;
+    };
+    if let Err(err) = transcript_store::import_legacy(&dir, &json, &marker) {
+        crate::dlog::log(&format!("voice: legacy import {err}"));
+    }
+}
+
+/// A saved note, including a translation refresh. `missing` means there is no transcript yet.
+async fn lookup_stored(app: &AppHandle, account: &str, id: String) -> Result<VoiceView, String> {
     let settings = settings::load(app);
-    if !settings.voice_transcribe || !crate::lock::is_unlocked(app) {
+    if !crate::lock::is_unlocked(app) || (!settings.voice_transcribe && !settings.video_transcribe)
+    {
         return Ok(disabled(id));
     }
-    let path = cache_path(app)?;
-    let mut cache = load_cache(&path);
-    let Some(entry) = cache.items.get(&id) else {
-        return Ok(VoiceView {
-            id,
-            status: "missing".into(),
-            text: String::new(),
-            translation: None,
-            notice: None,
-        });
+    prepare_store(app);
+    let dir = transcripts_dir(app)?;
+    let Some(note) = transcript_store::read(&dir, account, &id)? else {
+        return Ok(missing(id));
     };
+    if note.state != "ready" {
+        // A crashed transcription leaves a running row. Let the page start
+        // again once the claim is older than a FluidVoice call.
+        if now_ms().saturating_sub(note.claimed_ms) >= FLUID_TRANSCRIBE_SECS * 1000 {
+            return Ok(missing(id));
+        }
+        return Ok(loading(id));
+    }
     // A stored transcript, even an empty one, is a finished result. The page
     // must not download the voice note again.
-    let text = entry.text.clone();
-    let (translation, notice) = match ensure_translation(app, &settings, &mut cache, &id).await {
+    let (translation, notice) = match ensure_translation(app, &settings, &dir, account, &note).await
+    {
         Ok(translation) => (translation, None),
         Err(code) => (None, Some(code.to_string())),
     };
-    save_cache(&path, &mut cache)?;
     Ok(VoiceView {
         id,
         status: "ready".into(),
-        text,
+        text: note.text,
         translation,
         notice,
     })
@@ -495,77 +543,94 @@ async fn lookup_cached(app: &AppHandle, id: String) -> Result<VoiceView, String>
 
 async fn transcribe_locked(
     app: &AppHandle,
+    account: &str,
     settings: &Settings,
-    id: String,
-    audio: Vec<u8>,
+    framed: Framed,
+    media: &'static str,
 ) -> Result<VoiceView, String> {
-    let path = cache_path(app)?;
-    let mut cache = load_cache(&path);
-    if cache.items.contains_key(&id) {
-        return finish_existing(app, settings, &path, cache, id).await;
-    }
-    let port = settings.fluidvoice_port;
-    let filename = audio_filename(&audio).to_string();
-    let bytes = audio.len();
-    let transcribed =
-        tauri::async_runtime::spawn_blocking(move || fluid_transcribe(port, &audio, &filename))
+    prepare_store(app);
+    let dir = transcripts_dir(app)?;
+    let id = framed.id.clone();
+    let claim = transcript_store::claim(
+        &dir,
+        account,
+        &NewNote {
+            id: id.clone(),
+            at_ms: framed.at_ms,
+            media,
+        },
+        now_ms(),
+        FLUID_TRANSCRIBE_SECS * 1000,
+    )?;
+    match claim {
+        Claim::Ready(note) => ready_note(app, settings, &dir, account, id, note).await,
+        Claim::Busy => Ok(loading(id)),
+        Claim::Owned(generation) => {
+            let audio = framed.audio;
+            let port = settings.fluidvoice_port;
+            let filename = audio_filename(&audio).to_string();
+            let bytes = audio.len();
+            let transcribed = tauri::async_runtime::spawn_blocking(move || {
+                fluid_transcribe(port, &audio, &filename)
+            })
             .await
             .map_err(|_| "fluidvoice".to_string())?;
-    let text = match transcribed {
-        Ok(text) => text,
-        Err(code) => {
-            crate::dlog::log(&format!("voice: transcribe bytes={bytes} err={code}"));
-            return Err(code.into());
+            let text = match transcribed {
+                Ok(text) => text,
+                Err(code) => {
+                    crate::dlog::log(&format!("voice: transcribe bytes={bytes} err={code}"));
+                    // A newer claim may have taken over after the timeout. Only
+                    // drop the row if it is still the one this call owns.
+                    let removed =
+                        transcript_store::release(&dir, account, &id, generation).unwrap_or(false);
+                    if !removed {
+                        return Ok(loading(id));
+                    }
+                    return Err(code.into());
+                }
+            };
+            crate::dlog::log(&format!("voice: transcribed bytes={bytes}"));
+            let saved = transcript_store::finish(
+                &dir,
+                account,
+                &id,
+                &text,
+                framed.at_ms,
+                now_ms(),
+                generation,
+            )?;
+            if !saved {
+                if let Some(note) = transcript_store::load(&dir, account, &id)? {
+                    if note.state == "ready" {
+                        return ready_note(app, settings, &dir, account, id, note).await;
+                    }
+                }
+                return Ok(loading(id));
+            }
+            let Some(note) = transcript_store::load(&dir, account, &id)? else {
+                return Err("claim".into());
+            };
+            ready_note(app, settings, &dir, account, id, note).await
         }
-    };
-    crate::dlog::log(&format!("voice: transcribed bytes={bytes}"));
-    cache.items.insert(
-        id.clone(),
-        Entry {
-            text: text.clone(),
-            at: now_ms(),
-            translation: None,
-            translation_key: None,
-            summary: None,
-            summary_key: None,
-        },
-    );
-    let (translation, notice) = match ensure_translation(app, settings, &mut cache, &id).await {
-        Ok(translation) => (translation, None),
-        Err(code) => (None, Some(code.to_string())),
-    };
-    save_cache(&path, &mut cache)?;
-    Ok(VoiceView {
-        id,
-        status: "ready".into(),
-        text,
-        translation,
-        notice,
-    })
+    }
 }
 
-async fn finish_existing(
+async fn ready_note(
     app: &AppHandle,
     settings: &Settings,
-    path: &Path,
-    mut cache: Cache,
+    dir: &Path,
+    account: &str,
     id: String,
+    note: transcript_store::Note,
 ) -> Result<VoiceView, String> {
-    crate::dlog::log("voice: cache hit");
-    let text = cache
-        .items
-        .get(&id)
-        .map(|entry| entry.text.clone())
-        .unwrap_or_default();
-    let (translation, notice) = match ensure_translation(app, settings, &mut cache, &id).await {
+    let (translation, notice) = match ensure_translation(app, settings, dir, account, &note).await {
         Ok(translation) => (translation, None),
         Err(code) => (None, Some(code.to_string())),
     };
-    save_cache(path, &mut cache)?;
     Ok(VoiceView {
         id,
         status: "ready".into(),
-        text,
+        text: note.text,
         translation,
         notice,
     })
@@ -575,33 +640,39 @@ async fn finish_existing(
 async fn ensure_translation(
     app: &AppHandle,
     settings: &Settings,
-    cache: &mut Cache,
-    id: &str,
+    dir: &Path,
+    account: &str,
+    note: &transcript_store::Note,
 ) -> Result<Option<String>, &'static str> {
     if !settings.translate_enabled {
         return Ok(None);
     }
     let key = translation_key(settings);
-    if let Some(entry) = cache.items.get(id) {
-        if entry.translation_key.as_deref() == Some(key.as_str()) {
-            return Ok(entry.translation.clone());
-        }
+    if note.translation_key.as_deref() == Some(key.as_str()) {
+        return Ok(note.translation.clone());
     }
-    let text = cache
-        .items
-        .get(id)
-        .map(|entry| llm::clip(&entry.text).to_string())
-        .unwrap_or_default();
+    let text = llm::clip(&note.text).to_string();
     if text.trim().is_empty() {
         return Ok(None);
     }
+    let owned = transcript_store::claim_translation(dir, account, &note.token, &key, now_ms())
+        .map_err(|_| "llm")?;
+    if !owned {
+        return wait_translation(dir, account, &note.token, &key).await;
+    }
     let api_key = match keys::get_key(app, &settings.ai_provider) {
         Ok(Some(key)) => key,
-        Ok(None) => return Err("no_key"),
-        Err(_) => return Err("no_key"),
+        Ok(None) => {
+            let _ = transcript_store::clear_translation_claim(dir, account, &note.token, &key);
+            return Err("no_key");
+        }
+        Err(_) => {
+            let _ = transcript_store::clear_translation_claim(dir, account, &note.token, &key);
+            return Err("no_key");
+        }
     };
     let (system, user) = llm::translate_prompt(&settings.translate_target_lang, &text);
-    let translated = llm::complete(Completion {
+    let translated = match llm::complete(Completion {
         provider: &settings.ai_provider,
         model: settings.ai_model(),
         key: &api_key,
@@ -611,12 +682,37 @@ async fn ensure_translation(
         thinking_budget: None,
         thinking_level: None,
     })
-    .await?;
-    if let Some(entry) = cache.items.get_mut(id) {
-        entry.translation = Some(translated.clone());
-        entry.translation_key = Some(key);
+    .await
+    {
+        Ok(text) => text,
+        Err(code) => {
+            let _ = transcript_store::clear_translation_claim(dir, account, &note.token, &key);
+            return Err(code);
+        }
+    };
+    if transcript_store::save_translation(dir, account, &note.token, &key, &translated).is_err() {
+        let _ = transcript_store::clear_translation_claim(dir, account, &note.token, &key);
+        return Err("llm");
     }
     Ok(Some(translated))
+}
+
+async fn wait_translation(
+    dir: &Path,
+    account: &str,
+    token: &str,
+    key: &str,
+) -> Result<Option<String>, &'static str> {
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let Ok(Some(note)) = transcript_store::load(dir, account, token) else {
+            continue;
+        };
+        if note.translation_key.as_deref() == Some(key) {
+            return Ok(note.translation);
+        }
+    }
+    Ok(None)
 }
 
 async fn run_summary(app: &AppHandle, settings: &Settings, text: &str) -> Result<String, String> {
@@ -661,108 +757,61 @@ pub(crate) struct StoredTranscript {
     pub text: String,
 }
 
-/// Every non-empty transcript, oldest first. The stand-in reads and searches
-/// these; the page never receives the whole cache.
-pub(crate) fn stored_transcripts(app: &AppHandle) -> Vec<StoredTranscript> {
-    let Ok(path) = cache_path(app) else {
-        return Vec::new();
-    };
-    let cache = load_cache(&path);
-    let mut notes: Vec<StoredTranscript> = cache
-        .items
-        .into_iter()
-        .filter_map(|(id, entry)| {
-            let text = entry.text.trim();
-            if text.is_empty() {
-                return None;
-            }
-            Some(StoredTranscript {
-                id,
-                at: entry.at,
-                text: text.to_string(),
-            })
-        })
-        .collect();
-    notes.sort_by(|left, right| left.at.cmp(&right.at).then_with(|| left.id.cmp(&right.id)));
-    notes
+fn stored_of(note: &transcript_store::Note) -> Option<StoredTranscript> {
+    let text = note.text.trim();
+    if note.state != "ready" || text.is_empty() {
+        return None;
+    }
+    Some(StoredTranscript {
+        id: note.id.clone(),
+        at: note.at_ms,
+        text: text.to_string(),
+    })
 }
 
-pub(crate) fn cached_transcript(app: &AppHandle, id_or_token: &str) -> Option<String> {
+/// Non-empty transcripts for these chats, oldest message first.
+pub(crate) fn transcripts_for_chats(
+    app: &AppHandle,
+    account: &str,
+    chats: &[String],
+) -> Vec<StoredTranscript> {
+    prepare_store(app);
+    let Ok(dir) = transcripts_dir(app) else {
+        return Vec::new();
+    };
+    match transcript_store::by_chats(&dir, account, chats) {
+        Ok(notes) => notes.iter().filter_map(stored_of).collect(),
+        Err(err) => {
+            crate::dlog::log(&format!("voice: read {err}"));
+            Vec::new()
+        }
+    }
+}
+
+pub(crate) fn cached_transcript(
+    app: &AppHandle,
+    account: &str,
+    id_or_token: &str,
+) -> Option<String> {
     let needle = id_or_token.trim();
     if needle.is_empty() {
         return None;
     }
-    let path = cache_path(app).ok()?;
-    let cache = load_cache(&path);
-    let wanted = {
-        let token = crate::todo::message_token(needle);
-        if token.is_empty() {
-            needle.to_string()
-        } else {
-            token
-        }
-    };
-    let text_of = |entry: &Entry| {
-        let text = entry.text.trim();
-        if text.is_empty() {
-            None
-        } else {
-            Some(text.to_string())
-        }
-    };
-    if let Some(found) = cache.items.get(needle).and_then(text_of) {
-        return Some(found);
-    }
-    cache.items.iter().find_map(|(id, entry)| {
-        let token = crate::todo::message_token(id);
-        if id == needle || (!wanted.is_empty() && (token == wanted || id == &wanted)) {
-            text_of(entry)
-        } else {
-            None
-        }
-    })
-}
-
-fn cache_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("voice-transcripts.json"))
+    prepare_store(app);
+    let dir = transcripts_dir(app).ok()?;
+    let note = transcript_store::read(&dir, account, needle).ok()??;
+    stored_of(&note).map(|note| note.text)
 }
 
 pub(crate) fn embed_cache_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(cache_path(app)?.with_file_name("voice-embeddings.json"))
+    config_file(app, "voice-embeddings.json")
 }
 
-fn load_cache(path: &Path) -> Cache {
-    match crate::jsonfile::read(path) {
-        Loaded::Ok(cache) | Loaded::Recovered(cache) => cache,
-        Loaded::Missing => Cache::default(),
-        Loaded::Corrupt => {
-            crate::jsonfile::preserve_corrupt(path);
-            Cache::default()
-        }
-    }
-}
-
-fn save_cache(path: &Path, cache: &mut Cache) -> Result<(), String> {
-    prune(cache);
-    crate::jsonfile::save(path, cache).map_err(|e| e.to_string())
-}
-
-fn prune(cache: &mut Cache) {
-    if cache.items.len() <= MAX_ITEMS {
+pub fn delete_account(app: &AppHandle, account: &str) {
+    let Ok(dir) = app.path().app_data_dir() else {
         return;
-    }
-    let mut order: Vec<(u64, String)> = cache
-        .items
-        .iter()
-        .map(|(id, entry)| (entry.at, id.clone()))
-        .collect();
-    order.sort_by_key(|(at, _)| *at);
-    let extra = cache.items.len() - MAX_ITEMS;
-    for (_, id) in order.into_iter().take(extra) {
-        cache.items.remove(&id);
-    }
+    };
+    transcript_store::remove_account(&dir.join("transcripts"), account);
 }
 
 fn now_ms() -> u64 {
@@ -794,9 +843,32 @@ pub fn valid_message_id(id: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'@' | b'.' | b'_' | b'-' | b'+'))
 }
 
-/// `[u16 big-endian id length][utf-8 id][audio]`.
+#[derive(Debug)]
+struct Framed {
+    id: String,
+    at_ms: u64,
+    audio: Vec<u8>,
+}
+
+fn container_at(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"OggS")
+        || bytes.starts_with(b"RIFF")
+        || bytes.starts_with(b"ID3")
+        || bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
+        || (bytes.len() >= 8 && &bytes[4..8] == b"ftyp")
+}
+
+/// `[u16 big-endian id length][utf-8 id][audio]`, or the same frame with an
+/// 8-byte big-endian message time before the audio. An older page omits the
+/// time; the audio container marks which shape this is.
+#[cfg(test)]
 pub fn split_payload(bytes: &[u8]) -> Result<(String, Vec<u8>), &'static str> {
-    if bytes.len() > MAX_AUDIO + 182 {
+    let framed = split_media(bytes, MAX_AUDIO)?;
+    Ok((framed.id, framed.audio))
+}
+
+fn split_media(bytes: &[u8], max_media: usize) -> Result<Framed, &'static str> {
+    if bytes.len() > max_media.saturating_add(FRAME_SLACK) {
         return Err("too_large");
     }
     if bytes.len() < 3 {
@@ -810,26 +882,42 @@ pub fn split_payload(bytes: &[u8]) -> Result<(String, Vec<u8>), &'static str> {
     if !valid_message_id(id) {
         return Err("bad_id");
     }
-    let audio = bytes[2 + len..].to_vec();
+    let rest = &bytes[2 + len..];
+    let (at_ms, audio) = if rest.len() >= 8 && !container_at(rest) && container_at(&rest[8..]) {
+        let at = u64::from_be_bytes(rest[..8].try_into().unwrap_or([0; 8]));
+        (at, rest[8..].to_vec())
+    } else {
+        (0, rest.to_vec())
+    };
     if audio.is_empty() {
         return Err("bad_audio");
     }
-    if audio.len() > MAX_AUDIO {
+    if audio.len() > max_media {
         return Err("too_large");
     }
-    Ok((id.to_string(), audio))
+    Ok(Framed {
+        id: id.to_string(),
+        at_ms,
+        audio,
+    })
 }
 
-fn payload_bytes(body: &InvokeBody) -> Result<Vec<u8>, String> {
+fn payload_limited(body: &InvokeBody, max_media: usize) -> Result<Vec<u8>, String> {
+    let max = max_media.saturating_add(FRAME_SLACK);
     match body {
-        InvokeBody::Raw(bytes) => Ok(bytes.clone()),
-        InvokeBody::Json(value) => json_bytes(value),
+        InvokeBody::Raw(bytes) => {
+            if bytes.len() > max {
+                return Err("too_large".into());
+            }
+            Ok(bytes.clone())
+        }
+        InvokeBody::Json(value) => json_bytes(value, max),
     }
 }
 
-fn json_bytes(value: &Value) -> Result<Vec<u8>, String> {
+fn json_bytes(value: &Value, max: usize) -> Result<Vec<u8>, String> {
     let arr = value.as_array().ok_or("bad_audio")?;
-    if arr.len() > MAX_AUDIO + 182 {
+    if arr.len() > max {
         return Err("too_large".into());
     }
     let mut out = Vec::with_capacity(arr.len());
@@ -1071,6 +1159,123 @@ fn fresh_note_path(filename: &str) -> PathBuf {
     )
 }
 
+struct TempAudio {
+    path: PathBuf,
+}
+
+impl Drop for TempAudio {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Delete leftover FluidVoice temp audio. A file newer than the request limit
+/// whose process is still running belongs to another open window.
+pub fn sweep_note_files() {
+    sweep_notes_in(&std::env::temp_dir(), SystemTime::now(), process_alive);
+}
+
+fn sweep_notes_in(dir: &Path, now: SystemTime, alive: impl Fn(u32) -> bool) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().into_string().ok() else {
+            continue;
+        };
+        let Some(pid) = note_file_pid(&name) else {
+            continue;
+        };
+        let path = entry.path();
+        if keep_note(&path, pid, now, &alive) {
+            continue;
+        }
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn note_file_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("whatrust-note-")?;
+    let (pid, rest) = rest.split_once('-')?;
+    let (token, ext) = rest.split_once('.')?;
+    if pid.is_empty()
+        || token.is_empty()
+        || !pid.chars().all(|c| c.is_ascii_digit())
+        || !token.chars().all(|c| c.is_ascii_digit())
+        || ext.is_empty()
+        || ext.len() > 8
+        || !ext.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+fn keep_note(path: &Path, pid: u32, now: SystemTime, alive: &impl Fn(u32) -> bool) -> bool {
+    let Ok(modified) = std::fs::metadata(path).and_then(|meta| meta.modified()) else {
+        return false;
+    };
+    let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
+    age <= Duration::from_secs(FLUID_TRANSCRIBE_SECS) && alive(pid)
+}
+
+fn probe_process(pid: u32, bins: &[&str]) -> bool {
+    if bins.is_empty() {
+        return true;
+    }
+    for bin in bins {
+        match std::process::Command::new(bin)
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(status) => return status.success(),
+            Err(_) => continue,
+        }
+    }
+    true
+}
+
+fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    if pid == std::process::id() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        // A packaged app often has no PATH, so a bare `kill` fails to spawn.
+        // Failing the check must keep a fresh note another window is sending.
+        probe_process(pid, &["/bin/kill", "/usr/bin/kill"])
+    }
+    #[cfg(windows)]
+    {
+        windows_process_alive(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+#[cfg(windows)]
+fn windows_process_alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let _ = CloseHandle(handle);
+        true
+    }
+}
+
 enum Attempt {
     Down,
     Status(u16, String),
@@ -1082,7 +1287,7 @@ fn post_once(
     transport: Transport,
     audio: &[u8],
     filename: &str,
-    temp: &mut Option<PathBuf>,
+    temp: &mut Option<TempAudio>,
 ) -> Result<String, Attempt> {
     let url = transcribe_url(port, labels);
     let response = match transport {
@@ -1096,18 +1301,18 @@ fn post_once(
             .set("Content-Type", "application/json")
             .send_string(&base64_body(filename, audio)),
         Transport::File => {
-            let path = match temp.clone() {
-                Some(path) => path,
-                None => {
-                    let path = fresh_note_path(filename);
-                    if std::fs::write(&path, audio).is_err() {
-                        let _ = std::fs::remove_file(&path);
-                        return Err(Attempt::Down);
-                    }
-                    *temp = Some(path.clone());
-                    path
+            if temp.is_none() {
+                let path = fresh_note_path(filename);
+                if std::fs::write(&path, audio).is_err() {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(Attempt::Down);
                 }
-            };
+                *temp = Some(TempAudio { path });
+            }
+            let path = temp
+                .as_ref()
+                .map(|note| note.path.clone())
+                .ok_or(Attempt::Down)?;
             llm::client(Duration::from_secs(FLUID_TRANSCRIBE_SECS))
                 .post(&url)
                 .set("Content-Type", "application/json")
@@ -1137,6 +1342,7 @@ fn post_once(
 }
 
 fn fluid_transcribe(port: u16, audio: &[u8], filename: &str) -> Result<String, &'static str> {
+    sweep_note_files();
     let labels = wants_speaker_labels(audio);
     let mut temp = None;
     let result = (|| {
@@ -1178,9 +1384,7 @@ fn fluid_transcribe(port: u16, audio: &[u8], filename: &str) -> Result<String, &
         crate::dlog::log("voice: fluidvoice rejected every transport");
         Err("fluidvoice")
     })();
-    if let Some(path) = temp {
-        let _ = std::fs::remove_file(path);
-    }
+    drop(temp);
     result
 }
 
@@ -1198,6 +1402,17 @@ mod tests {
         out
     }
 
+    fn frame_at(id: &str, at_ms: u64, audio: &[u8]) -> Vec<u8> {
+        let id_bytes = id.as_bytes();
+        let mut out = Vec::with_capacity(2 + id_bytes.len() + 8 + audio.len());
+        let len = u16::try_from(id_bytes.len()).unwrap();
+        out.extend(len.to_be_bytes());
+        out.extend(id_bytes);
+        out.extend(at_ms.to_be_bytes());
+        out.extend(audio);
+        out
+    }
+
     #[test]
     fn framed_opus_round_trips() {
         let id = "false_123@c.us_ABC";
@@ -1206,6 +1421,18 @@ mod tests {
         assert_eq!(parsed, id);
         assert_eq!(bytes, audio);
         assert_eq!(audio_filename(&bytes), "note.opus");
+        let old = split_media(&frame(id, audio), MAX_AUDIO).unwrap();
+        assert_eq!(old.at_ms, 0);
+        let timed = split_media(&frame_at(id, 1_700_000_000_000, audio), MAX_AUDIO).unwrap();
+        assert_eq!(timed.at_ms, 1_700_000_000_000);
+        assert_eq!(timed.audio, audio);
+        let unknown = split_media(&frame(id, b"not-a-container"), MAX_AUDIO).unwrap();
+        assert_eq!(unknown.at_ms, 0);
+        assert_eq!(unknown.audio, b"not-a-container");
+        let webm = [0x1A, 0x45, 0xDF, 0xA3, 1, 2, 3, 4];
+        let timed = split_media(&frame_at(id, 42, &webm), MAX_AUDIO).unwrap();
+        assert_eq!(timed.at_ms, 42);
+        assert_eq!(timed.audio, webm);
     }
 
     #[test]
@@ -1220,7 +1447,7 @@ mod tests {
             "bad_audio"
         );
         let mut huge = frame("false_123@c.us_ABC", b"x");
-        huge.resize(MAX_AUDIO + 183, 1);
+        huge.resize(MAX_AUDIO + FRAME_SLACK + 1, 1);
         assert_eq!(split_payload(&huge).unwrap_err(), "too_large");
     }
 
@@ -1380,34 +1607,10 @@ mod tests {
     }
 
     #[test]
-    fn cache_keeps_the_newest_entries() {
-        let mut cache = Cache::default();
-        for n in 0..MAX_ITEMS + 3 {
-            cache.items.insert(
-                format!("false_1@c.us_{n:04}"),
-                Entry {
-                    text: "t".into(),
-                    at: n as u64,
-                    translation: None,
-                    translation_key: None,
-                    summary: None,
-                    summary_key: None,
-                },
-            );
-        }
-        prune(&mut cache);
-        assert_eq!(cache.items.len(), MAX_ITEMS);
-        assert!(!cache.items.contains_key("false_1@c.us_0000"));
-        assert!(cache
-            .items
-            .contains_key(&format!("false_1@c.us_{:04}", MAX_ITEMS + 2)));
-    }
-
-    #[test]
     fn json_number_arrays_are_accepted_as_a_frame() {
         let framed = frame("false_123@c.us_ABC", b"OggShi");
         let value = Value::Array(framed.iter().map(|b| Value::from(*b)).collect());
-        let bytes = json_bytes(&value).unwrap();
+        let bytes = json_bytes(&value, MAX_AUDIO + 182).unwrap();
         assert_eq!(split_payload(&bytes).unwrap().0, "false_123@c.us_ABC");
     }
 
@@ -1442,5 +1645,95 @@ mod tests {
         ids[0] = "false_1@c.us_BBB".into();
         let hits = select_transcripts(&stored, &ids);
         assert!(hits.iter().all(|hit| hit.id != "false_1@c.us_BBB"));
+    }
+
+    #[test]
+    fn video_frame_accepts_64_mb_and_refuses_one_more() {
+        let id = "false_123@c.us_ABC";
+        let mut ok = frame(id, b"");
+        ok.resize(2 + id.len() + MAX_VIDEO, 1);
+        let framed = split_media(&ok, MAX_VIDEO).unwrap();
+        assert_eq!(framed.id, id);
+        assert_eq!(framed.audio.len(), MAX_VIDEO);
+        ok.push(1);
+        assert_eq!(split_media(&ok, MAX_VIDEO).unwrap_err(), "too_large");
+    }
+
+    static NEXT_SCRATCH: AtomicU64 = AtomicU64::new(1);
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "whatrust-{name}-{}-{}",
+            std::process::id(),
+            NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_finished_note_file_is_removed() {
+        let dir = scratch_dir("drop");
+        let path = note_temp_path(&dir, "note.m4a", 1);
+        std::fs::write(&path, b"audio").unwrap();
+        {
+            let _guard = TempAudio { path: path.clone() };
+            assert!(path.exists());
+        }
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leftover_note_files_are_swept() {
+        let dir = scratch_dir("sweep");
+        let old = dir.join("whatrust-note-4242-1.m4a");
+        let fresh = dir.join("whatrust-note-4242-2.opus");
+        let dead = dir.join("whatrust-note-7-3.m4a");
+        let other = dir.join("notes.txt");
+        for path in [&old, &fresh, &dead, &other] {
+            std::fs::write(path, b"audio").unwrap();
+        }
+        let file = std::fs::OpenOptions::new().write(true).open(&old).unwrap();
+        file.set_modified(SystemTime::now() - Duration::from_secs(FLUID_TRANSCRIBE_SECS + 5))
+            .unwrap();
+        sweep_notes_in(&dir, SystemTime::now(), |pid| pid == 4242);
+        assert!(!old.exists());
+        assert!(fresh.exists());
+        assert!(!dead.exists());
+        assert!(other.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_kill_binary_keeps_a_fresh_note() {
+        assert!(probe_process(1, &["/no/such/whatrust-kill"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_live_process_keeps_its_note_and_a_dead_one_does_not() {
+        let kill = if Path::new("/bin/kill").exists() {
+            "/bin/kill"
+        } else {
+            "/usr/bin/kill"
+        };
+        if !Path::new(kill).exists() {
+            return;
+        }
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let alive = probe_process(pid, &[kill]);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(alive);
+        assert!(!probe_process(pid, &[kill]));
     }
 }

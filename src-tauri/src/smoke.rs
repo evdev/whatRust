@@ -71,8 +71,9 @@ pub fn start(app: &AppHandle) {
                 &std::env::args().collect::<Vec<_>>(),
             );
             result.push(json!({"test":"startup_visibility_matches_explicit_foreground_request","pass":app.get_window("main").unwrap().is_visible().unwrap_or(false)!=startup_hidden}));
-            crate::dlog::log("smoke: two_live_profiles");
-            result.push(json!({"test":"two_live_profiles","pass":app.get_webview(&label).is_some()&&app.get_webview(&crate::accounts::window_label(&b.id)).is_some()}));
+            let second = crate::accounts::window_label(&b.id);
+            crate::dlog::log("smoke: startup_loads_one_profile");
+            result.push(json!({"test":"startup_loads_one_profile","pass":app.get_webview(&label).is_some()&&app.get_webview(&second).is_none()}));
             // Reproduce the installed-app regression: the page reports no
             // anchor while loading/QR login, then mounts/unmounts its header.
             crate::sessions::activate(&app, &label);
@@ -128,6 +129,14 @@ pub fn start(app: &AppHandle) {
             crate::dlog::log("smoke: reattach_preserves_view");
             result.push(json!({"test":"reattach_preserves_view","pass":app.get_webview(&label).unwrap().window().label()=="main"&&eval(&app,&label,"window.__whatrustSmokeToken==='same-live-view'")?=="true"}));
             let second_label = crate::accounts::window_label(&b.id);
+            // Switching through the product path drops the account that left
+            // the screen. Reopen it afterwards: the reparent tests need both
+            // views, and they switch with activate rather than show_account.
+            crate::window::open_account_window(&app, b, true).map_err(|e| e.to_string())?;
+            crate::window::show_account(&app, &label);
+            let released = wait_until(|| app.get_webview(&second_label).is_none());
+            result.push(json!({"test":"switch_releases_background_profile","pass":released&&app.get_webview(&label).is_some()}));
+            crate::window::open_account_window(&app, b, true).map_err(|e| e.to_string())?;
             crate::sessions::activate(&app, &label);
             eval(
                 &app,

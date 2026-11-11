@@ -9,6 +9,7 @@
   var ARM_SLACK_MS = 5000;
   var MAX_BATCH_MS = 30000;
   var HISTORY_CAP = 500;
+  var HISTORY_CHAT_CAP = 8;
 
   function fold(value) {
     return String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -183,15 +184,40 @@
     return;
   }
 
-  var prefs = { enabled: false, delay_secs: 10, voice: false, backend: "api" };
+  var prefs = { enabled: false, delay_secs: 10, voice: false, video: false, backend: "api", backend_id: "api", agent: false, grok_host: "" };
   var chats = {};
   var privacyAck = false;
   var timers = {};
   var batchStart = {};
   var pending = {};
   var inflight = {};
-  var history = {};
   var busy = {};
+  var history = {};
+  var historyOrder = [];
+
+  function touchHistory(chatId) {
+    if (!chatId) return;
+    var next = [];
+    for (var i = 0; i < historyOrder.length; i++) {
+      if (historyOrder[i] !== chatId && history[historyOrder[i]]) next.push(historyOrder[i]);
+    }
+    next.push(chatId);
+    var protect = activeChat();
+    var protectId = protect && protect.id;
+    while (next.length > HISTORY_CHAT_CAP) {
+      var index = -1;
+      for (var n = 0; n < next.length; n++) {
+        var candidate = next[n];
+        if (candidate === protectId || busy[candidate] || inflight[candidate] || timers[candidate] || pending[candidate]) continue;
+        index = n;
+        break;
+      }
+      if (index < 0) break;
+      var drop = next.splice(index, 1)[0];
+      delete history[drop];
+    }
+    historyOrder = next;
+  }
   var host = null;
   var shadow = null;
   var panelHost = null;
@@ -334,7 +360,11 @@
     prefs.enabled = !!snapshot.enabled;
     prefs.delay_secs = snapshot.delay_secs || prefs.delay_secs;
     prefs.voice = !!snapshot.voice;
+    prefs.video = !!snapshot.video;
     prefs.backend = snapshot.backend || prefs.backend;
+    prefs.backend_id = snapshot.backend_id || "api";
+    prefs.agent = !!snapshot.agent;
+    prefs.grok_host = snapshot.grok_host || "";
     privacyAck = !!snapshot.privacy_ack;
     var next = {};
     (snapshot.chats || []).forEach(function (chat) {
@@ -361,7 +391,12 @@
     prefs.enabled = !!next.enabled;
     prefs.delay_secs = next.delay_secs || 10;
     prefs.voice = !!next.voice;
+    prefs.video = !!next.video;
     prefs.backend = next.backend || prefs.backend;
+    prefs.backend_id = next.backend_id || prefs.backend_id;
+    if (typeof next.agent === "boolean") prefs.agent = next.agent;
+    if (typeof next.grok_host === "string") prefs.grok_host = next.grok_host;
+    if (typeof next.privacy_ack === "boolean") privacyAck = next.privacy_ack;
     if (!prefs.enabled) {
       Object.keys(timers).forEach(function (id) { clearTimeout(timers[id]); });
       timers = {};
@@ -419,10 +454,19 @@
   }
 
   function backendLabel(id) {
-    if (id === "claude_cli") return "Claude";
-    if (id === "grok_cli") return "Grok";
-    if (id === "codex_cli") return "Codex";
+    if (id === "claude_cli" || id === "Claude Code") return "Claude Code";
+    if (id === "grok_cli" || id === "Grok") return "Grok";
+    if (id === "codex_cli" || id === "Codex") return "Codex";
+    if (id === "hermes" || id === "Hermes") return "Hermes";
+    if (id === "grok_bot" || id === "Grok Bot") return "Grok Bot";
+    if (id === "Gemini" || id === "Anthropic" || id === "OpenRouter") return id;
     return "the API";
+  }
+
+  function accessWord(value) {
+    if (value === "read") return "Lookups";
+    if (value === "full") return "Full tools";
+    return "Memory only";
   }
 
   function ensurePanel() {
@@ -464,7 +508,8 @@
       ".foot .primary{margin-inline-end:auto}",
       ".confirm{margin-top:12px;padding:12px;border-radius:12px;background:var(--field)}",
       ".confirm p{margin:0;font-size:12.5px}",
-      ".confirm .btn{margin-top:10px}"
+      ".confirm .btn{margin-top:10px}",
+      "select,input{display:block;width:100%;box-sizing:border-box;margin-top:6px;border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--field);color:var(--fg)}"
     ].join("");
     panelShadow.appendChild(style);
     panelHost.addEventListener("mousedown", function (event) { event.stopPropagation(); });
@@ -623,7 +668,8 @@
       return;
     }
     var status = statusOf(current.id);
-    var shown = (prefs.enabled ? "on:" : "off:") + status;
+    var access = (rowFor(current.id) && rowFor(current.id).access) || "memory";
+    var shown = (prefs.enabled ? "on:" : "off:") + status + ":" + (prefs.agent ? access : "") + ":" + (prefs.backend_id || "");
     var label = prefs.enabled && status === "armed"
       ? "Stand-in: On"
       : prefs.enabled && status === "paused"
@@ -703,6 +749,50 @@
     }
     var row = document.createElement("div");
     row.className = "row";
+    if (prefs.agent) {
+      var accessField = document.createElement("label");
+      accessField.className = "field";
+      var accessLabel = document.createElement("span");
+      accessLabel.textContent = "What the agent may do";
+      var accessSelect = document.createElement("select");
+      accessSelect.setAttribute("aria-label", "What the agent may do");
+      [["memory", "Memory only"], ["read", "Lookups"], ["full", "Full tools"]].forEach(function (pair) {
+        var opt = document.createElement("option");
+        opt.value = pair[0];
+        opt.textContent = pair[1];
+        if (pair[0] === access) opt.selected = true;
+        accessSelect.appendChild(opt);
+      });
+      var confirmTools = document.createElement("input");
+      confirmTools.type = "text";
+      confirmTools.placeholder = "Type allow tools";
+      confirmTools.setAttribute("aria-label", "Type allow tools");
+      confirmTools.hidden = true;
+      var applyTools = document.createElement("button");
+      applyTools.type = "button";
+      applyTools.className = "btn";
+      applyTools.textContent = "Use full tools";
+      applyTools.hidden = true;
+      accessSelect.addEventListener("change", function () {
+        if (accessSelect.value === "full" && access !== "full") {
+          confirmTools.hidden = false;
+          applyTools.hidden = false;
+          return;
+        }
+        confirmTools.hidden = true;
+        applyTools.hidden = true;
+        if (accessSelect.value === access) return;
+        setAccess(current, accessSelect.value, "");
+      });
+      applyTools.addEventListener("click", function () {
+        setAccess(current, "full", confirmTools.value);
+      });
+      accessField.appendChild(accessLabel);
+      accessField.appendChild(accessSelect);
+      accessField.appendChild(confirmTools);
+      accessField.appendChild(applyTools);
+      panel.appendChild(accessField);
+    }
     function button(text, kind, fn) {
       var el = document.createElement("button");
       el.type = "button";
@@ -881,7 +971,16 @@
     var note = document.createElement("div");
     note.className = "confirm";
     var copy = document.createElement("p");
-    copy.textContent = "Messages in this chat will be sent to " + backendLabel(prefs.backend) + ".";
+    var where = backendLabel(prefs.backend_id || prefs.backend);
+    var level = accessWord((rowFor(current.id) && rowFor(current.id).access) || "memory");
+    if (prefs.agent) {
+      copy.textContent = "Messages in this chat go to " + where + ". It can use the access level shown (" + level + "), and it may act and keep a copy.";
+      if (prefs.backend_id === "grok_bot" && prefs.grok_host) {
+        copy.textContent += " Webhook host: " + prefs.grok_host + ".";
+      }
+    } else {
+      copy.textContent = "Messages in this chat will be sent to " + where + ".";
+    }
     var yes = document.createElement("button");
     yes.type = "button";
     yes.className = "btn primary";
@@ -946,6 +1045,20 @@
     });
   }
 
+  function setAccess(current, access, confirm) {
+    invoke("autoreply_set_access", {
+      chat_id: current.id,
+      access: access,
+      confirm: confirm || "",
+    }).then(function (snapshot) {
+      applySnapshot(snapshot);
+      open = true;
+      paint(true);
+    }).catch(function (error) {
+      showBanner(current.id, docError(error, "Could not change what the agent may do."));
+    });
+  }
+
   function docError(error, fallback) {
     var text = typeof error === "string" ? error : String(error || "");
     invoke("dlog", { msg: ("stand-in: " + text).slice(0, 240) }).catch(function () {});
@@ -993,7 +1106,7 @@
     // A media message's body is its caption, and the reply often depends on the
     // picture itself, so say so instead of letting the model read the caption
     // as the whole message.
-    if (/image|video|document|sticker/.test(type)) {
+    if (/image|video|document|sticker/.test(type) || type === "ptv") {
       var caption = String(msg.body || msg.caption || "").trim();
       text = caption ? "[" + type + "] " + caption : "[" + type + "]";
     }
@@ -1015,7 +1128,7 @@
   function loadRecent(chatId) {
     var wpp = root.WPP;
     if (!wpp || !wpp.chat || typeof wpp.chat.getMessages !== "function") return Promise.resolve([]);
-    return Promise.resolve(wpp.chat.getMessages(chatId, { count: 25 })).then(function (list) {
+    return Promise.resolve(wpp.chat.getMessages(chatId, { count: prefs.agent ? 40 : 25 })).then(function (list) {
       return (list || []).map(mapMessage).filter(function (msg) { return msg.id; })
         .sort(function (a, b) { return a.timestamp_ms - b.timestamp_ms; });
     }).catch(function () { return []; });
@@ -1037,6 +1150,7 @@
       merged.sort(function (a, b) { return a.timestamp_ms - b.timestamp_ms; });
       if (merged.length > HISTORY_CAP) merged = merged.slice(merged.length - HISTORY_CAP);
       history[chatId] = merged;
+      touchHistory(chatId);
       return merged;
     }).catch(function () { return have; });
   }
@@ -1062,6 +1176,24 @@
       }).catch(function () {});
     }
     return Promise.all(voice.map(poll)).then(function () { return messages; });
+  }
+
+  function attachVideo(messages) {
+    if (!prefs.video) return Promise.resolve(messages);
+    var videos = (messages || []).filter(function (msg) {
+      return msg && !msg.from_me && (msg.kind === "video" || msg.kind === "ptv");
+    });
+    if (!videos.length) return Promise.resolve(messages);
+    return Promise.all(videos.map(function (msg) {
+      return invoke("voice_lookup", { id: msg.id }).then(function (view) {
+        if (!view || view.status !== "ready" || !view.text) return;
+        var caption = "";
+        var matched = /^\[(?:video|ptv)\]\s*([\s\S]*)$/.exec(msg.text || "");
+        if (matched) caption = matched[1].trim();
+        var spoken = String(view.text).trim();
+        msg.text = (caption ? caption + " — " + spoken : spoken).slice(0, 2000);
+      }).catch(function () {});
+    })).then(function () { return messages; });
   }
 
   function sendText(chatId, step) {
@@ -1147,6 +1279,7 @@
       messages.sort(function (a, b) { return a.timestamp_ms - b.timestamp_ms; });
       if (messages.length > HISTORY_CAP) messages = messages.slice(messages.length - HISTORY_CAP);
       history[chatId] = messages.slice();
+      touchHistory(chatId);
       var incomingIds = [];
       var incoming = [];
       messages.forEach(function (have) {
@@ -1157,6 +1290,8 @@
       });
       if (!round && !incomingIds.length) return { messages: messages, incomingIds: incomingIds, skip: true };
       return waitVoice(incoming).then(function () {
+        return attachVideo(incoming);
+      }).then(function () {
         return { messages: messages, incomingIds: incomingIds };
       });
     }).then(function (ready) {

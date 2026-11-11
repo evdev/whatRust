@@ -2604,6 +2604,9 @@
         }
       }).catch(function () {});
     });
+    Object.keys(catchupChatAt).forEach(function (chat) {
+      if (now - catchupChatAt[chat] >= 60000) delete catchupChatAt[chat];
+    });
   }
 
   function armReplyWatch() {

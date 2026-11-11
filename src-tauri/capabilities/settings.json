@@ -46,7 +46,9 @@
     "allow-autoreply-reset-persona",
     "allow-autoreply-open-persona",
     "allow-list-standin-cli-models",
-    "allow-standin-cli-status"
+    "allow-standin-cli-status",
+    "allow-set-standin-secret",
+    "allow-standin-agent-status"
   ],
   "webviews": [
     "settings"

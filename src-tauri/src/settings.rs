@@ -19,13 +19,14 @@ pub struct Settings {
     pub notify_active_chat: bool,
     pub respect_muted: bool,
     /// macOS only: the app lives in the menu bar, no Dock icon and no
-    /// standard window. Every account stays connected in the background and
-    /// opens as a panel from the tray. Off by default. Ignored on other platforms.
+    /// standard window. The open account stays connected while its panel is
+    /// hidden; other accounts load when opened. Off by default. Ignored
+    /// elsewhere.
     pub menubar_only: bool,
-    /// Linux/macOS: host every account in one window with a switcher instead
-    /// of one window per account. Off by default; applies after a restart.
-    /// Windows always uses a single window. Menu-bar-only mode wins if both
-    /// are on.
+    /// Linux/macOS: host accounts in one window with a switcher instead of one
+    /// window per account. Only the open account stays loaded. Off by default;
+    /// applies after a restart. Windows always uses a single window.
+    /// Menu-bar-only mode wins if both are on.
     pub single_window: bool,
     /// macOS only: hide the Dock icon but keep the normal main window. The
     /// menu bar icon is forced on, since it becomes the way back to the app.
@@ -44,6 +45,9 @@ pub struct Settings {
     pub language: String,
     /// Transcribe WhatsApp voice notes with the local FluidVoice API.
     pub voice_transcribe: bool,
+    /// Transcribe WhatsApp videos with the local FluidVoice API.
+    /// Off until the user turns it on, including settings saved by an older build.
+    pub video_transcribe: bool,
     /// FluidVoice local API port. `47733` is FluidVoice's own default.
     pub fluidvoice_port: u16,
     /// Translate each transcript into `translate_target_lang`.
@@ -63,7 +67,7 @@ pub struct Settings {
     pub summary_model_anthropic: Option<String>,
     /// Master switch for the per-chat stand-in. Off until the user turns it on.
     pub standin_enabled: bool,
-    /// `api`, `claude_cli`, `grok_cli`, or `codex_cli`.
+    /// `api`, `claude_cli`, `grok_cli`, `codex_cli`, `hermes`, or `grok_bot`.
     pub standin_backend: String,
     /// Optional stand-in model for each API provider. Empty uses the summary model.
     pub standin_model_openrouter: Option<String>,
@@ -85,6 +89,13 @@ pub struct Settings {
     pub standin_delay_secs: u16,
     /// Stand-in replies allowed in one chat during a rolling hour.
     pub standin_hourly_limit: u16,
+    /// Hermes gateway on this network, for example `http://192.168.1.20:8642`.
+    /// A public host is cleared. The bearer key is not stored here.
+    pub standin_hermes_url: String,
+    /// How long an agent run may take, in seconds.
+    pub standin_agent_timeout_secs: u16,
+    /// Agent runs in one chat during a rolling hour. Skipped runs count.
+    pub standin_agent_runs_per_hour: u16,
     /// Folder downloads are saved to (issue #40). `None` keeps the OS Downloads
     /// folder. Checked when saved and again before each download; a folder that
     /// has gone away or is no longer writable falls back to Downloads.
@@ -142,6 +153,7 @@ impl Default for Settings {
             menu_bar_icon: true,
             language: crate::i18n::system_default().to_string(),
             voice_transcribe: true,
+            video_transcribe: false,
             fluidvoice_port: FLUIDVOICE_PORT_DEFAULT,
             translate_enabled: false,
             translate_target_lang: "English".into(),
@@ -166,6 +178,9 @@ impl Default for Settings {
             standin_codex_bin: String::new(),
             standin_delay_secs: 10,
             standin_hourly_limit: 12,
+            standin_hermes_url: String::new(),
+            standin_agent_timeout_secs: 150,
+            standin_agent_runs_per_hour: 20,
             download_dir: None,
             custom_icon: false,
             proxy_mode: crate::proxy::MODE_OFF.to_string(),
@@ -192,6 +207,9 @@ pub fn cli_backends_allowed() -> bool {
 }
 
 pub fn sanitize_standin_backend(value: &str, cli_ok: bool) -> String {
+    if matches!(value, "hermes" | "grok_bot") {
+        return value.to_string();
+    }
     if cli_ok && matches!(value, "claude_cli" | "grok_cli" | "codex_cli") {
         value.to_string()
     } else {
@@ -218,6 +236,22 @@ pub fn sanitize_delay(value: u16) -> u16 {
 pub fn sanitize_hourly(value: u16) -> u16 {
     if value == 0 {
         12
+    } else {
+        value.clamp(1, 60)
+    }
+}
+
+pub fn sanitize_agent_timeout(value: u16) -> u16 {
+    if value == 0 {
+        150
+    } else {
+        value.clamp(30, 300)
+    }
+}
+
+pub fn sanitize_agent_runs(value: u16) -> u16 {
+    if value == 0 {
+        20
     } else {
         value.clamp(1, 60)
     }
@@ -477,6 +511,10 @@ impl Settings {
         self.standin_codex_bin = sanitize_bin(&self.standin_codex_bin);
         self.standin_delay_secs = sanitize_delay(self.standin_delay_secs);
         self.standin_hourly_limit = sanitize_hourly(self.standin_hourly_limit);
+        self.standin_hermes_url =
+            crate::agents::normalize_hermes_url(&self.standin_hermes_url).unwrap_or_default();
+        self.standin_agent_timeout_secs = sanitize_agent_timeout(self.standin_agent_timeout_secs);
+        self.standin_agent_runs_per_hour = sanitize_agent_runs(self.standin_agent_runs_per_hour);
         self.download_dir = self.download_dir.filter(|d| !d.trim().is_empty());
         self.title_bar = crate::decorations::sanitize(&self.title_bar);
         // Menu-bar-only mode needs WKWebView's inactive-scheduling policy
@@ -618,14 +656,8 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
         if menubar_only {
             crate::menubar::enter_only(app);
         } else if crate::menubar::leave_only(app) {
-            // Leaving menu-bar-only mode: reopen missing windows and show the
-            // active one, so the app is never left with no visible window.
-            for a in crate::accounts::load(app).accounts {
-                let label = crate::accounts::window_label(&a.id);
-                if app.get_webview_window(&label).is_none() {
-                    let _ = crate::window::open_account_window(app, &a, true);
-                }
-            }
+            // Accounts that were not on screen have been released. Show the
+            // active one so the app is never left with no window.
             crate::window::show_active(app);
         }
 
@@ -884,10 +916,13 @@ mod tests {
         // Absent in a settings.json written before issue #44: keep the icon.
         assert!(s.menu_bar_icon);
         assert!(s.voice_transcribe);
+        assert!(!s.video_transcribe);
         assert!(s.show_message_device);
         assert_eq!(s.fluidvoice_port, FLUIDVOICE_PORT_DEFAULT);
         assert!(!s.translate_enabled);
         assert_eq!(s.ai_provider, "openrouter");
+        let on: Settings = serde_json::from_str(r#"{"video_transcribe": true}"#).unwrap();
+        assert!(on.video_transcribe);
     }
 
     #[test]
@@ -966,6 +1001,26 @@ mod tests {
     fn empty_json_is_all_defaults() {
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, Settings::default());
+    }
+
+    #[test]
+    fn an_agent_backend_survives_and_a_public_hermes_address_does_not() {
+        let mut s = Settings::default();
+        s.standin_backend = "hermes".into();
+        s.standin_hermes_url = "http://192.168.1.20:8642".into();
+        s.standin_agent_timeout_secs = 0;
+        s.standin_agent_runs_per_hour = 0;
+        let s = s.sanitized();
+        assert_eq!(s.standin_backend, "hermes");
+        assert_eq!(s.standin_hermes_url, "http://192.168.1.20:8642");
+        assert_eq!(s.standin_agent_timeout_secs, 150);
+        assert_eq!(s.standin_agent_runs_per_hour, 20);
+        let mut public = Settings::default();
+        public.standin_backend = "grok_bot".into();
+        public.standin_hermes_url = "https://example.com".into();
+        let public = public.sanitized();
+        assert_eq!(public.standin_backend, "grok_bot");
+        assert!(public.standin_hermes_url.is_empty());
     }
 
     #[test]

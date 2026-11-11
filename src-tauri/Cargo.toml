@@ -22,6 +22,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "=2.11.2", features = ["tray-icon", "image-png", "unstable", "macos-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["time"] }
 # Loopback calls to FluidVoice and the configured LLM. ureq 2's API is what
 # those callers use. The updater needs ureq 3 (SOCKS proxy); the crates are
@@ -29,6 +30,7 @@ tokio = { version = "1", features = ["time"] }
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
 ureq3 = { package = "ureq", version = "3", default-features = false, features = ["rustls", "socks-proxy"] }
 argon2 = { version = "0.5.3", features = ["std"] }  # Argon2id password hashing for the app lock (PHC strings)
+getrandom = "0.2.17"
 semver = "1"
 sha2 = "0.10"
 
@@ -47,6 +49,7 @@ webview2-com = "0.38"
 windows = { version = "0.61", features = [
   "Win32_Foundation",         # existing
   "Win32_System_Com",         # existing (webview2 permission handler)
+  "Win32_System_Threading",   # OpenProcess: leave a live window's temp audio alone
   "Security_Credentials_UI",  # UserConsentVerifier + result/availability enums
   "Win32_System_WinRT",       # IUserConsentVerifierInterop
   "Foundation",

@@ -10,7 +10,7 @@
   </head>
   <body>
     <header class="app-header"><div><strong>Configurações</strong><span>whatRust</span></div><button id="back-to-chat" type="button" class="secondary back-button" aria-label="Voltar ao WhatsApp" title="Voltar ao WhatsApp" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5 M12 5l-7 7 7 7"/></svg><span>Voltar ao WhatsApp</span></button></header>
-    <div class="settings-layout"><nav class="settings-nav" aria-label="Configurações"><a href="#sec-contas">Contas</a><a href="#sec-notificacoes">Notificações</a><a href="#sec-voz">Notas de voz</a><a href="#sec-standin">Stand-in</a><a href="#sec-aparencia">Aparência</a><a href="#sec-seguranca">Segurança</a><a href="#sec-sistema">Inicialização</a><a href="#sec-rede">Rede</a><!-- Fork: hide self-update. Upstream releases would replace this build. <a href="#sec-atualizacoes">Atualizações</a> --><a href="#sec-atalhos">Atalhos</a><a href="#sec-diagnostico">Diagnóstico</a></nav>
+    <div class="settings-layout"><nav class="settings-nav" aria-label="Configurações"><a href="#sec-contas">Contas</a><a href="#sec-notificacoes">Notificações</a><a href="#sec-voz">Transcrição</a><a href="#sec-standin">Stand-in</a><a href="#sec-aparencia">Aparência</a><a href="#sec-seguranca">Segurança</a><a href="#sec-sistema">Inicialização</a><a href="#sec-rede">Rede</a><!-- Fork: hide self-update. Upstream releases would replace this build. <a href="#sec-atualizacoes">Atualizações</a> --><a href="#sec-atalhos">Atalhos</a><a href="#sec-diagnostico">Diagnóstico</a></nav>
     <!-- Local preferences use familiar WhatsApp rows: titled
          groups of boxed-list rows, a title + subtitle on the left and the control
          on the right. Element ids are what main.js uses; keep them stable. -->
@@ -24,7 +24,7 @@
         <div class="boxed-list" id="single_window_row" hidden>
           <label class="row">
             <span class="row-text"><span class="row-title">Mostrar todas as contas em uma janela</span>
-              <span class="row-subtitle" id="single_window_subtitle">Uma janela com um seletor de contas; as contas ocultas continuam conectadas. Requer reiniciar o whatRust.</span></span>
+              <span class="row-subtitle" id="single_window_subtitle">Uma janela com um seletor de contas. Só a conta aberta fica carregada; as outras abrem quando você as escolhe. Requer reiniciar o whatRust.</span></span>
             <input type="checkbox" class="switch" id="single_window" />
           </label>
         </div>
@@ -44,7 +44,7 @@
         <div class="boxed-list">
           <label class="row">
             <span class="row-text"><span class="row-title">Continuar em segundo plano ao fechar</span>
-              <span class="row-subtitle">Mantém suas contas conectadas ao fechar a janela</span></span>
+              <span class="row-subtitle">Mantém a conta aberta conectada ao fechar a janela</span></span>
             <input type="checkbox" class="switch" id="close_to_tray" />
           </label>
           <label class="row">
@@ -63,7 +63,7 @@
           </label>
           <label class="row mac-only" hidden>
             <span class="row-text"><span class="row-title">Somente na barra de menus</span>
-              <span class="row-subtitle" id="menubar_only_subtitle">Sem ícone no Dock nem janela principal — todas as contas continuam conectadas para notificações e cada uma abre como painel pela bandeja</span></span>
+              <span class="row-subtitle" id="menubar_only_subtitle">Sem ícone no Dock nem janela principal. A conta aberta continua conectada com o painel fechado; as outras carregam quando você as abre</span></span>
             <input type="checkbox" class="switch" id="menubar_only" />
           </label>
           <label class="row mac-only" hidden>
@@ -75,12 +75,17 @@
       </section>
 
       <section class="group" id="sec-voz">
-        <h2 class="group-title">Notas de voz</h2>
+        <h2 class="group-title">Transcrição</h2>
         <div class="boxed-list">
           <label class="row">
             <span class="row-text"><span class="row-title">Transcrever notas de voz</span>
               <span class="row-subtitle">Mostra a transcrição embaixo de cada nota de voz. O áudio fica neste computador e é transcrito pelo FluidVoice.</span></span>
             <input type="checkbox" class="switch" id="voice_transcribe" />
+          </label>
+          <label class="row">
+            <span class="row-text"><span class="row-title">Transcrever vídeos</span>
+              <span class="row-subtitle">Mostra um botão em cada vídeo. O áudio fica neste computador e é transcrito pelo FluidVoice.</span></span>
+            <input type="checkbox" class="switch" id="video_transcribe" />
           </label>
           <label class="row">
             <span class="row-text"><span class="row-title">Porta do FluidVoice</span>
@@ -160,9 +165,11 @@
               <option value="claude_cli">Claude Code</option>
               <option value="grok_cli">Grok</option>
               <option value="codex_cli">Codex</option>
+              <option value="hermes">Hermes</option>
+              <option value="grok_bot">Grok Bot</option>
             </select>
           </label>
-          <div class="row">
+          <div class="row" id="standin_model_row">
             <span class="row-text"><span class="row-title">Stand-in model</span>
               <span class="row-subtitle">For the key, one model per provider. For a program, a model it offers. Empty uses the summary model, or that program's default.</span></span>
             <input type="text" class="model-choice" id="standin_model" aria-label="Stand-in model" />
@@ -188,6 +195,36 @@
               <span class="row-subtitle" id="standin_cli_state">Not checked yet.</span></span>
             <button type="button" id="check_standin_cli" class="secondary">Check session</button>
           </div>
+          <label class="row" id="standin_hermes_row" hidden>
+            <span class="row-text"><span class="row-title">Hermes address</span>
+              <span class="row-subtitle">A private address on this network, for example http://192.168.1.20:8642. The profile on that computer should be one created for stand-in.</span></span>
+            <input type="text" id="standin_hermes_url" autocomplete="off" aria-label="Hermes address" />
+          </label>
+          <div class="row" id="standin_hermes_key_row" hidden>
+            <span class="row-text"><span class="row-title">Hermes key</span>
+              <span class="row-subtitle" id="standin_hermes_key_state">Stored on this computer, not in settings and not in WhatsApp.</span></span>
+            <input type="password" id="standin_hermes_key" autocomplete="off" aria-label="Hermes key" />
+            <button type="button" id="save_hermes_key" class="secondary">Save key</button>
+            <button type="button" id="remove_hermes_key" class="secondary">Remove key</button>
+          </div>
+          <div class="row" id="standin_grok_row" hidden>
+            <span class="row-text"><span class="row-title">Grok Bot webhook</span>
+              <span class="row-subtitle" id="standin_grok_host">No webhook saved yet. The routine reads the webhook text, then from this computer POSTs the decision JSON to the CALLBACK address in that text.</span></span>
+            <input type="password" id="standin_grok_url" autocomplete="off" placeholder="https://" aria-label="Grok Bot webhook" />
+            <input type="password" id="standin_grok_key" autocomplete="off" aria-label="Grok Bot webhook key" />
+            <button type="button" id="save_grok" class="secondary">Save webhook</button>
+            <button type="button" id="remove_grok" class="secondary">Remove webhook</button>
+          </div>
+          <label class="row" id="standin_timeout_row" hidden>
+            <span class="row-text"><span class="row-title">Agent wait</span>
+              <span class="row-subtitle">Seconds to wait for one run, from 30 to 300.</span></span>
+            <input type="number" id="standin_agent_timeout_secs" min="30" max="300" value="150" aria-label="Agent wait" />
+          </label>
+          <label class="row" id="standin_runs_row" hidden>
+            <span class="row-text"><span class="row-title">Agent runs per hour</span>
+              <span class="row-subtitle">Including runs that stay quiet. After that the stand-in pauses.</span></span>
+            <input type="number" id="standin_agent_runs_per_hour" min="1" max="60" value="20" aria-label="Agent runs per hour" />
+          </label>
         </div>
         <label class="row-title" for="standin_persona">General instructions</label>
         <textarea id="standin_persona" aria-label="General instructions"></textarea>
@@ -196,7 +233,7 @@
           <button type="button" id="open_persona" class="secondary">Open file</button>
           <button type="button" id="reset_persona" class="secondary">Restore template</button>
         </div>
-        <p class="group-note">The stand-in writes as you and only says it is an assistant if asked directly. A program uses the login you already made in it. whatRust does not read that login. In Flatpak, only the API key works. Continuous use can hit your plan limit.</p>
+        <p class="group-note">The stand-in writes as you and only says it is an assistant if asked directly. A program uses the login you already made in it. whatRust does not read that login. Hermes and Grok Bot can use tools and may keep a copy of this chat. whatRust is still the only WhatsApp sender. Replies happen only while whatRust is running. In Flatpak, the command-line programs are not available. Continuous use can hit your plan limit.</p>
       </section>
 
       <section class="group" id="sec-aparencia">

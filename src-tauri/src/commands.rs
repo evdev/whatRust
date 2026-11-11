@@ -223,6 +223,7 @@ pub fn set_settings(
         return Err("forbidden".into());
     }
     lock::require_unlocked(&app)?;
+    let requested_hermes = settings.standin_hermes_url.clone();
     let mut settings = settings.sanitized();
     let stored = crate::settings::load(&app);
     // A newly chosen download folder must work now. An unchanged one is not
@@ -239,7 +240,14 @@ pub fn set_settings(
     crate::settings::preserve_chat_summary_consent(&mut settings, &stored);
     crate::proxy::validate(&mut settings)?;
     crate::settings::save(&app, &settings).map_err(|e| e.to_string())?;
-    let warning = crate::settings::apply(&app, &settings);
+    let mut warning = crate::settings::apply(&app, &settings);
+    if !requested_hermes.trim().is_empty() && settings.standin_hermes_url.is_empty() {
+        let msg = tr("That address is not on this network.").into_owned();
+        warning = Some(match warning {
+            Some(other) => format!("{msg} {other}"),
+            None => msg,
+        });
+    }
     crate::voice::push_prefs(&app, &settings);
     crate::autoreply::push_prefs(&app, &settings);
     crate::window::push_device_icons(&app, settings.show_message_device);
@@ -596,6 +604,13 @@ pub async fn add_account(
         crate::window::show_account(&app, &accounts::window_label(&acct.id));
     }
 
+    let label = accounts::window_label(&acct.id);
+    #[cfg(not(windows))]
+    if let Some(active) = app.try_state::<ActiveAccount>() {
+        *crate::lock::guard(&active) = label.clone();
+    }
+    crate::window::schedule_release_other_accounts(&app, &label);
+
     let is_default = accounts::startup_account(&f).is_some_and(|startup| startup.id == acct.id);
     Ok(AccountView {
         id: acct.id,
@@ -624,9 +639,13 @@ pub async fn remove_account(
     let removed = accounts::remove(&mut f, &id)?;
     accounts::save(&app, &f).map_err(|e| e.to_string())?;
 
-    // Close the window if open.
-    if let Some(_w) = app.get_webview(&accounts::window_label(&removed.id)) {
-        let _ = _w.clear_all_browsing_data();
+    // Close the window if open. `close()` on a WebviewWindow only detaches the
+    // view, and close-to-tray would hide it instead, so the WebKit process
+    // stayed alive after the account was removed. Destroy the window.
+    let removed_label = accounts::window_label(&removed.id);
+    let had_view = app.get_webview(&removed_label).is_some();
+    if let Some(view) = app.get_webview(&removed_label) {
+        let _ = view.clear_all_browsing_data();
         #[cfg(windows)]
         crate::sessions::remove_view(&app, &removed.id).map_err(|e| e.to_string())?;
         #[cfg(not(windows))]
@@ -634,7 +653,7 @@ pub async fn remove_account(
             if crate::sessions::enabled() {
                 crate::sessions::remove_view(&app, &removed.id).map_err(|e| e.to_string())?;
             } else {
-                let _ = _w.close();
+                crate::window::release_account_webview(&app, &removed_label);
             }
         }
     }
@@ -646,6 +665,7 @@ pub async fn remove_account(
     }
     accounts::delete_profile(&app, &removed.id);
     crate::todo::delete_account(&app, &removed.id);
+    crate::voice::delete_account(&app, &removed.id);
 
     // If the removed account was the active one, point at a surviving account
     // so toggle/show don't target a window that no longer exists. (On Windows
@@ -653,9 +673,22 @@ pub async fn remove_account(
     #[cfg(not(windows))]
     if let (false, Some(active)) = (crate::sessions::enabled(), app.try_state::<ActiveAccount>()) {
         let mut label = active.lock().unwrap_or_else(|e| e.into_inner());
-        if *label == accounts::window_label(&removed.id) {
+        if *label == removed_label {
             if let Some(next) = accounts::startup_account(&f) {
                 *label = accounts::window_label(&next.id);
+            }
+        }
+    }
+    // The removed account was the only live web view. Open the survivor so
+    // removing it does not leave the app with no window. Close and destroy
+    // are asynchronous, so the removed view may still be listed.
+    if had_view {
+        let survivor_loaded = app.webviews().keys().any(|label| {
+            accounts::id_from_label(label).is_some() && label.as_str() != removed_label
+        });
+        if !survivor_loaded {
+            if let Some(next) = accounts::startup_account(&f) {
+                crate::window::show_account(&app, &accounts::window_label(&next.id));
             }
         }
     }

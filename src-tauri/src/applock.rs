@@ -125,7 +125,17 @@ fn reset_targets(config_dir: &Path, data_dir: &Path) -> Vec<PathBuf> {
     // The backups must go too, or a later read could bring the old lock back.
     let mut v = crate::jsonfile::sidecar_paths(&accounts);
     v.extend(crate::jsonfile::sidecar_paths(&lock));
-    v.extend([accounts, lock, data_dir.to_path_buf()]);
+    // The old shared transcript file lives in config, which a data-dir wipe
+    // does not touch. Leaving it would import the notes again after a reset.
+    let voice = config_dir.join(crate::transcript_store::LEGACY_JSON);
+    v.extend(crate::jsonfile::sidecar_paths(&voice));
+    v.extend([
+        accounts,
+        lock,
+        voice,
+        config_dir.join(crate::transcript_store::LEGACY_MARKER),
+        data_dir.to_path_buf(),
+    ]);
     v
 }
 
@@ -265,6 +275,9 @@ mod tests {
         assert!(t.contains(&cfg.join("app-lock.json")));
         assert!(t.contains(&cfg.join("app-lock.json.bak")));
         assert!(t.contains(&cfg.join("accounts.json.bak")));
+        assert!(t.contains(&cfg.join("voice-transcripts.json")));
+        assert!(t.contains(&cfg.join("voice-transcripts.json.bak")));
+        assert!(t.contains(&cfg.join("voice-transcripts.imported")));
         // The data root must be a target — this is what logs the DEFAULT account out.
         assert!(t.contains(&data.to_path_buf()));
     }

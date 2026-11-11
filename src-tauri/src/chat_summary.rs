@@ -458,15 +458,8 @@ async fn complete_summary(
     user: &str,
 ) -> Result<String, String> {
     let level = summary_thinking(provider, model);
-    let outcome = llm::complete_detailed(summary_job(
-        provider,
-        model,
-        key,
-        system,
-        user,
-        level,
-    ))
-    .await;
+    let outcome =
+        llm::complete_detailed(summary_job(provider, model, key, system, user, level)).await;
     let outcome = match outcome {
         Err("llm_rejected") if level.is_some() => {
             crate::dlog::log("summary: provider rejected the thinking level, retrying without it");
