@@ -599,7 +599,7 @@ pub fn detach(app: &AppHandle, id: &str) -> Result<(), String> {
             let a = a.clone();
             let id = account.clone();
             tauri::async_runtime::spawn_blocking(move || {
-                let _ = attach_after_window_close(&a, &id);
+                release_detached_account(&a, &id);
             });
         }
         _ => {}
@@ -613,11 +613,34 @@ pub fn attach(app: &AppHandle, id: &str) -> Result<(), String> {
     attach_inner(app, id, true)
 }
 
-/// Closing a detached window returns its live WebView to the main window while
-/// preserving the account that was already selected there. Explicitly choosing
-/// “Reintegrar à janela” still activates the returned account via [`attach`].
-fn attach_after_window_close(app: &AppHandle, id: &str) -> Result<(), String> {
-    attach_inner(app, id, false)
+/// Closing a separate account window ends that account. Its browser process
+/// exits. The account still showing in the main window is left alone.
+fn release_detached_account(app: &AppHandle, id: &str) {
+    let label = accounts::window_label(id);
+    let Some(view) = app.get_webview(&label) else {
+        return;
+    };
+    let owner = view.window().label().to_string();
+    if owner == "main" {
+        return;
+    }
+    if let Some(panel) = app.get_webview("settings") {
+        if panel.window().label() == owner {
+            set_view_visible(app, &panel, false);
+            if let Ok(main) = initialize(app, true) {
+                let _ = reparent_on_ui(app, &panel, &main);
+            }
+        }
+    }
+    let _ = close_account_view(app, id);
+    let active = app.state::<ActiveAccount>().lock().unwrap().clone();
+    if active == label {
+        if let Some(current) = crate::lock::guard(&state(app).main_active).clone() {
+            if current != label && app.get_webview(&current).is_some() {
+                *app.state::<ActiveAccount>().lock().unwrap() = current;
+            }
+        }
+    }
 }
 
 fn attach_inner(app: &AppHandle, id: &str, activate_returned_account: bool) -> Result<(), String> {

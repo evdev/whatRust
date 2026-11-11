@@ -64,6 +64,11 @@ button:hover:not(:disabled) { filter: brightness(.95); }
 .group-note { font-size: 13px; line-height: 1.55; margin: 16px 0; color: var(--dim); }
 .group-note code { font: inherit; background: var(--hover); padding: 2px 4px; }
 .group-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; }
+.standin-block { padding-bottom: 8px; }
+.standin-block > .row { min-height: 0; }
+.standin-field { display: flex; flex-direction: column; gap: 6px; margin: 0 0 12px; font-size: 13px; color: var(--dim); }
+.standin-field input { width: 100%; box-sizing: border-box; }
+.standin-prompt { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 0; padding: 12px; border-radius: 8px; background: var(--hover); color: var(--fg); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; user-select: all; }
 .key-status { font-size: 13px; line-height: 1.5; margin: 12px 0 0; color: var(--fg); }
 .key-status.warn { color: var(--warn); }
 .key-status.bad { color: var(--danger); }

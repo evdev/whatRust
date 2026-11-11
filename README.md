@@ -97,7 +97,7 @@ The official WhatsApp Desktop app is built on Electron, which packs an entire Ch
 whatRust runs **multiple WhatsApp accounts**, each with a **completely isolated session** (separate cookies, local storage, and IndexedDB), so you can stay signed in to several numbers without them interfering.
 
 - **Add an account** in **Settings → Accounts** with the **+ Add** button, then scan the new QR code; you can **rename** or **remove** accounts there too.
-- Each account keeps its **own login**. Only the account you are viewing keeps a web view loaded, so idle accounts do not each hold a browser process; switching releases the previous one and restores the next from its saved session. The account you have open receives notifications. The tray shows a **combined unread count** and a one-click switcher for every account.
+- Each account keeps its **own login**. Only accounts you open are loaded, so the others do not each hold a browser process. Opening a second account leaves the first one open. Closing an account window releases that account. With one account open, closing the window keeps it connected in the tray. The tray shows a **combined unread count** and a one-click switcher for every account.
 - Your **first (default) account keeps its existing login** when you upgrade — no need to re-scan.
 
 > **macOS note:** running **multiple accounts requires macOS 14 (Sonoma) or later**, where the system webview supports isolated data stores. On macOS 12–13 whatRust runs a single account. Linux and Windows have no such limit.

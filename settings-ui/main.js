@@ -24,7 +24,7 @@ let catalogToken = 0;
 let cliCatalogToken = 0;
 let catalogLoading = false;
 const ZOOM_DEFAULT = 1;
-const SINGLE_WINDOW_SUBTITLE = "Uma janela com um seletor de contas. Só a conta aberta fica carregada; as outras abrem quando você as escolhe. Requer reiniciar o whatRust.";
+const SINGLE_WINDOW_SUBTITLE = "Uma janela com um seletor de contas. Uma conta só carrega quando você a abre, e abrir outra não fecha a primeira. Requer reiniciar o whatRust.";
 
 // The menu-bar rows are macOS-only. get_settings reports the OS this build targets
 // in `platform`; the rows start hidden and appear here once it is known.
@@ -544,6 +544,17 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("remove_hermes_key").addEventListener("click", () => saveStandinSecret("hermes", true));
   document.getElementById("save_grok").addEventListener("click", () => saveStandinSecret("grok_bot", false));
   document.getElementById("remove_grok").addEventListener("click", () => saveStandinSecret("grok_bot", true));
+  document.getElementById("copy_grok_routine").addEventListener("click", async () => {
+    const note = document.getElementById("note");
+    const text = document.getElementById("grok_routine_prompt").textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      note.textContent = "Copied ✓";
+      setTimeout(() => (note.textContent = ""), 1500);
+    } catch (e) {
+      note.textContent = "Could not copy. Select the instructions and copy them.";
+    }
+  });
   document.getElementById("chat_summary_revoke").addEventListener("click", async () => {
     try {
       await invoke("clear_chat_summary_consent");
@@ -659,9 +670,9 @@ async function refreshAgentStatus() {
     const status = await invoke("standin_agent_status");
     const host = document.getElementById("standin_grok_host");
     if (status.grok_ready && status.grok_host) {
-      host.textContent = "Webhook host: " + status.grok_host + ". The routine reads the webhook text, then from this computer POSTs the decision JSON to the CALLBACK address in that text.";
+      host.textContent = "Webhook host: " + status.grok_host + ".";
     } else {
-      host.textContent = "No webhook saved yet. The routine reads the webhook text, then from this computer POSTs the decision JSON to the CALLBACK address in that text.";
+      host.textContent = "No webhook saved yet.";
     }
     document.getElementById("standin_hermes_key_state").textContent = status.hermes_key_stored
       ? "A key is stored on this computer, not in settings and not in WhatsApp."

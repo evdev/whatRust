@@ -519,10 +519,14 @@ pub async fn switch_account(
     let Some(acct) = f.accounts.iter().find(|a| a.id == id) else {
         return Err(tr("Conta não encontrada").into());
     };
-    if app.get_webview(&accounts::window_label(&acct.id)).is_none() {
-        crate::window::open_account_window(&app, acct, false).map_err(|e| e.to_string())?;
+    let label = accounts::window_label(&acct.id);
+    if app.get_webview(&label).is_none() {
+        crate::window::open_account_window(&app, acct, true).map_err(|e| e.to_string())?;
+        if crate::sessions::enabled() {
+            crate::window::separate_if_sharing_main(&app, &label);
+        }
     }
-    crate::window::show_account(&app, &accounts::window_label(&acct.id));
+    crate::window::show_account(&app, &label);
     #[cfg(not(windows))]
     if let Some(active) = app.try_state::<ActiveAccount>() {
         *crate::lock::guard(&active) = accounts::window_label(&acct.id);
@@ -596,6 +600,9 @@ pub async fn add_account(
         })?;
         return Err(e.to_string());
     }
+    if crate::sessions::enabled() {
+        crate::window::separate_if_sharing_main(&app, &accounts::window_label(&acct.id));
+    }
     crate::tray::rebuild_menu(&app);
     crate::integration::broadcast(&app);
     // Opens the new account as a panel: also how the user reaches its QR login.
@@ -604,12 +611,10 @@ pub async fn add_account(
         crate::window::show_account(&app, &accounts::window_label(&acct.id));
     }
 
-    let label = accounts::window_label(&acct.id);
     #[cfg(not(windows))]
     if let Some(active) = app.try_state::<ActiveAccount>() {
-        *crate::lock::guard(&active) = label.clone();
+        *crate::lock::guard(&active) = accounts::window_label(&acct.id);
     }
-    crate::window::schedule_release_other_accounts(&app, &label);
 
     let is_default = accounts::startup_account(&f).is_some_and(|startup| startup.id == acct.id);
     Ok(AccountView {
@@ -757,14 +762,14 @@ pub async fn open_account(
     let Some(acct) = f.accounts.iter().find(|a| a.id == id) else {
         return Err(trf("Conta não encontrada: {0}", &[&id]));
     };
-    // Open the window if it was closed, then show + focus it.
-    // Hidden first in menu-bar-only mode: show_account presents it as a
-    // panel, and no full-size window flashes in between.
-    let start_hidden = crate::menubar::enabled(&app);
-    if app.get_webview(&accounts::window_label(&acct.id)).is_none() {
-        crate::window::open_account_window(&app, acct, start_hidden).map_err(|e| e.to_string())?;
+    let label = accounts::window_label(&acct.id);
+    if app.get_webview(&label).is_none() {
+        crate::window::open_account_window(&app, acct, true).map_err(|e| e.to_string())?;
+        if crate::sessions::enabled() {
+            crate::window::separate_if_sharing_main(&app, &label);
+        }
     }
-    crate::window::show_account(&app, &accounts::window_label(&acct.id));
+    crate::window::show_account(&app, &label);
     // Track as the active account.
     #[cfg(not(windows))]
     if let Some(active) = app.try_state::<ActiveAccount>() {

@@ -24,9 +24,10 @@ pub struct Settings {
     /// elsewhere.
     pub menubar_only: bool,
     /// Linux/macOS: host accounts in one window with a switcher instead of one
-    /// window per account. Only the open account stays loaded. Off by default;
-    /// applies after a restart. Windows always uses a single window.
-    /// Menu-bar-only mode wins if both are on.
+    /// window per account. An account loads only when opened, and opening
+    /// another does not close the first. Off by default; applies after a
+    /// restart. Windows always uses a single window. Menu-bar-only mode wins
+    /// if both are on.
     pub single_window: bool,
     /// macOS only: hide the Dock icon but keep the normal main window. The
     /// menu bar icon is forced on, since it becomes the way back to the app.

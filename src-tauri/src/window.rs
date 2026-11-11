@@ -376,6 +376,16 @@ pub(crate) fn build_account_window(
     let label_for_close = label.clone();
     win.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            // Another account the user opened stays up. Closing this window
+            // drops only this account's browser process. The last window still
+            // follows close-to-tray, so hiding the app does not sign it out.
+            if !crate::menubar::enabled(&app_handle)
+                && another_account_is_open(&app_handle, &label_for_close)
+            {
+                api.prevent_close();
+                release_account_webview(&app_handle, &label_for_close);
+                return;
+            }
             if crate::settings::load(&app_handle).close_to_tray {
                 let lc = crate::applock::load(&app_handle);
                 if lc.should_lock_on_hide() {
@@ -1744,28 +1754,6 @@ fn enable_media_windows(webview: tauri::webview::PlatformWebview, app: AppHandle
     }
 }
 
-/// Account labels other than `keep`. Settings, the shell, and the lock
-/// window are not WebKit WhatsApp processes and are left alone.
-pub(crate) fn background_account_labels<'a>(
-    labels: impl IntoIterator<Item = &'a str>,
-    keep: &str,
-) -> Vec<&'a str> {
-    let mut out: Vec<&str> = labels
-        .into_iter()
-        .filter(|label| accounts::id_from_label(label).is_some() && *label != keep)
-        .collect();
-    out.sort_unstable();
-    out
-}
-
-/// Latest switch wins inside one window. An older timer must not destroy the
-/// account the user just opened there. Single-window mode keys this by the
-/// top-level window, so focusing a detached account does not cancel a release
-/// still pending in the main window. Legacy mode has one sequence because each
-/// account is its own window.
-static RELEASE_GEN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
 /// Create the account webview if it was released or never opened. Hidden so
 /// the caller can present it (panel, child view, or normal window).
 fn ensure_account_webview(app: &AppHandle, label: &str) -> bool {
@@ -1813,122 +1801,33 @@ pub(crate) fn release_account_webview(app: &AppHandle, label: &str) {
     }
 }
 
-/// Which account web views a switch should drop. In single-window mode only
-/// the other accounts in the same top-level window go: a detached window is
-/// an account the user opened on purpose, and focusing it must not unload the
-/// account still showing in the main window. Legacy mode drops every other
-/// account window.
-pub(crate) fn views_to_release<'a>(
-    views: impl IntoIterator<Item = (&'a str, &'a str)>,
-    keep: &str,
-    sessions: bool,
-) -> Vec<&'a str> {
-    let views: Vec<(&str, &str)> = views.into_iter().collect();
-    let keep_window = views
-        .iter()
-        .find(|(label, _)| *label == keep)
-        .map(|(_, window)| *window);
-    let labels = views.iter().map(|(label, _)| *label);
-    background_account_labels(labels, keep)
-        .into_iter()
-        .filter(|label| {
-            !sessions
-                || views
-                    .iter()
-                    .any(|(candidate, window)| candidate == label && keep_window == Some(*window))
-        })
-        .collect()
-}
-
-fn webview_hosts(app: &AppHandle) -> Vec<(String, String)> {
+fn another_account_is_open(app: &AppHandle, except: &str) -> bool {
     app.webviews()
-        .iter()
-        .map(|(label, view)| (label.clone(), view.window().label().to_string()))
-        .collect()
+        .keys()
+        .any(|label| accounts::id_from_label(label).is_some() && label != except)
 }
 
-fn release_other_accounts(app: &AppHandle, keep: &str) {
-    let hosted = webview_hosts(app);
-    let labels = views_to_release(
-        hosted
-            .iter()
-            .map(|(label, window)| (label.as_str(), window.as_str())),
-        keep,
-        crate::sessions::enabled(),
-    );
-    if labels.is_empty() {
+/// A newly opened account shares the main window until this runs. Move it out
+/// so the account already on screen stays where it is.
+pub(crate) fn separate_if_sharing_main(app: &AppHandle, label: &str) {
+    if !another_account_is_open(app, label) {
         return;
     }
-    let labels: Vec<String> = labels.into_iter().map(str::to_string).collect();
-    for label in &labels {
-        release_account_webview(app, label);
-    }
-    crate::dlog::log(&format!(
-        "account webview: released {} background view(s)",
-        labels.len()
-    ));
-    crate::integration::broadcast(app);
-}
-
-/// Free every account webview except `keep`, after the switch IPC has replied.
-/// Hiding a web view does not exit its process.
-pub fn schedule_release_other_accounts(app: &AppHandle, keep: &str) {
-    if accounts::id_from_label(keep).is_none() {
+    let Some(view) = app.get_webview(label) else {
         return;
-    }
-    let hosted = webview_hosts(app);
-    if views_to_release(
-        hosted
-            .iter()
-            .map(|(label, window)| (label.as_str(), window.as_str())),
-        keep,
-        crate::sessions::enabled(),
-    )
-    .is_empty()
-    {
-        return;
-    }
-    let key = if crate::sessions::enabled() {
-        hosted
-            .iter()
-            .find(|(label, _)| label == keep)
-            .map(|(_, window)| window.clone())
-            .unwrap_or_else(|| keep.to_string())
-    } else {
-        "*".to_string()
     };
-    let generation = {
-        let mut gens = RELEASE_GEN.lock().unwrap_or_else(|err| err.into_inner());
-        let slot = gens.entry(key.clone()).or_insert(0);
-        *slot += 1;
-        *slot
-    };
-    let app = app.clone();
-    let keep = keep.to_string();
-    std::thread::spawn(move || {
-        // The switcher runs inside the webview we are about to destroy.
-        // Give that invoke a moment to answer, and let a newer switch of the
-        // same window cancel us.
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let ui = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            let current = RELEASE_GEN
-                .lock()
-                .unwrap_or_else(|err| err.into_inner())
-                .get(&key)
-                .copied();
-            if current != Some(generation) {
-                return;
-            }
-            release_other_accounts(&ui, &keep);
-        });
-    });
+    if view.window().label() != "main" {
+        return;
+    }
+    if let Some(id) = accounts::id_from_label(label) {
+        let _ = crate::sessions::detach(app, id);
+    }
 }
 
 /// Show + unminimize + focus an account window by its `wa-<id>` label.
 /// On macOS a restyled window first gets its standard presentation back, and in
-/// menu-bar-only mode it opens as a panel. Other accounts in that same window
-/// are released once this one is up. A detached window stays loaded.
+/// menu-bar-only mode it opens as a panel. Accounts the user already opened
+/// stay open.
 pub fn show_account(app: &AppHandle, label: &str) {
     if !crate::lock::is_unlocked(app) {
         // Single-window activation remembers the account and restores it on
@@ -1940,7 +1839,18 @@ pub fn show_account(app: &AppHandle, label: &str) {
         }
         return;
     }
+    let existed = app.get_webview(label).is_some();
     let ready = ensure_account_webview(app, label);
+    // The first time an account is opened while another is already open, give
+    // it its own window. Switching back to one that is already open only
+    // focuses it.
+    if crate::sessions::enabled() && ready && !existed {
+        // Detach waits on the UI thread. The tray calls this from that thread,
+        // so the move onto its own window happens in the background.
+        let app = app.clone();
+        let label = label.to_string();
+        std::thread::spawn(move || separate_if_sharing_main(&app, &label));
+    }
     if crate::sessions::enabled() {
         crate::sessions::activate(app, label);
     }
@@ -1961,7 +1871,6 @@ pub fn show_account(app: &AppHandle, label: &str) {
         if let Some(active) = app.try_state::<ActiveAccount>() {
             *crate::lock::guard(&active) = label.to_string();
         }
-        schedule_release_other_accounts(app, label);
     }
 }
 
@@ -2588,38 +2497,6 @@ mod tests {
     #[test]
     fn no_active_window_is_shown() {
         assert_eq!(toggle_decision(None), ToggleAct::Show);
-    }
-
-    #[test]
-    fn background_views_are_the_other_account_webviews() {
-        let labels = ["wa-default", "wa-acct-2", "settings", "shell-main", "lock"];
-        assert_eq!(
-            super::background_account_labels(labels, "wa-default"),
-            vec!["wa-acct-2"]
-        );
-        assert!(super::background_account_labels(labels, "wa-acct-2")
-            .into_iter()
-            .eq(["wa-default"]));
-        assert!(
-            super::background_account_labels(["settings", "shell-main"], "wa-default").is_empty()
-        );
-    }
-
-    #[test]
-    fn a_switch_releases_siblings_and_leaves_a_detached_window() {
-        let views = [
-            ("wa-a", "main"),
-            ("wa-b", "detached-b"),
-            ("wa-c", "main"),
-            ("settings", "main"),
-            ("shell-main", "main"),
-        ];
-        assert_eq!(super::views_to_release(views, "wa-a", true), vec!["wa-c"]);
-        assert!(super::views_to_release(views, "wa-b", true).is_empty());
-        assert_eq!(
-            super::views_to_release(views, "wa-a", false),
-            vec!["wa-b", "wa-c"]
-        );
     }
 
     #[test]

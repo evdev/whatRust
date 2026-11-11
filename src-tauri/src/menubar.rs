@@ -4,9 +4,9 @@
 //! panel is a hidden window whose page keeps running: that window sets the
 //! WKWebView inactive-scheduling policy to `disabled` (macOS 14+, Tauri's
 //! `background_throttling`), so WhatsApp's socket stays up while nothing is
-//! on screen. Other accounts are not kept loaded — each is its own WebKit
-//! process. The geometry captured before the first restyle is replayed when
-//! the window goes back to normal.
+//! on screen. Other accounts the user has opened stay loaded. The geometry
+//! captured before the first restyle is replayed when the window goes back
+//! to normal.
 
 /// Pure helpers, unit-tested on every platform (the panel is macOS-only).
 pub(crate) mod geom {
@@ -436,9 +436,9 @@ mod imp {
     }
 
     /// Menu-bar-only mode: no standard windows. Do not create a webview per
-    /// account. Hide the windows that already exist; the open account stays
-    /// loaded and the rest are released. A presented panel stays up and hides
-    /// on its next focus loss.
+    /// account. Hide the windows that already exist. Accounts the user has
+    /// opened stay loaded. A presented panel stays up and hides on its next
+    /// focus loss.
     pub fn enter_only(app: &AppHandle) {
         if !supported() {
             return; // macOS < 14: a hidden webview would be suspended
@@ -456,9 +456,6 @@ mod imp {
             }
         }
         ONLY_MODE.store(true, Ordering::Release);
-        if let Some(label) = target_label(app) {
-            crate::window::schedule_release_other_accounts(app, &label);
-        }
     }
 
     /// Leave menu-bar-only mode if it was on. True on the transition.

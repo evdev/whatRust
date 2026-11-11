@@ -129,14 +129,13 @@ pub fn start(app: &AppHandle) {
             crate::dlog::log("smoke: reattach_preserves_view");
             result.push(json!({"test":"reattach_preserves_view","pass":app.get_webview(&label).unwrap().window().label()=="main"&&eval(&app,&label,"window.__whatrustSmokeToken==='same-live-view'")?=="true"}));
             let second_label = crate::accounts::window_label(&b.id);
-            // Switching through the product path drops the account that left
-            // the screen. Reopen it afterwards: the reparent tests need both
-            // views, and they switch with activate rather than show_account.
+            // Opening a second account keeps the one already open.
             crate::window::open_account_window(&app, b, true).map_err(|e| e.to_string())?;
             crate::window::show_account(&app, &label);
-            let released = wait_until(|| app.get_webview(&second_label).is_none());
-            result.push(json!({"test":"switch_releases_background_profile","pass":released&&app.get_webview(&label).is_some()}));
-            crate::window::open_account_window(&app, b, true).map_err(|e| e.to_string())?;
+            let both_open = wait_until(|| {
+                app.get_webview(&label).is_some() && app.get_webview(&second_label).is_some()
+            });
+            result.push(json!({"test":"opening_second_account_keeps_both","pass":both_open}));
             crate::sessions::activate(&app, &label);
             eval(
                 &app,
@@ -148,15 +147,13 @@ pub fn start(app: &AppHandle) {
                 .ok_or("missing detached window")?
                 .close()
                 .map_err(|e| e.to_string())?;
-            let returned_to_main_without_stealing_selection = wait_until(|| {
-                crate::sessions::selected(&app, "main").as_deref() == Some(label.as_str())
-                    && app
-                        .get_webview(&second_label)
-                        .is_some_and(|view| view.window().label() == "main")
-                    && visible(&app, &label).unwrap_or(false)
-                    && !visible(&app, &second_label).unwrap_or(true)
+            let closed_without_dropping_main = wait_until(|| {
+                app.get_webview(&second_label).is_none()
+                    && app.get_webview(&label).is_some()
+                    && crate::sessions::selected(&app, "main").as_deref() == Some(label.as_str())
             });
-            result.push(json!({"test":"closing_detached_window_preserves_main_account","pass":returned_to_main_without_stealing_selection&&eval(&app,&second_label,"window.__whatrustCloseSmokeToken==='preserve-close-view'")?=="true"}));
+            result.push(json!({"test":"closing_detached_window_releases_that_account","pass":closed_without_dropping_main}));
+            crate::window::open_account_window(&app, b, true).map_err(|e| e.to_string())?;
             for cycle in 0..12 {
                 crate::sessions::schedule_layout(&app, "main");
                 crate::sessions::detach(&app, &b.id)?;

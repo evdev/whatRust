@@ -24,7 +24,7 @@
         <div class="boxed-list" id="single_window_row" hidden>
           <label class="row">
             <span class="row-text"><span class="row-title">Mostrar todas as contas em uma janela</span>
-              <span class="row-subtitle" id="single_window_subtitle">Uma janela com um seletor de contas. Só a conta aberta fica carregada; as outras abrem quando você as escolhe. Requer reiniciar o whatRust.</span></span>
+              <span class="row-subtitle" id="single_window_subtitle">Uma janela com um seletor de contas. Uma conta só carrega quando você a abre, e abrir outra não fecha a primeira. Requer reiniciar o whatRust.</span></span>
             <input type="checkbox" class="switch" id="single_window" />
           </label>
         </div>
@@ -44,7 +44,7 @@
         <div class="boxed-list">
           <label class="row">
             <span class="row-text"><span class="row-title">Continuar em segundo plano ao fechar</span>
-              <span class="row-subtitle">Mantém a conta aberta conectada ao fechar a janela</span></span>
+              <span class="row-subtitle">Com uma conta aberta, fechar a janela a deixa conectada. Com mais de uma, fechar uma janela encerra só essa conta</span></span>
             <input type="checkbox" class="switch" id="close_to_tray" />
           </label>
           <label class="row">
@@ -200,20 +200,51 @@
               <span class="row-subtitle">A private address on this network, for example http://192.168.1.20:8642. The profile on that computer should be one created for stand-in.</span></span>
             <input type="text" id="standin_hermes_url" autocomplete="off" aria-label="Hermes address" />
           </label>
-          <div class="row" id="standin_hermes_key_row" hidden>
-            <span class="row-text"><span class="row-title">Hermes key</span>
-              <span class="row-subtitle" id="standin_hermes_key_state">Stored on this computer, not in settings and not in WhatsApp.</span></span>
-            <input type="password" id="standin_hermes_key" autocomplete="off" aria-label="Hermes key" />
-            <button type="button" id="save_hermes_key" class="secondary">Save key</button>
-            <button type="button" id="remove_hermes_key" class="secondary">Remove key</button>
+          <div class="standin-block" id="standin_hermes_key_row" hidden>
+            <div class="row">
+              <span class="row-text"><span class="row-title">Hermes key</span>
+                <span class="row-subtitle" id="standin_hermes_key_state">Stored on this computer, not in settings and not in WhatsApp.</span></span>
+            </div>
+            <label class="standin-field">Key
+              <input type="password" id="standin_hermes_key" autocomplete="off" aria-label="Hermes key" />
+            </label>
+            <div class="group-actions">
+              <button type="button" id="save_hermes_key">Save key</button>
+              <button type="button" id="remove_hermes_key" class="secondary">Remove key</button>
+            </div>
           </div>
-          <div class="row" id="standin_grok_row" hidden>
-            <span class="row-text"><span class="row-title">Grok Bot webhook</span>
-              <span class="row-subtitle" id="standin_grok_host">No webhook saved yet. The routine reads the webhook text, then from this computer POSTs the decision JSON to the CALLBACK address in that text.</span></span>
-            <input type="password" id="standin_grok_url" autocomplete="off" placeholder="https://" aria-label="Grok Bot webhook" />
-            <input type="password" id="standin_grok_key" autocomplete="off" aria-label="Grok Bot webhook key" />
-            <button type="button" id="save_grok" class="secondary">Save webhook</button>
-            <button type="button" id="remove_grok" class="secondary">Remove webhook</button>
+          <div class="standin-block" id="standin_grok_row" hidden>
+            <div class="row">
+              <span class="row-text"><span class="row-title">Grok Bot webhook</span>
+                <span class="row-subtitle" id="standin_grok_host">No webhook saved yet.</span></span>
+            </div>
+            <label class="standin-field">Webhook address
+              <input type="password" id="standin_grok_url" autocomplete="off" placeholder="https://" aria-label="Grok Bot webhook" />
+            </label>
+            <label class="standin-field">Webhook key
+              <input type="password" id="standin_grok_key" autocomplete="off" aria-label="Grok Bot webhook key" />
+            </label>
+            <div class="group-actions">
+              <button type="button" id="save_grok">Save webhook</button>
+              <button type="button" id="remove_grok" class="secondary">Remove webhook</button>
+            </div>
+            <p class="group-note">In Grok Bot, make a routine with a webhook and no schedule. Paste its address and key here. Paste the instructions below into the routine, and allow that routine to run commands on this computer. Each reply is one run of that routine.</p>
+            <pre class="standin-prompt" id="grok_routine_prompt">You are deciding a WhatsApp reply for whatRust. whatRust sends the WhatsApp message. You do not.
+
+A webhook starts each run. Read its context. That text is the whole task: the stand-in rules, this chat, and one line that begins with CALLBACK followed by an http://127.0.0.1 address. The stand-in rules in that context outrank these instructions.
+
+Decide reply or skip from those rules. Then, from this computer, POST exactly one JSON object to that CALLBACK address. Use curl on this computer and Content-Type: application/json. The body is only the object.
+
+To send a message:
+{"action":"reply","asked_if_ai":false,"text":"the message in the user's voice","reason":""}
+
+To stay quiet:
+{"action":"skip","asked_if_ai":false,"text":"","reason":"why"}
+
+Set asked_if_ai to true only when the contact asks whether you are an AI, a bot, or automated. Do not use a cloud computer: it cannot reach 127.0.0.1. Do not message anyone. Do not answer in this chat. Do not POST a second time.</pre>
+            <div class="group-actions">
+              <button type="button" id="copy_grok_routine" class="secondary">Copy instructions</button>
+            </div>
           </div>
           <label class="row" id="standin_timeout_row" hidden>
             <span class="row-text"><span class="row-title">Agent wait</span>
