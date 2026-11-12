@@ -1,8 +1,8 @@
 /* Chat summaries from the open conversation's header menu.
  *
- * The companion sits beside WhatsApp's menu, never inside it. The summary is
- * a block under the newest message it covers. It is stored on this computer
- * and is not sent into the chat.
+ * The companion sits to the left or right of WhatsApp's menu, never on its
+ * rows and never inside it. The summary is a block under the newest message
+ * it covers. It is stored on this computer and is not sent into the chat.
  */
 (function () {
   "use strict";
@@ -522,6 +522,7 @@
       summarySlot: summarySlot,
       nearViewport: nearViewport,
       senderField: senderField,
+      placeBesideMenu: placeBesideMenu,
     };
     return;
   }
@@ -688,21 +689,94 @@
     }
   }
 
-  function placeCompanion(rect, above) {
+  // Keep in step with todo.js. Stacking on the menu covers its rows
+  // whenever the menu is tall or close to the top or bottom of the window.
+  function placeBesideMenu(rect, prefWidth, height, viewW, viewH) {
+    var gap = 8;
+    var margin = 8;
+    var minWidth = 140;
+    viewW = viewW || 800;
+    viewH = viewH || 800;
+    var leftEdge = +rect.left || 0;
+    var topEdge = +rect.top || 0;
+    var rightEdge = rect.right != null ? +rect.right : leftEdge + (+rect.width || 0);
+    var bottomEdge = rect.bottom != null ? +rect.bottom : topEdge + (+rect.height || 0);
+    var spaceLeft = leftEdge - gap - margin;
+    var spaceRight = viewW - margin - (rightEdge + gap);
+    var maxHeight = Math.max(48, viewH - margin * 2);
+    height = Math.min(Math.max(+height || 48, 1), maxHeight);
+    prefWidth = Math.min(Math.max(+prefWidth || 240, minWidth), Math.max(minWidth, viewW - margin * 2));
+    var sides = spaceRight >= spaceLeft
+      ? [{ side: "right", room: spaceRight }, { side: "left", room: spaceLeft }]
+      : [{ side: "left", room: spaceLeft }, { side: "right", room: spaceRight }];
+    function boxFor(side, width) {
+      var left = side === "right" ? rightEdge + gap : leftEdge - gap - width;
+      var top = topEdge;
+      if (top + height > viewH - margin) top = viewH - margin - height;
+      if (top < margin) top = margin;
+      return { left: left, top: top, width: width, height: height, side: side };
+    }
+    function onScreen(place) {
+      return place.left >= margin - 0.5
+        && place.left + place.width <= viewW - margin + 0.5
+        && place.top >= margin - 0.5
+        && place.top + place.height <= viewH - margin + 0.5;
+    }
+    function hitsMenu(place) {
+      return place.left < rightEdge && place.left + place.width > leftEdge
+        && place.top < bottomEdge && place.top + place.height > topEdge;
+    }
+    var chosen = null;
+    for (var i = 0; i < sides.length; i++) {
+      if (sides[i].room < minWidth) continue;
+      var place = boxFor(sides[i].side, Math.min(prefWidth, sides[i].room));
+      if (onScreen(place) && !hitsMenu(place)) {
+        chosen = place;
+        break;
+      }
+    }
+    if (!chosen) {
+      var stackedWidth = Math.min(prefWidth, viewW - margin * 2);
+      var stackedLeft = Math.max(margin, Math.min(leftEdge, viewW - margin - stackedWidth));
+      var below = { left: stackedLeft, top: bottomEdge + gap, width: stackedWidth, height: height, side: "below" };
+      var above = { left: stackedLeft, top: topEdge - gap - height, width: stackedWidth, height: height, side: "above" };
+      if (onScreen(below) && !hitsMenu(below)) chosen = below;
+      else if (onScreen(above) && !hitsMenu(above)) chosen = above;
+    }
+    if (!chosen) {
+      var room = Math.max(0, sides[0].room);
+      var slim = Math.min(prefWidth, room);
+      chosen = boxFor(sides[0].side, slim > 0 ? slim : 1);
+    }
+    return {
+      left: Math.round(chosen.left),
+      top: Math.round(chosen.top),
+      width: Math.round(chosen.width),
+      height: Math.round(chosen.height),
+      side: chosen.side,
+    };
+  }
+
+  function placeCompanion(rect) {
     var viewW = root.innerWidth || 800;
     var viewH = root.innerHeight || 800;
-    var width = Math.max(220, Math.min(rect.width || 240, viewW - 16));
-    companion.style.width = width + "px";
+    var pref = 280;
+    companion.style.maxHeight = Math.max(48, viewH - 16) + "px";
+    companion.style.overflowY = "auto";
+    companion.style.width = pref + "px";
     companion.style.display = "block";
     var height = companion.offsetHeight || 48;
-    var top = above ? Math.max(8, rect.top - height) : rect.bottom;
-    if (!above && top + height > viewH - 8) {
-      top = Math.max(8, rect.top - height);
-      above = true;
+    var place = placeBesideMenu(rect, pref, height, viewW, viewH);
+    if (place.width !== pref) {
+      companion.style.width = place.width + "px";
+      height = companion.offsetHeight || height;
+      place = placeBesideMenu(rect, place.width, height, viewW, viewH);
     }
-    companion.style.left = Math.max(8, Math.min(rect.left, viewW - width - 8)) + "px";
-    companion.style.top = top + "px";
-    companion.style.borderRadius = above ? "12px 12px 0 0" : "0 0 12px 12px";
+    companion.style.width = place.width + "px";
+    companion.style.left = place.left + "px";
+    companion.style.top = place.top + "px";
+    companion.style.maxHeight = place.height + "px";
+    companion.style.borderRadius = "12px";
   }
 
   function buttonRow(title, subtitle, action) {
@@ -805,7 +879,7 @@
       fillCompanion(pending.mode);
       companion.setAttribute("data-mode", pending.mode);
     }
-    placeCompanion(pending.pinned, false);
+    placeCompanion(pending.pinned);
     pending.placed = true;
     pending.pinKey = pinKey;
   }

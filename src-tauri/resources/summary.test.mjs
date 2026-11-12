@@ -208,6 +208,28 @@ assert(source.includes('item.textContent = "• " + point'), "each summary point
 assert(source.includes("display:block;margin:3px 0"), "each bullet is on its own line");
 assert(source.includes("white-space") || source.includes("whiteSpace"), "a fallback card keeps the line breaks");
 
+function coversMenu(place, rect) {
+  const right = place.left + place.width;
+  const bottom = place.top + place.height;
+  return place.left < rect.right && right > rect.left && place.top < rect.bottom && bottom > rect.top;
+}
+function onScreen(place, viewW, viewH) {
+  return place.left >= 8 && place.top >= 8 && place.left + place.width <= viewW - 8 && place.top + place.height <= viewH - 8;
+}
+const rightMenu = { left: 900, top: 48, right: 1160, bottom: 760, width: 260, height: 712 };
+const besideRight = api.placeBesideMenu(rightMenu, 280, 220, 1280, 800);
+assert(besideRight.side === "left", "a header menu on the right opens the summary to its left");
+assert(!coversMenu(besideRight, rightMenu), "the summary menu does not cover a tall header menu");
+assert(onScreen(besideRight, 1280, 800), "the summary menu stays on screen beside a right-hand menu");
+const leftMenu = { left: 16, top: 80, right: 280, bottom: 420, width: 264, height: 340 };
+const besideLeft = api.placeBesideMenu(leftMenu, 280, 180, 1280, 800);
+assert(besideLeft.side === "right", "a header menu on the left opens the summary to its right");
+assert(!coversMenu(besideLeft, leftMenu), "the summary menu does not cover a left-hand menu");
+const wideMenu = { left: 8, top: 100, right: 1272, bottom: 400, width: 1264, height: 300 };
+const belowWide = api.placeBesideMenu(wideMenu, 280, 80, 1280, 800);
+assert(belowWide.side === "below", "a full-width header menu uses the free space under it");
+assert(!coversMenu(belowWide, wideMenu), "the summary menu under a full-width menu does not cover its rows");
+
 if (failures) {
   console.error(failures + " failed");
   process.exit(1);

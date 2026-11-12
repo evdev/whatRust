@@ -438,6 +438,38 @@ assert(popup.indexOf("var(--bg)") !== -1 && popup.indexOf("var(--btn)") !== -1, 
 assert(popup.indexOf("#111b21") === -1, "popup styles do not hardcode the dark panel background");
 assert(popup.indexOf("button.primary{background:#1daa61;color:#042}") !== -1, "primary buttons stay green in both modes");
 
+function coversMenu(place, rect) {
+  const right = place.left + place.width;
+  const bottom = place.top + place.height;
+  return place.left < rect.right && right > rect.left && place.top < rect.bottom && bottom > rect.top;
+}
+function onScreen(place, viewW, viewH) {
+  return place.left >= 8 && place.top >= 8 && place.left + place.width <= viewW - 8 && place.top + place.height <= viewH - 8;
+}
+const rightMenu = { left: 900, top: 48, right: 1160, bottom: 760, width: 260, height: 712 };
+const besideRight = api.placeBesideMenu(rightMenu, 280, 220, 1280, 800);
+assert(besideRight.side === "left", "a menu on the right opens the actions to its left");
+assert(!coversMenu(besideRight, rightMenu), "actions beside a tall menu do not cover its rows");
+assert(onScreen(besideRight, 1280, 800), "actions beside a right-hand menu stay on screen");
+const leftMenu = { left: 16, top: 80, right: 280, bottom: 420, width: 264, height: 340 };
+const besideLeft = api.placeBesideMenu(leftMenu, 280, 180, 1280, 800);
+assert(besideLeft.side === "right", "a menu on the left opens the actions to its right");
+assert(!coversMenu(besideLeft, leftMenu), "actions beside a left-hand menu do not cover its rows");
+assert(onScreen(besideLeft, 1280, 800), "actions beside a left-hand menu stay on screen");
+const lowMenu = { left: 400, top: 620, right: 660, bottom: 780, width: 260, height: 160 };
+const besideLow = api.placeBesideMenu(lowMenu, 280, 200, 1280, 800);
+assert(besideLow.side === "left" || besideLow.side === "right", "a menu near the bottom stays beside it");
+assert(!coversMenu(besideLow, lowMenu), "actions beside a low menu do not cover its rows");
+assert(onScreen(besideLow, 1280, 800), "a tall action list near the bottom stays on screen");
+const wideMenu = { left: 8, top: 100, right: 1272, bottom: 400, width: 1264, height: 300 };
+const belowWide = api.placeBesideMenu(wideMenu, 280, 80, 1280, 800);
+assert(belowWide.side === "below", "a full-width menu uses the free space under it");
+assert(!coversMenu(belowWide, wideMenu), "actions under a full-width menu do not cover its rows");
+const tightMenu = { left: 148, top: 8, right: 292, bottom: 292, width: 144, height: 284 };
+const besideTight = api.placeBesideMenu(tightMenu, 280, 200, 300, 320);
+assert(!coversMenu(besideTight, tightMenu), "a narrow gap still keeps the actions off the menu");
+assert(onScreen(besideTight, 300, 320), "actions in a narrow window stay on screen");
+
 if (failures) {
   console.error(`\n${failures} failed`);
   process.exit(1);
