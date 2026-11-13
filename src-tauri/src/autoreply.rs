@@ -2153,7 +2153,9 @@ pub async fn autoreply_turn(
     if !settings.standin_enabled {
         return Ok(Step::Idle);
     }
-    if is_agent_backend(&settings.standin_backend) && round > 0 {
+    if is_agent_backend(&settings.standin_backend)
+        && !starts_agent_run(&settings.standin_backend, round)
+    {
         return Ok(Step::Idle);
     }
     let chat = match direct_chat(&chat_id) {

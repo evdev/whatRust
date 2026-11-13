@@ -563,7 +563,7 @@ async fn transcribe_locked(
         FLUID_TRANSCRIBE_SECS * 1000,
     )?;
     match claim {
-        Claim::Ready(note) => ready_note(app, settings, &dir, account, id, note).await,
+        Claim::Ready(note) => ready_note(app, settings, &dir, account, id, *note).await,
         Claim::Busy => Ok(loading(id)),
         Claim::Owned(generation) => {
             let audio = framed.audio;
@@ -1219,6 +1219,7 @@ fn keep_note(path: &Path, pid: u32, now: SystemTime, alive: &impl Fn(u32) -> boo
     age <= Duration::from_secs(FLUID_TRANSCRIBE_SECS) && alive(pid)
 }
 
+#[cfg(any(unix, test))]
 fn probe_process(pid: u32, bins: &[&str]) -> bool {
     if bins.is_empty() {
         return true;

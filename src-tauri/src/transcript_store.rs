@@ -73,7 +73,7 @@ pub struct NewNote {
 pub enum Claim {
     /// This caller owns FluidVoice. The number is the claim generation.
     Owned(u64),
-    Ready(Note),
+    Ready(Box<Note>),
     Busy,
 }
 
@@ -324,7 +324,7 @@ pub fn claim(
         return Err("claim".into());
     };
     if note.state == "ready" {
-        return Ok(Claim::Ready(note));
+        return Ok(Claim::Ready(Box::new(note)));
     }
     if now.saturating_sub(note.claimed_ms) >= stale_ms {
         let updated = conn
@@ -339,7 +339,7 @@ pub fn claim(
         }
         if let Some(note) = load_token(&conn, &token)? {
             if note.state == "ready" {
-                return Ok(Claim::Ready(note));
+                return Ok(Claim::Ready(Box::new(note)));
             }
         }
     }

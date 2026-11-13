@@ -18,7 +18,6 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv6Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
@@ -91,7 +90,7 @@ pub fn normalize_hermes_url(raw: &str) -> Option<String> {
         return None;
     }
     let authority = match rest.split_once('/') {
-        Some((authority, path)) if path.is_empty() => authority,
+        Some((authority, "")) => authority,
         Some(_) => return None,
         None => rest,
     };
@@ -842,6 +841,7 @@ fn restrict(path: &Path) {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::thread;
 
     #[test]
