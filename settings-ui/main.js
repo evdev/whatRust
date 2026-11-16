@@ -1,6 +1,6 @@
 const invoke = window.__TAURI__.core.invoke;
 const LANGS = ["pt-BR", "en"];
-const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "standin_enabled"];
+const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "mention_alert", "mention_alert_sound", "mention_alert_popup", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "standin_enabled"];
 const STANDIN_BACKENDS = ["api", "claude_cli", "grok_cli", "codex_cli", "hermes", "grok_bot"];
 const AI_PROVIDERS = ["openrouter", "gemini", "anthropic"];
 const LIST_PROVIDERS = ["gemini", "anthropic"];
@@ -24,7 +24,7 @@ let catalogToken = 0;
 let cliCatalogToken = 0;
 let catalogLoading = false;
 const ZOOM_DEFAULT = 1;
-const SINGLE_WINDOW_SUBTITLE = "Uma janela com um seletor de contas. Uma conta só carrega quando você a abre, e abrir outra não fecha a primeira. Requer reiniciar o whatRust.";
+const SINGLE_WINDOW_SUBTITLE = "One window with an account switcher. An account loads only when you open it, and opening another does not close the first. Requires restarting whatRust.";
 
 // The menu-bar rows are macOS-only. get_settings reports the OS this build targets
 // in `platform`; the rows start hidden and appear here once it is known.
@@ -34,7 +34,7 @@ function setMacRows(visible) {
 
 // The "Show menu bar icon" subtitle as authored in the markup; kept so it can
 // be restored when menu-bar-only is turned back off.
-const MENU_ICON_SUBTITLE = "Quando desativado, clique no ícone do Dock para abrir o whatRust";
+const MENU_ICON_SUBTITLE = "When off, click the Dock icon to open whatRust";
 
 // In menu-bar-only mode the tray icon is the app's only entry point and the
 // backend keeps it visible, so the switch is locked on.
@@ -46,8 +46,32 @@ function syncMenuBarIconRow() {
   icon.disabled = only;
   icon.checked = only ? true : menuBarIconChecked;
   document.getElementById("menu_bar_icon_subtitle").textContent = only
-    ? "O ícone da bandeja é o único ponto de entrada no modo somente barra de menus, por isso permanece visível"
+    ? "The tray icon is the only entry point in menu-bar-only mode, so it stays visible"
     : MENU_ICON_SUBTITLE;
+}
+
+// Turning the master switch on checks sound and popup. While it is off, those
+// two stay disabled. The idle note is the both-off row of the delivery table.
+function syncMentionAlert(turnedOn) {
+  const master = document.getElementById("mention_alert");
+  const sound = document.getElementById("mention_alert_sound");
+  const popup = document.getElementById("mention_alert_popup");
+  const form = window.mentionAlertForm.applyMentionAlertToggle({
+    mention_alert: master.checked,
+    mention_alert_sound: sound.checked,
+    mention_alert_popup: popup.checked,
+  }, turnedOn);
+  master.checked = form.state.mention_alert;
+  sound.checked = form.state.mention_alert_sound;
+  popup.checked = form.state.mention_alert_popup;
+  sound.disabled = !form.soundEnabled;
+  popup.disabled = !form.popupEnabled;
+  document.getElementById("mention_alert_idle").hidden = !form.idle;
+  const fileRow = document.getElementById("mention_alert_sound_file_row");
+  fileRow.hidden = !master.checked || !sound.checked;
+  document.getElementById("choose_mention_sound").disabled = !sound.checked;
+  document.getElementById("preview_mention_sound").disabled = !sound.checked;
+  document.getElementById("reset_mention_sound").disabled = !sound.checked || !mentionSoundFile;
 }
 
 // settings.json holds a zoom factor, not a preset name, and the zoom shortcuts
@@ -74,16 +98,25 @@ function selectNearestZoom(value) {
 // The chosen download folder (null = the system Downloads folder). Kept here
 // because save() rebuilds the whole settings object from the page.
 let downloadDir = null;
+let mentionSoundFile = null;
+
+function showMentionSound() {
+  const sub = document.getElementById("mention_alert_sound_file_subtitle");
+  sub.textContent = mentionSoundFile ? "Custom sound" : "Built-in sound";
+  sub.title = mentionSoundFile || "";
+  const soundOn = document.getElementById("mention_alert_sound").checked;
+  document.getElementById("reset_mention_sound").disabled = !soundOn || !mentionSoundFile;
+}
 
 function showDownloadDir() {
   const sub = document.getElementById("download_dir_subtitle");
-  sub.textContent = downloadDir || "Pasta Downloads do sistema";
+  sub.textContent = downloadDir || "System Downloads folder";
   sub.title = downloadDir || "";
   document.getElementById("reset_download_dir").disabled = !downloadDir;
 }
 
 function showIcon(custom) {
-  document.getElementById("icon_subtitle").textContent = custom ? "Personalizado" : "Padrão";
+  document.getElementById("icon_subtitle").textContent = custom ? "Custom" : "Default";
   document.getElementById("reset_icon").disabled = !custom;
 }
 
@@ -116,7 +149,7 @@ async function resetDownloadDir() {
 
 async function chooseIcon() {
   try {
-    if (await invoke("choose_app_icon")) { showIcon(true); flash("Alterações salvas ✓", 1500); }
+    if (await invoke("choose_app_icon")) { showIcon(true); flash("Changes saved ✓", 1500); }
   } catch (e) { flash(String(e), 6000); }
 }
 
@@ -124,7 +157,26 @@ async function resetIcon() {
   try {
     await invoke("reset_app_icon");
     showIcon(false);
-    flash("Alterações salvas ✓", 1500);
+    flash("Changes saved ✓", 1500);
+  } catch (e) { flash(String(e), 6000); }
+}
+
+async function chooseMentionSound() {
+  try {
+    const name = await invoke("choose_mention_sound");
+    if (!name) return;
+    mentionSoundFile = name;
+    showMentionSound();
+    flash("Changes saved ✓", 1500);
+  } catch (e) { flash(String(e), 6000); }
+}
+
+async function resetMentionSound() {
+  try {
+    await invoke("reset_mention_sound");
+    mentionSoundFile = null;
+    showMentionSound();
+    flash("Changes saved ✓", 1500);
   } catch (e) { flash(String(e), 6000); }
 }
 
@@ -134,7 +186,7 @@ function paintChatSummaryConsent(on) {
   const state = document.getElementById("chat_summary_consent_state");
   const revoke = document.getElementById("chat_summary_revoke");
   if (!state || !revoke) return;
-  state.textContent = on ? "Permitido neste computador." : "Ainda não permitido.";
+  state.textContent = on ? "Allowed on this computer." : "Not allowed yet.";
   revoke.hidden = !on;
 }
 
@@ -147,12 +199,12 @@ async function load() {
   document.getElementById("title_bar_row").hidden = s.platform !== "linux";
   document.getElementById("title_bar").value = ["show", "hide"].includes(s.title_bar) ? s.title_bar : "auto";
   document.getElementById("title_bar_subtitle").textContent = s.tiling_wm
-    ? t("Detectado: {0}. No modo automático a barra fica oculta.", [s.tiling_wm])
-    : "Gerenciadores de janelas lado a lado, como o Hyprland, não usam barra de título.";
+    ? t("Detected: {0}. In automatic mode the bar is hidden.", [s.tiling_wm])
+    : "Tiling window managers such as Hyprland don't use a title bar.";
   if (/Win/.test(navigator.platform || navigator.userAgent)) {
     const startupRow = document.getElementById("start_minimized").closest("label");
-    startupRow.querySelector(".row-title").textContent = "Iniciar minimizado com o Windows";
-    startupRow.querySelector(".row-subtitle").textContent = "Vale apenas ao entrar no Windows. Ao abrir pelo atalho, a janela sempre aparece.";
+    startupRow.querySelector(".row-title").textContent = "Start minimized with Windows";
+    startupRow.querySelector(".row-subtitle").textContent = "Applies only at Windows sign-in. When opened from a shortcut, the window always appears.";
   }
   for (const f of BOOLS) {
     const el = document.getElementById(f);
@@ -165,7 +217,7 @@ async function load() {
   if (s.platform === "macos" && !s.menubar_supported) {
     menubarOnly.checked = false;
     document.getElementById("menubar_only_subtitle").textContent =
-      "Requer macOS 14 (Sonoma) ou superior — este Mac não consegue manter um painel oculto conectado";
+      "Requires macOS 14 (Sonoma) or later — this Mac cannot keep a hidden panel connected";
   }
   // Single-window mode (Linux/macOS): applies after a restart; menu-bar-only wins.
   const swRow = document.getElementById("single_window_row");
@@ -173,8 +225,8 @@ async function load() {
   const swNote = document.getElementById("single_window_subtitle");
   if (s.single_window_supported && !!s.single_window !== !!s.single_window_active) {
     swNote.textContent = s.single_window && s.menubar_only
-      ? "Reinicie o whatRust para aplicar. O modo somente barra de menus tem prioridade sobre esta opção."
-      : "Reinicie o whatRust para aplicar a mudança.";
+      ? "Restart whatRust to apply. Menu-bar-only mode takes priority over this option."
+      : "Restart whatRust to apply the change.";
   } else {
     swNote.textContent = SINGLE_WINDOW_SUBTITLE;
   }
@@ -237,9 +289,12 @@ async function load() {
   menuBarIconChecked = document.getElementById("menu_bar_icon").checked;
   syncMenuBarIconRow();
   downloadDir = s.download_dir || null;
+  mentionSoundFile = s.mention_alert_sound_file || null;
   showDownloadDir();
+  showMentionSound();
   showIcon(!!s.custom_icon);
   loadProxy(s);
+  syncMentionAlert(false);
 }
 
 // --- Proxy (issue #52) ---
@@ -331,6 +386,7 @@ async function save() {
   s.standin_agent_timeout_secs = parseInt(document.getElementById("standin_agent_timeout_secs").value, 10) || 150;
   s.standin_agent_runs_per_hour = parseInt(document.getElementById("standin_agent_runs_per_hour").value, 10) || 20;
   s.download_dir = downloadDir;
+  s.mention_alert_sound_file = mentionSoundFile;
   if (proxySupported) {
     s.proxy_mode = document.getElementById("proxy_mode").value;
     s.proxy_host = document.getElementById("proxy_host").value.trim();
@@ -354,10 +410,10 @@ async function save() {
     document.getElementById("standin_agent_runs_per_hour").value = String(saved.standin_agent_runs_per_hour || 20);
     syncProxyRestart();
     if (warn) {
-      note.textContent = t("Salvo com observação: {0}", [warn]);
+      note.textContent = t("Saved with a note: {0}", [warn]);
       setTimeout(() => (note.textContent = ""), 6000);
     } else {
-      note.textContent = "Alterações salvas ✓";
+      note.textContent = "Changes saved ✓";
       setTimeout(() => (note.textContent = ""), 1500);
     }
     return true;
@@ -376,7 +432,7 @@ async function accountAction(action) {
   document.querySelectorAll('#accounts-list button, .add-row input, .add-row button, #startup_account')
     .forEach(el => { el.disabled = true; });
   const note = document.getElementById('accounts-note');
-  note.textContent = 'Aguarde…';
+  note.textContent = 'Please wait…';
   try {
     await action();
     note.textContent = '';
@@ -396,20 +452,20 @@ function accountMenu(a, accounts, anchor) {
   const menu = document.createElement("div"); menu.id="account-actions";menu.className="account-actions";
   const nativePopover=typeof menu.showPopover==="function";
   if(nativePopover)menu.setAttribute("popover", "auto");
-  else {menu.style.position="fixed";menu.style.zIndex="9999";menu.showPopover=()=>{menu.style.display="block";menu.dataset.open="true";};menu.hidePopover=()=>{menu.style.display="none";menu.dataset.open="false";anchor.focus({preventScroll:true});};}menu.setAttribute("role", "menu");menu.setAttribute("aria-label", t("Ações de {0}", [a.name]));
+  else {menu.style.position="fixed";menu.style.zIndex="9999";menu.showPopover=()=>{menu.style.display="block";menu.dataset.open="true";};menu.hidePopover=()=>{menu.style.display="none";menu.dataset.open="false";anchor.focus({preventScroll:true});};}menu.setAttribute("role", "menu");menu.setAttribute("aria-label", t("Actions for {0}", [a.name]));
   const actions = [
-    ["Abrir conta", () => accountAction(() => invoke("open_account", {id:a.id}))],
-    ...( /Win/.test(navigator.platform || navigator.userAgent) ? [[a.detached ? "Reintegrar à janela" : "Abrir em janela separada", () => accountAction(() => invoke(a.detached?"attach_account":"detach_account",{id:a.id}))]] : []),
-    ["Usar ao iniciar",()=>accountAction(()=>invoke("set_default_account",{id:a.id}))],
-    ["Renomear",async()=>{const name=await Dlg.prompt("",{title:"Renomear conta",value:a.name,okLabel:"Renomear",requiredMessage:"Informe um nome."});if(name!==null&&name!==a.name)await accountAction(()=>invoke("rename_account",{id:a.id,name}));}],
+    ["Open account", () => accountAction(() => invoke("open_account", {id:a.id}))],
+    ...( /Win/.test(navigator.platform || navigator.userAgent) ? [[a.detached ? "Return to the main window" : "Open in a separate window", () => accountAction(() => invoke(a.detached?"attach_account":"detach_account",{id:a.id}))]] : []),
+    ["Use on startup",()=>accountAction(()=>invoke("set_default_account",{id:a.id}))],
+    ["Rename",async()=>{const name=await Dlg.prompt("",{title:"Rename account",value:a.name,okLabel:"Rename",requiredMessage:"Enter a name."});if(name!==null&&name!==a.name)await accountAction(()=>invoke("rename_account",{id:a.id,name}));}],
   ];
   const index=accounts.findIndex(x=>x.id===a.id);
-  for(const [delta,label] of [[-1,"Mover para cima"],[1,"Mover para baixo"]]) {
+  for(const [delta,label] of [[-1,"Move up"],[1,"Move down"]]) {
     if(index+delta<0||index+delta>=accounts.length)continue;
     actions.push([label,()=>accountAction(()=>{const ids=accounts.map(x=>x.id);[ids[index],ids[index+delta]]=[ids[index+delta],ids[index]];return invoke("reorder_accounts",{ids});})]);
   }
-  if(accounts.length>1)actions.push(["Remover conta",async()=>{if(await Dlg.confirm("A sessão local desta conta será apagada. Para usá-la novamente, você precisará ler o QR code.",{title:t('Remover "{0}"?',[a.name]),okLabel:"Remover",danger:true}))await accountAction(()=>invoke("remove_account",{id:a.id}));}]);
-  for(const [label,action] of actions){const button=document.createElement("button");button.type="button";button.textContent=label;button.setAttribute("role","menuitem");if(label==="Remover conta")button.className="danger";button.onclick=()=>{menu.hidePopover();menu.dataset.open="false";action();};menu.appendChild(button);}
+  if(accounts.length>1)actions.push(["Remove account",async()=>{if(await Dlg.confirm("This account's local session will be deleted. To use it again, you will need to scan the QR code.",{title:t('Remove "{0}"?',[a.name]),okLabel:"Remove",danger:true}))await accountAction(()=>invoke("remove_account",{id:a.id}));}]);
+  for(const [label,action] of actions){const button=document.createElement("button");button.type="button";button.textContent=label;button.setAttribute("role","menuitem");if(label==="Remove account")button.className="danger";button.onclick=()=>{menu.hidePopover();menu.dataset.open="false";action();};menu.appendChild(button);}
   const lifecycle=new AbortController();
   const originalHide=menu.hidePopover.bind(menu);
   function afterClose(){menu.dataset.open="false";anchor.setAttribute("aria-expanded","false");lifecycle.abort();if(anchor.isConnected&&!document.querySelector('.dlg-backdrop,.account-actions[data-open="true"]'))anchor.focus({preventScroll:true});}
@@ -446,12 +502,12 @@ function renderAccounts(accounts) {
     const option=document.createElement("option");option.value=a.id;option.textContent=a.name;option.selected=a.is_default;startup.appendChild(option);
     const row=document.createElement("div");row.className="account-row";
     const avatar=document.createElement("span");avatar.className="account-avatar";avatar.setAttribute("aria-hidden","true");avatar.textContent=a.name.trim().split(/\s+/).slice(0,2).map(x=>x[0]).join("").toUpperCase();
-    const open=document.createElement("button");open.type="button";open.className="account-open";open.setAttribute("aria-label",t("Abrir {0}",[a.name]));
+    const open=document.createElement("button");open.type="button";open.className="account-open";open.setAttribute("aria-label",t("Open {0}",[a.name]));
     const name=document.createElement("span");name.className="acct-name";name.textContent=a.name;
-    const info=document.createElement("span");info.className="acct-subtitle";info.textContent=a.detached?"Em janela separada":a.is_default?"Conta ao iniciar":"WhatsApp";open.append(name,info);open.onclick=()=>accountAction(()=>invoke("open_account",{id:a.id}));
+    const info=document.createElement("span");info.className="acct-subtitle";info.textContent=a.detached?"In a separate window":a.is_default?"Account on startup":"WhatsApp";open.append(name,info);open.onclick=()=>accountAction(()=>invoke("open_account",{id:a.id}));
     row.append(avatar,open);
-    if(a.unread){const badge=document.createElement("span");badge.className="acct-unread";badge.textContent=a.unread;badge.title=t("{0} conversas não lidas",[a.unread]);row.appendChild(badge);}
-    const more=document.createElement("button");more.type="button";more.className="account-more";more.textContent="⋮";more.setAttribute("aria-label",t("Opções de {0}",[a.name]));more.setAttribute("aria-haspopup","menu");more.onclick=()=>accountMenu(a,accounts,more);row.appendChild(more);list.appendChild(row);
+    if(a.unread){const badge=document.createElement("span");badge.className="acct-unread";badge.textContent=a.unread;badge.title=t("{0} unread chats",[a.unread]);row.appendChild(badge);}
+    const more=document.createElement("button");more.type="button";more.className="account-more";more.textContent="⋮";more.setAttribute("aria-label",t("Options for {0}",[a.name]));more.setAttribute("aria-haspopup","menu");more.onclick=()=>accountMenu(a,accounts,more);row.appendChild(more);list.appendChild(row);
   }
 }
 
@@ -460,7 +516,7 @@ async function loadAccounts() {
     const accounts = await invoke("list_accounts");
     renderAccounts(accounts);
   } catch (e) {
-    document.getElementById('accounts-note').textContent = t('Não foi possível carregar as contas: {0}', [String(e)]);
+    document.getElementById('accounts-note').textContent = t('Could not load the accounts: {0}', [String(e)]);
   }
 }
 
@@ -478,6 +534,11 @@ window.addEventListener("DOMContentLoaded", () => {
   // The macOS rows stay hidden until load() knows the platform.
   document.getElementById("menubar_only").addEventListener("change", syncMenuBarIconRow);
   document.getElementById("hide_dock_icon").addEventListener("change", syncMenuBarIconRow);
+  document.getElementById("mention_alert").addEventListener("change", () => {
+    syncMentionAlert(document.getElementById("mention_alert").checked);
+  });
+  document.getElementById("mention_alert_sound").addEventListener("change", () => syncMentionAlert(false));
+  document.getElementById("mention_alert_popup").addEventListener("change", () => syncMentionAlert(false));
   load();
   loadAccounts();
   loadLock();
@@ -510,6 +571,11 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("reset_download_dir").addEventListener("click", resetDownloadDir);
   document.getElementById("choose_icon").addEventListener("click", chooseIcon);
   document.getElementById("reset_icon").addEventListener("click", resetIcon);
+  document.getElementById("choose_mention_sound").addEventListener("click", chooseMentionSound);
+  document.getElementById("reset_mention_sound").addEventListener("click", resetMentionSound);
+  document.getElementById("preview_mention_sound").addEventListener("click", () => {
+    invoke("preview_mention_sound").catch((error) => flash(String(error), 6000));
+  });
   // Zoom saves on change rather than on Save: picking a size you cannot see the
   // effect of is guesswork, and the webview applies it immediately.
   document.getElementById("zoom").addEventListener("change", save);
@@ -552,14 +618,14 @@ window.addEventListener("DOMContentLoaded", () => {
       note.textContent = "Copied ✓";
       setTimeout(() => (note.textContent = ""), 1500);
     } catch (e) {
-      note.textContent = "Could not copy. Select the instructions and copy them.";
+      note.textContent = t("Could not copy. Select the instructions and copy them.");
     }
   });
   document.getElementById("chat_summary_revoke").addEventListener("click", async () => {
     try {
       await invoke("clear_chat_summary_consent");
       paintChatSummaryConsent(false);
-      flash("Alterações salvas ✓", 1500);
+      flash("Changes saved ✓", 1500);
     } catch (e) { flash(String(e), 6000); }
   });
   document.getElementById("save_persona").addEventListener("click", savePersona);
@@ -670,7 +736,7 @@ async function refreshAgentStatus() {
     const status = await invoke("standin_agent_status");
     const host = document.getElementById("standin_grok_host");
     if (status.grok_ready && status.grok_host) {
-      host.textContent = "Webhook host: " + status.grok_host + ".";
+      host.textContent = t("Webhook host: {0}.", [status.grok_host]);
     } else {
       host.textContent = "No webhook saved yet.";
     }
@@ -772,7 +838,7 @@ function syncModelControls() {
     catalogLoading = false;
     document.getElementById("translate_model").value = translateModels[shownProvider] || "";
     document.getElementById("summary_model").value = summaryModels[shownProvider] || "";
-    document.getElementById("translate_model_hint").textContent = "Nome do modelo aceito por esse provedor.";
+    document.getElementById("translate_model_hint").textContent = "Model name accepted by that provider.";
     return;
   }
   renderModelSelects();
@@ -855,21 +921,21 @@ async function loadModelCatalog(provider) {
   const hint = document.getElementById("translate_model_hint");
   if (!keyFlags[provider]) {
     catalogLoading = false;
-    hint.textContent = "Guarde a chave da API para listar os modelos.";
+    hint.textContent = "Save the API key to list models.";
     renderModelSelects();
     return;
   }
   if (modelCatalogs[provider]) {
     catalogLoading = false;
     hint.textContent = modelCatalogs[provider].length
-      ? "Modelos principais disponíveis para esta chave."
-      : "Nenhum modelo principal disponível para esta chave.";
+      ? "Main models available for this key."
+      : "No main model is available for this key.";
     renderModelSelects();
     return;
   }
   const token = ++catalogToken;
   catalogLoading = true;
-  hint.textContent = "Carregando modelos…";
+  hint.textContent = "Loading models…";
   document.getElementById("translate_model_select").disabled = true;
   document.getElementById("summary_model_select").disabled = true;
   if (document.getElementById("standin_backend").value === "api") {
@@ -880,8 +946,8 @@ async function loadModelCatalog(provider) {
     if (token !== catalogToken || shownProvider !== provider) return;
     modelCatalogs[provider] = Array.isArray(models) ? models : [];
     hint.textContent = modelCatalogs[provider].length
-      ? "Modelos principais disponíveis para esta chave."
-      : "Nenhum modelo principal disponível para esta chave.";
+      ? "Main models available for this key."
+      : "No main model is available for this key.";
   } catch (e) {
     if (token !== catalogToken || shownProvider !== provider) return;
     const message = errorText(e);
@@ -908,7 +974,7 @@ function setKeyStatus(text, tone) {
 
 function refreshKeyState() {
   const on = keyFlags[document.getElementById("ai_provider").value];
-  setKeyStatus(on ? "Chave guardada neste computador." : "Nenhuma chave guardada.", "ok");
+  setKeyStatus(on ? "Key saved on this computer." : "No key saved.", "ok");
 }
 
 async function offerFluidVoiceIfMissing() {
@@ -924,9 +990,9 @@ async function offerFluidVoiceIfMissing() {
 
 async function offerFluidVoiceInstall(missing) {
   const message = missing
-    ? "O FluidVoice não respondeu. A transcrição usa esse aplicativo separado, e a versão para Windows ainda é beta. Abrir o instalador oficial? Depois, ative a API local no FluidVoice."
-    : "O FluidVoice é um aplicativo separado, e a versão para Windows ainda é beta. O whatRust abre o instalador oficial no navegador. Depois, ative a API local no FluidVoice.";
-  if (!await Dlg.confirm(message, { title: "Instalar o FluidVoice?", okLabel: "Abrir instalador" })) return;
+    ? "FluidVoice did not respond. Transcription uses that separate app, and the Windows version is still in beta. Open the official installer? Then turn on the local API in FluidVoice."
+    : "FluidVoice is a separate app, and the Windows version is still in beta. whatRust opens the official installer in the browser. Then turn on the local API in FluidVoice.";
+  if (!await Dlg.confirm(message, { title: "Install FluidVoice?", okLabel: "Open installer" })) return;
   try {
     await invoke("open_fluidvoice_windows");
   } catch (e) {
@@ -936,7 +1002,7 @@ async function offerFluidVoiceInstall(missing) {
 
 async function testFluidVoice() {
   const status = document.getElementById("fluidvoice_status");
-  status.textContent = "Verificando…";
+  status.textContent = "Checking…";
   try {
     const port = parseInt(document.getElementById("fluidvoice_port").value, 10) || 47733;
     const result = await invoke("fluidvoice_status", { port });
@@ -954,7 +1020,7 @@ async function saveAiKey() {
   const key = input.value.trim();
   const button = document.getElementById("save_ai_key");
   if (!key) {
-    setKeyStatus("Digite a chave da API.", "warn");
+    setKeyStatus("Enter the API key.", "warn");
     return;
   }
   button.disabled = true;
@@ -962,7 +1028,7 @@ async function saveAiKey() {
   // keep every model menu disabled after this check finishes.
   catalogToken += 1;
   catalogLoading = false;
-  setKeyStatus("Verificando a chave…", "ok");
+  setKeyStatus("Checking the key…", "ok");
   try {
     const result = await invoke("set_ai_key", { provider, key, remove: false });
     keyFlags[provider] = !!result.stored;
@@ -988,19 +1054,19 @@ async function saveAiKey() {
 async function removeAiKey() {
   const provider = document.getElementById("ai_provider").value;
   if (!keyFlags[provider]) {
-    setKeyStatus("Nenhuma chave guardada.", "ok");
+    setKeyStatus("No key saved.", "ok");
     return;
   }
-  if (!await Dlg.confirm("A chave guardada deste provedor será apagada deste computador.", {
-    title: "Remover chave",
-    okLabel: "Remover",
+  if (!await Dlg.confirm("This provider's saved key will be deleted from this computer.", {
+    title: "Remove key",
+    okLabel: "Remove",
     danger: true,
   })) return;
   try {
     const result = await invoke("set_ai_key", { provider, key: "", remove: true });
     keyFlags[provider] = false;
     modelCatalogs[provider] = null;
-    setKeyStatus(result.detail || "A chave deste provedor foi removida deste computador.", "ok");
+    setKeyStatus(result.detail || "This provider's key was removed from this computer.", "ok");
     if (provider === shownProvider) syncModelControls();
   } catch (e) {
     setKeyStatus(errorText(e), "bad");
@@ -1024,7 +1090,7 @@ async function loadLock() {
   if (s.enabled) {
     const row = document.getElementById("biometric_row");
     row.hidden = !s.biometric_available;
-    document.getElementById("biometric_label").textContent = t("Usar {0}", [s.biometric_label]);
+    document.getElementById("biometric_label").textContent = t("Use {0}", [s.biometric_label]);
     document.getElementById("biometric_enabled").checked = s.biometric_enabled;
     document.getElementById("lock_on_launch").checked = s.lock_on_launch;
     document.getElementById("lock_on_hide").checked = s.lock_on_hide;
@@ -1050,47 +1116,47 @@ function wireLock() {
       document.getElementById("lock_pw1").value = "";
       document.getElementById("lock_pw2").value = "";
       await loadLock();
-    } catch (e) { await Dlg.alert(String(e), { title: "Não foi possível ativar o bloqueio" }); }
+    } catch (e) { await Dlg.alert(String(e), { title: "Could not turn on the lock" }); }
   });
 
   document.getElementById("lock_now").addEventListener("click", async () => {
-    try { await invoke("lock_app"); } catch (e) { await Dlg.alert(String(e), { title: "Não foi possível bloquear" }); }
+    try { await invoke("lock_app"); } catch (e) { await Dlg.alert(String(e), { title: "Could not lock" }); }
   });
 
   document.getElementById("change_pw").addEventListener("click", async () => {
     const current = await Dlg.prompt("", {
-      title: "Senha atual",
+      title: "Current password",
       password: true,
-      okLabel: "Continuar",
-      requiredMessage: "Informe sua senha atual.",
+      okLabel: "Continue",
+      requiredMessage: "Enter your current password.",
     });
     if (current === null) return;
-    const next = await Dlg.prompt("Pelo menos 6 caracteres.", {
-      title: "Nova senha",
+    const next = await Dlg.prompt("At least 6 characters.", {
+      title: "New password",
       password: true,
-      okLabel: "Alterar",
-      requiredMessage: "Informe uma nova senha.",
+      okLabel: "Change",
+      requiredMessage: "Enter a new password.",
     });
     if (next === null) return;
     try {
       await invoke("change_app_lock_password", { current, new: next, confirm: next });
-      await Dlg.alert("Sua senha de bloqueio foi alterada.", { title: "Senha alterada" });
-    } catch (e) { await Dlg.alert(String(e), { title: "Não foi possível alterar a senha" }); }
+      await Dlg.alert("Your lock password was changed.", { title: "Password changed" });
+    } catch (e) { await Dlg.alert(String(e), { title: "Could not change the password" }); }
   });
 
   document.getElementById("disable_lock").addEventListener("click", async () => {
-    const current = await Dlg.prompt("Informe sua senha atual para desativar o bloqueio.", {
-      title: "Desativar bloqueio",
+    const current = await Dlg.prompt("Enter your current password to turn off the lock.", {
+      title: "Turn off lock",
       password: true,
-      okLabel: "Desativar",
+      okLabel: "Turn off",
       danger: true,
-      requiredMessage: "Informe sua senha atual.",
+      requiredMessage: "Enter your current password.",
     });
     if (current === null) return;
     try {
       await invoke("disable_app_lock", { current });
       await loadLock();
-    } catch (e) { await Dlg.alert(String(e), { title: "Não foi possível desativar o bloqueio" }); }
+    } catch (e) { await Dlg.alert(String(e), { title: "Could not turn off the lock" }); }
   });
 
   document.getElementById("biometric_enabled").addEventListener("change", async (e) => {
@@ -1098,12 +1164,12 @@ function wireLock() {
       await invoke("set_biometric_enabled", { enabled: e.target.checked });
     } catch (err) {
       e.target.checked = !e.target.checked; // revert on failure
-      await Dlg.alert(String(err), { title: "Não foi possível alterar a biometria" });
+      await Dlg.alert(String(err), { title: "Could not change biometrics" });
     }
     await loadLock();
   });
 
-  const reportLockOptionFailure = (e) => Dlg.alert(String(e), { title: "Não foi possível salvar" });
+  const reportLockOptionFailure = (e) => Dlg.alert(String(e), { title: "Could not save" });
   for (const id of ["lock_on_launch", "lock_on_hide"]) {
     document.getElementById(id).addEventListener("change", () => saveLockOptions().catch(reportLockOptionFailure));
   }
@@ -1130,7 +1196,7 @@ function stopRecording(restore) {
   window.removeEventListener("keydown", onRecordKeydown, true);
   window.removeEventListener("blur", onRecordBlur, true);
   const btn = document.getElementById(recordBtnId);
-  btn.textContent = "Gravar";
+  btn.textContent = "Record";
   btn.classList.remove("recording");
   if (restore) document.getElementById(recordInputId).value = hotkeyPrev;
 }
@@ -1144,9 +1210,9 @@ function onRecordKeydown(e) {
   if (e.key === "Escape") { setHotkeyHint(""); stopRecording(true); return; }
   const mods = { ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey };
   const accel = window.HotkeyFmt.comboToAccelerator(mods, e.code);
-  if (accel === null) { setHotkeyHint("Tecla não suportada. Tente outra."); return; }
+  if (accel === null) { setHotkeyHint("Unsupported key. Try another."); return; }
   if (!window.HotkeyFmt.isValidCombo(mods, e.code)) {
-    setHotkeyHint("Inclua Ctrl, Alt ou Shift.");
+    setHotkeyHint("Include Ctrl, Alt or Shift.");
     return;
   }
   document.getElementById(recordInputId).value = accel;
@@ -1161,7 +1227,7 @@ function toggleRecording(inputId, btnId) {
   recordBtnId = btnId;
   hotkeyPrev = document.getElementById(inputId).value;
   const btn = document.getElementById(btnId);
-  btn.textContent = "Pressione as teclas… (Esc cancela)";
+  btn.textContent = "Press the keys… (Esc cancels)";
   btn.classList.add("recording");
   setHotkeyHint("");
   window.addEventListener("keydown", onRecordKeydown, true);

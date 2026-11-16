@@ -15,18 +15,18 @@
   }
 
   function when(ms) {
-    return ms > 0 ? new Date(ms).toLocaleString(I18n.locale()) : t("Nunca");
+    return ms > 0 ? new Date(ms).toLocaleString(I18n.locale()) : t("Never");
   }
 
   // What the "Install updates automatically" switch does for this install type.
   function autoInstallNote(m) {
     if (m.id === "appimage" || m.id === "macos") {
-      return t("Baixa, confere e substitui o aplicativo em segundo plano. A nova versão começa na próxima vez que você abrir o whatRust.");
+      return t("Downloads, verifies and replaces the app in the background. The new version starts the next time you open whatRust.");
     }
     if (m.id === "windows-nsis") {
-      return t("Baixa e confere em segundo plano. O instalador roda quando você clica em Reiniciar e instalar, porque ele reinicia o whatRust.");
+      return t("Downloads and verifies in the background. The installer runs when you click Restart and install, because it restarts whatRust.");
     }
-    return t("Não se aplica a este tipo de instalação: ela precisa de senha ou é atualizada por outra ferramenta. Você instala com um clique.");
+    return t("Does not apply to this install type: it needs a password or is updated by another tool. You install with one click.");
   }
 
   function render(s) {
@@ -45,55 +45,55 @@
     let install = false, apply = false, restart = false, page = false;
     const busy = s.state === "downloading" || s.state === "installing";
     switch (s.state) {
-      case "checking": title = t("Procurando atualizações…"); break;
-      case "current": title = t("Você está na versão mais recente"); break;
+      case "checking": title = t("Looking for updates…"); break;
+      case "current": title = t("You are on the latest version"); break;
       case "available":
       case "error":
         if (s.newer) {
-          title = t("A versão {0} está disponível", [v]);
+          title = t("Version {0} is available", [v]);
           page = true;
           if (!m.canInstall) message = m.howTo;
-          else if (!m.assetAvailable) message = t("Esta versão não tem um arquivo para o seu tipo de instalação.");
+          else if (!m.assetAvailable) message = t("This release has no file for your install type.");
           else install = true;
         } else if (s.state === "error") {
-          title = t("Não foi possível procurar atualizações");
+          title = t("Could not look for updates");
         }
         break;
       case "downloading":
-        title = t("Baixando a versão {0}…", [v]);
+        title = t("Downloading version {0}…", [v]);
         progress = s.total > 0 ? Math.min(100, Math.round((s.received / s.total) * 100)) : -1;
-        message = s.total > 0 ? t("{0} MB de {1} MB", [mb(s.received), mb(s.total)]) : t("{0} MB", [mb(s.received)]);
+        message = s.total > 0 ? t("{0} MB of {1} MB", [mb(s.received), mb(s.total)]) : t("{0} MB", [mb(s.received)]);
         break;
       case "installing":
-        title = t("Instalando a versão {0}…", [v]);
+        title = t("Installing version {0}…", [v]);
         progress = -1;
-        if (m.id === "deb") message = t("Digite sua senha de administrador quando o sistema pedir.");
+        if (m.id === "deb") message = t("Enter your administrator password when the system asks.");
         break;
       case "staged":
-        title = t("A versão {0} está pronta para instalar", [v]);
-        message = t("O instalador já foi baixado e conferido. O whatRust vai fechar e abrir de novo ao instalar.");
+        title = t("Version {0} is ready to install", [v]);
+        message = t("The installer has been downloaded and verified. whatRust will close and open again when it installs.");
         apply = true;
         break;
       case "ready":
-        title = t("A versão {0} foi instalada", [v]);
-        message = t("Reinicie o whatRust para usar a nova versão.");
+        title = t("Version {0} was installed", [v]);
+        message = t("Restart whatRust to use the new version.");
         restart = true;
         break;
       case "handoff":
-        title = t("Instalando a versão {0}…", [v]);
-        message = t("O instalador assumiu. O whatRust vai fechar e abrir de novo sozinho.");
+        title = t("Installing version {0}…", [v]);
+        message = t("The installer has taken over. whatRust will close and open again by itself.");
         break;
       case "opened":
-        title = t("Arquivo baixado e conferido");
+        title = t("File downloaded and verified");
         message = s.note || (m.id === "flatpak"
-          ? t("O pacote foi aberto na central de programas do sistema; confirme a instalação lá. Se nada abrir, execute o comando abaixo.")
-          : t("O arquivo foi aberto. Termine a instalação por lá."));
+          ? t("The package was opened in your system's software center; confirm the installation there. If nothing opens, run the command below.")
+          : t("The file was opened. Finish the installation there."));
         break;
       default: break;
     }
     // A message from the backend for a type that cannot install (and the opened path).
     if (s.state === "opened" && s.opened) message += " " + s.opened;
-    if (m.needsPassword && install) message = t("Pede sua senha de administrador ao instalar.");
+    if (m.needsPassword && install) message = t("Asks for your administrator password when installing.");
 
     show("upd_panel", !!title);
     $("upd_title").textContent = title;
@@ -106,7 +106,7 @@
     $("upd_error").textContent = s.error || "";
     show("upd_error", !!s.error && s.state !== "checking");
     show("upd_install", install && !busy);
-    $("upd_install").textContent = m.id === "flatpak" ? t("Baixar e abrir") : t("Baixar e instalar");
+    $("upd_install").textContent = m.id === "flatpak" ? t("Download and open") : t("Download and install");
     show("upd_apply", apply);
     show("upd_restart", restart);
     show("upd_page", page);
@@ -170,8 +170,8 @@
     $("upd_page").addEventListener("click", () => act("open_release_page"));
     $("upd_copy").addEventListener("click", async () => {
       const ok = await copy($("upd_command").textContent);
-      $("upd_copy").textContent = ok ? t("Copiado ✓") : t("Selecione e copie");
-      setTimeout(() => ($("upd_copy").textContent = t("Copiar")), 2000);
+      $("upd_copy").textContent = ok ? t("Copied ✓") : t("Select and copy");
+      setTimeout(() => ($("upd_copy").textContent = t("Copy")), 2000);
     });
     const ev = window.__TAURI__ && window.__TAURI__.event;
     if (ev) ev.listen("whatrust-update-status", (e) => render(e.payload)).catch(() => {});

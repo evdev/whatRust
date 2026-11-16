@@ -92,6 +92,7 @@ select option { background: var(--bg); color: var(--fg); }
 .switch::before { content: ""; position: absolute; left: 3px; top: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; }
 .switch:checked { background: var(--green); }
 .switch:checked::before { transform: translateX(16px); }
+.switch:disabled { opacity: .45; cursor: default; }
 .account-row { border-radius:8px; display: flex; align-items: center; min-height: 88px; gap: 15px; padding: 14px 0; }
 .account-row:hover { background:var(--hover); }
 .account-avatar { height: 48px; width: 48px; border-radius: 50%; background: var(--hover); color: var(--dim); display: grid; place-items: center; font-size: 17px; flex: 0 0 48px; }

@@ -56,6 +56,11 @@ const PAGE_COMMANDS: &[&str] = &[
     "autoreply_turn",
     "autoreply_record_sent",
     "autoreply_pause_self",
+    "mention_event",
+    "mention_sent",
+    "mention_settled",
+    "mention_filter",
+    "mention_media",
 ];
 /// Commands only the local settings window may use.
 const SETTINGS_COMMANDS: &[&str] = &[
@@ -64,6 +69,9 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "pick_download_dir",
     "choose_app_icon",
     "reset_app_icon",
+    "choose_mention_sound",
+    "reset_mention_sound",
+    "preview_mention_sound",
     "restart_app",
     "list_accounts",
     "add_account",
@@ -297,10 +305,30 @@ fn local_windows_keep_exactly_their_own_commands() {
         "fluidvoice_status",
         "todo_list",
         "todo_delete",
+        "mention_event",
+        "mention_reply",
     ] {
         assert!(
             !allowed(&app, "lock", local, cmd),
             "lock must not reach {cmd}"
         );
     }
+    for cmd in [
+        "mention_reply",
+        "mention_card",
+        "mention_open",
+        "mention_dismiss",
+    ] {
+        assert!(
+            !allowed(&app, "wa-default", PAGE, cmd),
+            "the page must not reach {cmd}"
+        );
+        assert!(
+            allowed(&app, "mention-3", local, cmd),
+            "a reply popup must be allowed {cmd}"
+        );
+    }
+    assert!(!allowed(&app, "mention-3", local, "mention_event"));
+    assert!(!allowed(&app, "mention-3", local, "mention_media"));
+    assert!(!allowed(&app, "settings", local, "mention_reply"));
 }

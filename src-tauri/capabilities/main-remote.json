@@ -50,7 +50,12 @@
     "allow-autoreply-open-chat-doc",
     "allow-autoreply-turn",
     "allow-autoreply-record-sent",
-    "allow-autoreply-pause-self"
+    "allow-autoreply-pause-self",
+    "allow-mention-event",
+    "allow-mention-sent",
+    "allow-mention-settled",
+    "allow-mention-filter",
+    "allow-mention-media"
   ],
   "webviews": [
     "wa-*"

@@ -22,6 +22,8 @@ mod keys;
 mod links;
 mod llm;
 mod lock;
+mod mention;
+mod mention_sound;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod menubar;
 mod mp4audio;
@@ -171,6 +173,9 @@ pub fn run() {
                             & !tauri_plugin_window_state::StateFlags::VISIBLE
                             & !tauri_plugin_window_state::StateFlags::DECORATIONS,
                     )
+                    // Reply popups are one-shot. Restoring one would reopen an
+                    // empty window on the next launch.
+                    .with_filter(|label| !label.starts_with("mention-"))
                     .build(),
             )
             .plugin(
@@ -212,6 +217,7 @@ pub fn run() {
         .manage(chat_summary::ChatSummaryState::default())
         .manage(todo::TodoState::default())
         .manage(autoreply::AutoreplyState::default())
+        .manage(mention::Popups::default())
         .invoke_handler(tauri::generate_handler![
             integration::integration_state,
             integration::report_integration,
@@ -239,6 +245,9 @@ pub fn run() {
             commands::open_settings,
             commands::pick_download_dir,
             commands::choose_app_icon,
+            commands::choose_mention_sound,
+            commands::reset_mention_sound,
+            commands::preview_mention_sound,
             commands::reset_app_icon,
             commands::list_accounts,
             commands::add_account,
@@ -303,6 +312,15 @@ pub fn run() {
             autoreply::standin_cli_status,
             autoreply::set_standin_secret,
             autoreply::standin_agent_status,
+            mention::mention_event,
+            mention::mention_card,
+            mention::mention_reply,
+            mention::mention_sent,
+            mention::mention_open,
+            mention::mention_dismiss,
+            mention::mention_settled,
+            mention::mention_filter,
+            mention::mention_media,
         ])
         .setup(move |app| {
             // Menu-bar-only on macOS: load settings early (the rest of setup needs them

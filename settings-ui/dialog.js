@@ -93,7 +93,7 @@
     var actions = el("div", "dlg-actions");
     var cancel = null;
     if (kind !== "alert") {
-      cancel = el("button", "dlg-secondary", opts.cancelLabel || "Cancelar");
+      cancel = el("button", "dlg-secondary", opts.cancelLabel || "Cancel");
       cancel.type = "button";
       actions.appendChild(cancel);
     }
@@ -111,7 +111,7 @@
         // Never trim a password: leading or trailing whitespace is part of it.
         var v = opts.password ? input.value : input.value.trim();
         if (opts.required !== false && !v) {
-          error.textContent = opts.requiredMessage || "Este campo não pode ficar vazio.";
+          error.textContent = opts.requiredMessage || "This field cannot be empty.";
           error.hidden = false;
           input.focus();
           return;

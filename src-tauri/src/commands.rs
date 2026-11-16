@@ -236,6 +236,16 @@ pub fn set_settings(
     }
     // The icon is only switched through choose_app_icon / reset_app_icon.
     settings.custom_icon = stored.custom_icon;
+    if settings
+        .mention_alert_sound_file
+        .as_deref()
+        .is_some_and(|name| !crate::mention_sound::is_present(&app, name))
+    {
+        settings.mention_alert_sound_file = None;
+    }
+    if settings.mention_alert_sound_file.is_none() && stored.mention_alert_sound_file.is_some() {
+        crate::mention_sound::clear_stored(&app);
+    }
     // Recorded from the chat after the notice, cleared by clear_chat_summary_consent.
     crate::settings::preserve_chat_summary_consent(&mut settings, &stored);
     crate::proxy::validate(&mut settings)?;
@@ -250,6 +260,7 @@ pub fn set_settings(
     }
     crate::voice::push_prefs(&app, &settings);
     crate::autoreply::push_prefs(&app, &settings);
+    crate::mention::push_prefs(&app, &settings);
     crate::window::push_device_icons(&app, settings.show_message_device);
     Ok(warning)
 }
@@ -399,6 +410,60 @@ pub fn reset_app_icon(window: tauri::Webview, app: tauri::AppHandle) -> Result<(
     crate::settings::save(&app, &s).map_err(|e| e.to_string())?;
     crate::appicon::apply(&app, false, true);
     crate::appicon::clear_custom(&app);
+    Ok(())
+}
+
+/// Copy a wav, mp3, ogg, m4a, aac, or flac file (up to 5 MB) and use it as the
+/// mention chime. `None` means the picker was cancelled.
+#[tauri::command]
+pub async fn choose_mention_sound(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    use tauri_plugin_dialog::DialogExt;
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_title(tr("Som do alerta"))
+        .add_filter("Audio", &["wav", "mp3", "ogg", "m4a", "aac", "flac"])
+        .set_parent(&window.window())
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|err| err.to_string())?;
+    let (name, bytes) = crate::mention_sound::validate_picked(&path)?;
+    crate::mention_sound::install(&app, &name, &bytes)?;
+    let mut settings = crate::settings::load(&app);
+    settings.mention_alert_sound_file = Some(name.clone());
+    crate::settings::save(&app, &settings).map_err(|err| err.to_string())?;
+    Ok(Some(name))
+}
+
+#[tauri::command]
+pub fn reset_mention_sound(window: tauri::Webview, app: tauri::AppHandle) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    crate::mention_sound::clear_stored(&app);
+    let mut settings = crate::settings::load(&app);
+    settings.mention_alert_sound_file = None;
+    crate::settings::save(&app, &settings).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn preview_mention_sound(window: tauri::Webview, app: tauri::AppHandle) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    crate::mention_sound::play(&app);
     Ok(())
 }
 
@@ -683,6 +748,7 @@ pub async fn remove_account(
     accounts::delete_profile(&app, &removed.id);
     crate::todo::delete_account(&app, &removed.id);
     crate::voice::delete_account(&app, &removed.id);
+    crate::mention::drop_account(&app, &removed_label);
 
     // If the removed account was the active one, point at a surviving account
     // so toggle/show don't target a window that no longer exists. (On Windows
@@ -1093,6 +1159,7 @@ mod tests {
             include_str!("../resources/todo.js"),
             include_str!("../resources/voice.js"),
             include_str!("../resources/summary.js"),
+            include_str!("../resources/mention.js"),
             include_str!("../../settings-ui/lock.js"),
             include_str!("../../settings-ui/main.js"),
             include_str!("../../settings-ui/panel.js"),
@@ -1106,6 +1173,7 @@ mod tests {
             include_str!("todo.rs"),
             include_str!("voice.rs"),
             include_str!("chat_summary.rs"),
+            include_str!("mention.rs"),
         ]
         .join("\n");
         let mut found = 0;

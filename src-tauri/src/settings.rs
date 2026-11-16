@@ -18,6 +18,21 @@ pub struct Settings {
     pub notify_when_focused: bool,
     pub notify_active_chat: bool,
     pub respect_muted: bool,
+    /// Distinct alert for a personal @mention, a reply to one of my messages,
+    /// or any new direct chat. Off until the user turns it on. @everyone alone
+    /// does not qualify, and status posts are not part of this alert.
+    /// `mention_alert_plan` is what a qualifying message does with the two
+    /// switches below. Both of those are ignored while this is off.
+    pub mention_alert: bool,
+    /// Distinct sound for a qualifying message. The settings page turns this
+    /// on when the master switch is turned on.
+    pub mention_alert_sound: bool,
+    /// Reply popup for a qualifying message. While this is on, that message
+    /// does not also raise the ordinary notification.
+    pub mention_alert_popup: bool,
+    /// Basename of a copied alert sound in the config directory, for example
+    /// `mention-alert.mp3`. `None` plays the bundled chime.
+    pub mention_alert_sound_file: Option<String>,
     /// macOS only: the app lives in the menu bar, no Dock icon and no
     /// standard window. The open account stays connected while its panel is
     /// hidden; other accounts load when opened. Off by default. Ignored
@@ -146,6 +161,10 @@ impl Default for Settings {
             notify_when_focused: true,
             notify_active_chat: true,
             respect_muted: true,
+            mention_alert: false,
+            mention_alert_sound: true,
+            mention_alert_popup: true,
+            mention_alert_sound_file: None,
             menubar_only: false,
             single_window: false,
             hide_dock_icon: false,
@@ -193,6 +212,52 @@ impl Default for Settings {
             title_bar: crate::decorations::AUTO.to_string(),
         }
     }
+}
+
+/// What a qualifying mention, reply, or direct message should do.
+///
+/// | master | popup | sound | result |
+/// | off    | *     | *     | nothing; the ordinary notification is unchanged |
+/// | on     | on    | on    | popup and sound; ordinary notification suppressed |
+/// | on     | on    | off   | silent popup; ordinary notification suppressed |
+/// | on     | off   | on    | sound only; ordinary notification unchanged |
+/// | on     | off   | off   | nothing; ordinary notification unchanged |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MentionAlertPlan {
+    pub popup: bool,
+    pub sound: bool,
+    pub suppress_ordinary: bool,
+}
+
+impl MentionAlertPlan {
+    pub const fn none() -> Self {
+        Self {
+            popup: false,
+            sound: false,
+            suppress_ordinary: false,
+        }
+    }
+}
+
+pub fn mention_alert_plan(s: &Settings) -> MentionAlertPlan {
+    if !s.mention_alert {
+        return MentionAlertPlan::none();
+    }
+    if s.mention_alert_popup {
+        return MentionAlertPlan {
+            popup: true,
+            sound: s.mention_alert_sound,
+            suppress_ordinary: true,
+        };
+    }
+    if s.mention_alert_sound {
+        return MentionAlertPlan {
+            popup: false,
+            sound: true,
+            suppress_ordinary: false,
+        };
+    }
+    MentionAlertPlan::none()
 }
 
 /// A Flatpak build cannot see the host's `claude`, `grok`, or `codex` binaries.
@@ -446,6 +511,11 @@ impl Settings {
     /// Repair values an older or hand-edited settings.json can carry.
     pub fn sanitized(mut self) -> Self {
         self.zoom = sanitize_zoom(self.zoom);
+        self.mention_alert_sound_file = self
+            .mention_alert_sound_file
+            .take()
+            .map(|name| name.trim().to_string())
+            .filter(|name| crate::mention_sound::is_stored_name(name));
         self.language = crate::i18n::sanitize_code(&self.language);
         self.fluidvoice_port = sanitize_port(self.fluidvoice_port);
         self.translate_target_lang = sanitize_label(&self.translate_target_lang, "English");
@@ -758,8 +828,8 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        sanitize_zoom, step_zoom, Settings, ZoomAction, DEFAULT_MODEL_OPENROUTER,
-        FLUIDVOICE_PORT_DEFAULT, ZOOM_MAX, ZOOM_MIN, ZOOM_STEPS,
+        mention_alert_plan, sanitize_zoom, step_zoom, MentionAlertPlan, Settings, ZoomAction,
+        DEFAULT_MODEL_OPENROUTER, FLUIDVOICE_PORT_DEFAULT, ZOOM_MAX, ZOOM_MIN, ZOOM_STEPS,
     };
 
     #[cfg(target_os = "linux")]
@@ -807,6 +877,83 @@ mod tests {
         assert!(s.notify_when_focused && s.notify_active_chat && s.respect_muted);
     }
 
+    #[test]
+    fn a_mention_sound_path_is_only_the_copied_name() {
+        let bad: Settings =
+            serde_json::from_str(r#"{"mention_alert_sound_file":"../mention-alert.wav"}"#).unwrap();
+        assert!(bad.sanitized().mention_alert_sound_file.is_none());
+        let good: Settings =
+            serde_json::from_str(r#"{"mention_alert_sound_file":"mention-alert.mp3"}"#).unwrap();
+        assert_eq!(
+            good.sanitized().mention_alert_sound_file.as_deref(),
+            Some("mention-alert.mp3")
+        );
+    }
+
+    #[test]
+    fn old_settings_leave_the_mention_alert_off() {
+        let s: Settings = serde_json::from_str(r#"{"notifications":true}"#).unwrap();
+        assert!(!s.mention_alert);
+        assert!(s.mention_alert_sound && s.mention_alert_popup);
+        assert!(s.mention_alert_sound_file.is_none());
+        assert_eq!(mention_alert_plan(&s), MentionAlertPlan::none());
+    }
+
+    #[test]
+    fn mention_alert_plan_follows_the_truth_table() {
+        // master, popup, sound, expected plan
+        let cases = [
+            (false, false, false, MentionAlertPlan::none()),
+            (false, true, true, MentionAlertPlan::none()),
+            (false, true, false, MentionAlertPlan::none()),
+            (false, false, true, MentionAlertPlan::none()),
+            (
+                true,
+                true,
+                true,
+                MentionAlertPlan {
+                    popup: true,
+                    sound: true,
+                    suppress_ordinary: true,
+                },
+            ),
+            (
+                true,
+                true,
+                false,
+                MentionAlertPlan {
+                    popup: true,
+                    sound: false,
+                    suppress_ordinary: true,
+                },
+            ),
+            (
+                true,
+                false,
+                true,
+                MentionAlertPlan {
+                    popup: false,
+                    sound: true,
+                    suppress_ordinary: false,
+                },
+            ),
+            (true, false, false, MentionAlertPlan::none()),
+        ];
+        for (master, popup, sound, expected) in cases {
+            let s = Settings {
+                mention_alert: master,
+                mention_alert_popup: popup,
+                mention_alert_sound: sound,
+                ..Settings::default()
+            };
+            assert_eq!(
+                mention_alert_plan(&s),
+                expected,
+                "master={master} popup={popup} sound={sound}"
+            );
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn flatpak_id_validation_blocks_path_and_desktop_entry_injection() {
@@ -834,6 +981,9 @@ mod tests {
         let s = Settings::default();
         assert!(s.close_to_tray);
         assert!(s.notifications);
+        assert!(!s.mention_alert);
+        assert!(s.mention_alert_sound && s.mention_alert_popup);
+        assert!(s.mention_alert_sound_file.is_none());
         // The menu-bar mode is opt-in.
         assert!(!s.menubar_only);
         assert_eq!(s.hotkey, "CmdOrCtrl+Shift+W");

@@ -238,6 +238,20 @@ static EN_TABLE: &[(&str, &str)] = &[
     ("{0} {1} sem permissão de leitura", "{0} {1} without read permission"),
     ("{0} {1} alterados durante a leitura", "{0} {1} changed while reading"),
     ("Não anexados: {0}.", "Not attached: {0}."),
+    ("Todos os arquivos", "All files"),
+    ("Salvar arquivo", "Save file"),
+    // mention alerts
+    ("Som do alerta", "Alert sound"),
+    ("Escreva uma resposta.", "Write a reply."),
+    ("A resposta é longa demais.", "The reply is too long."),
+    ("Não foi possível enviar.", "Could not send."),
+    ("O áudio tem mais de 2 MB.", "The voice note is larger than 2 MB."),
+    ("O arquivo tem mais de 8 MB.", "The file is larger than 8 MB."),
+    ("O WhatsApp ainda está abrindo. Tente de novo.", "WhatsApp is still opening. Try again."),
+    ("Conta indisponível.", "That account is not available."),
+    ("O arquivo não é um áudio aceito.", "That file is not a supported audio file."),
+    ("O áudio tem mais de 5 MB.", "The audio is larger than 5 MB."),
+    ("Não foi possível guardar o som.", "Could not store the sound."),
     // notifications
     ("Nova mensagem", "New message"),
     ("Você tem uma nova mensagem.", "You have a new message."),
@@ -482,6 +496,8 @@ mod tests {
             include_str!("update_service.rs"),
             include_str!("updater.rs"),
             include_str!("window.rs"),
+            include_str!("mention.rs"),
+            include_str!("mention_sound.rs"),
             include_str!("biometric/macos.rs"),
         ];
         let mut missing = Vec::new();

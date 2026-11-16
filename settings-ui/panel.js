@@ -4,21 +4,21 @@
   const back=document.getElementById("back-to-chat");const single=isWindows||!!window.__WHATRUST_SINGLE__;back.hidden=!single;
   let dirty=false, diagnosticsBusy=false, timer;
   document.querySelector(".prefs").addEventListener("input",e=>{if(e.target.id!=="new_account_name")dirty=true;});
-  document.getElementById("save").addEventListener("click",()=>{setTimeout(()=>{if(/^(Alterações salvas|Changes saved)/.test(document.getElementById("note").textContent))dirty=false;},400);});
-  async function close(){if(dirty && !await Dlg.confirm("As alterações ainda não foram salvas.",{title:"Voltar sem salvar?",okLabel:"Voltar"}))return;await invoke("close_app_panel");}
+  document.getElementById("save").addEventListener("click",()=>{setTimeout(()=>{if(/^(Changes saved|Alterações salvas)/.test(document.getElementById("note").textContent))dirty=false;},400);});
+  async function close(){if(dirty && !await Dlg.confirm("Your changes have not been saved.",{title:"Go back without saving?",okLabel:"Back"}))return;await invoke("close_app_panel");}
   back.onclick=close;
   document.addEventListener("keydown",e=>{if(e.key==="Escape" && !document.querySelector('.dlg-backdrop,dialog[open],.account-actions[data-open=true]') && !e.defaultPrevented){e.preventDefault();close();}});
-  const names={pending:"Aguardando envio",submitted:"Enviada ao Windows; exibição não confirmada",failed:"Falha no envio",suppressed:"Não enviada",activated:"Aviso aberto",dismissed:"Aviso encerrado"};
-  const reasons={locked:"Aplicativo bloqueado",notifications_disabled:"Notificações desativadas",foreground_disabled:"Avisos em primeiro plano desativados",active_chat_disabled:"Conversa ativa",muted:"Conversa silenciada",mute_state_unknown:"Silenciamento não confirmado",windows_rejected:"Windows recusou o envio"};
+  const names={pending:"Waiting to send",submitted:"Sent to Windows; display not confirmed",failed:"Send failed",suppressed:"Not sent",activated:"Alert opened",dismissed:"Alert dismissed"};
+  const reasons={locked:"App locked",notifications_disabled:"Notifications off",foreground_disabled:"Foreground alerts off",active_chat_disabled:"Active chat",muted:"Muted chat",mute_state_unknown:"Mute state not confirmed",windows_rejected:"Windows rejected the send"};
   function row(title,text){const r=document.createElement("div");r.className="row";const t=document.createElement("span");t.className="row-text";const strong=document.createElement("span");strong.className="row-title";strong.textContent=title;const small=document.createElement("span");small.className="row-subtitle";small.textContent=text;t.append(strong,small);r.appendChild(t);return r;}
   async function diagnostics(){
     if(diagnosticsBusy||document.hidden)return;diagnosticsBusy=true;
     try{
       const d=await invoke("notification_diagnostics"), routes=document.getElementById("route-status"),history=document.getElementById("notification-history");
       routes.replaceChildren();history.replaceChildren();
-      for(const a of d.accounts){const adapter=d.adapters["wa-"+a.id];routes.appendChild(row(a.name,t(d.native[a.id]?"Captura nativa ativa":"Captura nativa indisponível; ponte alternativa")+" · "+t(adapter?.mounted?"Controles integrados":"Acesso pelo menu da janela")+" · "+t(adapter?.detector?"Detector adicional disponível quando houver sinais confiáveis":"Aguardando conversa compatível")));}
+      for(const a of d.accounts){const adapter=d.adapters["wa-"+a.id];routes.appendChild(row(a.name,t(d.native[a.id]?"Native capture active":"Native capture unavailable; fallback bridge")+" · "+t(adapter?.mounted?"Integrated controls":"Access from the window menu")+" · "+t(adapter?.detector?"Additional detector available when reliable signals exist":"Waiting for a compatible chat")));}
       for(const n of d.recent.slice(0,20)){const account=d.accounts.find(a=>a.id===n.account_id)?.name||"whatRust";history.appendChild(row(new Date(n.time*1000).toLocaleTimeString(I18n.locale())+" · "+account,t(names[n.status]||n.status)+(n.reason?" — "+t(reasons[n.reason]||n.reason):"")));}
-      if(!d.recent.length)history.appendChild(row("Nenhum aviso registrado","Os próximos eventos aparecerão aqui durante esta execução."));
+      if(!d.recent.length)history.appendChild(row("No alerts recorded","Upcoming events will appear here during this run."));
       document.documentElement.dataset.version=d.version;
     }catch(e){document.getElementById("diagnostic-note").textContent=String(e);}finally{diagnosticsBusy=false;}
   }

@@ -44,6 +44,14 @@ test('page and service-worker registration notifications reach the custom Rust c
   assert.equal(notifications[1].args.body, 'body B');
 });
 
+test('a mention popup holds the ordinary notification for that message', () => {
+  const { window, calls } = harness();
+  window.__whatrustMentionSuppress = (title, body) => title === 'Ada' && body === 'the gate is open now';
+  new window.Notification('Ada', { body: 'the gate is open now' });
+  new window.Notification('Bea', { body: 'another message' });
+  assert.deepEqual(calls.filter(c => c.cmd === 'notify').map(c => c.args.title), ['Bea']);
+});
+
 test('the two notification paths do not duplicate the same alert', async () => {
   const { window, calls } = harness();
   new window.Notification('same', { body: 'message' });

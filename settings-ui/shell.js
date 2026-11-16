@@ -2,7 +2,7 @@
 const invoke=window.__TAURI__.core.invoke;
 const select=document.getElementById("accounts"),measure=document.getElementById("account-size");
 let busy=false,activeId=null;
-function fitSelectedName(){const text=select.selectedOptions[0]?.textContent||"Contas";measure.textContent=text;select.title=text;}
+function fitSelectedName(){const text=select.selectedOptions[0]?.textContent||"Accounts";measure.textContent=text;select.title=text;}
 window.refresh=async(currentId)=>{
   if(currentId!==undefined)activeId=currentId;
   if(busy)return;busy=true;

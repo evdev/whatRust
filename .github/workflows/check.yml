@@ -109,6 +109,14 @@ jobs:
         if: matrix.js
         run: node src-tauri/resources/autoreply.test.mjs
 
+      - name: mention.js tests — mention, quote, and direct detection
+        if: matrix.js
+        run: node src-tauri/resources/mention.test.mjs
+
+      - name: settings mention-alert form
+        if: matrix.js
+        run: node settings-ui/mention-alert.test.mjs
+
       - name: settings-ui hotkey tests
         if: matrix.js
         run: node settings-ui/comboToAccelerator.test.mjs

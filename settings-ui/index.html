@@ -1,152 +1,159 @@
 <!doctype html>
-<html lang="pt-BR">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>whatRust — Configurações</title>
+    <title>whatRust — Settings</title>
     <script src="i18n.js"></script>
     <link rel="stylesheet" href="style.css" />
     <link rel="stylesheet" href="dialog.css" />
   </head>
   <body>
-    <header class="app-header"><div><strong>Configurações</strong><span>whatRust</span></div><button id="back-to-chat" type="button" class="secondary back-button" aria-label="Voltar ao WhatsApp" title="Voltar ao WhatsApp" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5 M12 5l-7 7 7 7"/></svg><span>Voltar ao WhatsApp</span></button></header>
-    <div class="settings-layout"><nav class="settings-nav" aria-label="Configurações"><a href="#sec-contas">Contas</a><a href="#sec-notificacoes">Notificações</a><a href="#sec-voz">Transcrição</a><a href="#sec-standin">Stand-in</a><a href="#sec-aparencia">Aparência</a><a href="#sec-seguranca">Segurança</a><a href="#sec-sistema">Inicialização</a><a href="#sec-rede">Rede</a><!-- Fork: hide self-update. Upstream releases would replace this build. <a href="#sec-atualizacoes">Atualizações</a> --><a href="#sec-atalhos">Atalhos</a><a href="#sec-diagnostico">Diagnóstico</a></nav>
+    <header class="app-header"><div><strong>Settings</strong><span>whatRust</span></div><button id="back-to-chat" type="button" class="secondary back-button" aria-label="Back to WhatsApp" title="Back to WhatsApp" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5 M12 5l-7 7 7 7"/></svg><span>Back to WhatsApp</span></button></header>
+    <div class="settings-layout"><nav class="settings-nav" aria-label="Settings"><a href="#sec-contas">Accounts</a><a href="#sec-notificacoes">Notifications</a><a href="#sec-voz">Transcription</a><a href="#sec-standin">Stand-in</a><a href="#sec-aparencia">Appearance</a><a href="#sec-seguranca">Security</a><a href="#sec-sistema">Startup</a><a href="#sec-rede">Network</a><!-- Fork: hide self-update. Upstream releases would replace this build. <a href="#sec-atualizacoes">Updates</a> --><a href="#sec-atalhos">Shortcuts</a><a href="#sec-diagnostico">Diagnostics</a></nav>
     <!-- Local preferences use familiar WhatsApp rows: titled
          groups of boxed-list rows, a title + subtitle on the left and the control
          on the right. Element ids are what main.js uses; keep them stable. -->
     <main class="prefs">
       <section class="group" id="sec-contas">
-        <h2 class="group-title">Contas</h2>
+        <h2 class="group-title">Accounts</h2>
         <label class="row startup-row">
-          <span class="row-text"><span class="row-title">Conta ao iniciar</span></span>
-          <select id="startup_account" aria-label="Conta ao iniciar"></select>
+          <span class="row-text"><span class="row-title">Account on startup</span></span>
+          <select id="startup_account" aria-label="Account on startup"></select>
         </label>
         <div class="boxed-list" id="single_window_row" hidden>
           <label class="row">
-            <span class="row-text"><span class="row-title">Mostrar todas as contas em uma janela</span>
-              <span class="row-subtitle" id="single_window_subtitle">Uma janela com um seletor de contas. Uma conta só carrega quando você a abre, e abrir outra não fecha a primeira. Requer reiniciar o whatRust.</span></span>
+            <span class="row-text"><span class="row-title">Show all accounts in one window</span>
+              <span class="row-subtitle" id="single_window_subtitle">One window with an account switcher. An account loads only when you open it, and opening another does not close the first. Requires restarting whatRust.</span></span>
             <input type="checkbox" class="switch" id="single_window" />
           </label>
         </div>
         <div id="accounts-list" class="boxed-list"></div>
         <div class="add-row">
-          <input type="text" id="new_account_name" placeholder="Nome da nova conta" aria-label="Nome da nova conta" />
-          <button id="add_account">Adicionar</button>
+          <input type="text" id="new_account_name" placeholder="New account name" aria-label="New account name" />
+          <button id="add_account">Add</button>
         </div>
-        <p id="macos-note" class="macos-note" hidden>Múltiplas contas exigem macOS 14 ou superior.</p>
+        <p id="macos-note" class="macos-note" hidden>Multiple accounts require macOS 14 or later.</p>
         <p id="accounts-note" class="group-note" role="status" aria-live="polite"></p>
       </section>
-      <section class="group" id="sec-notificacoes"><h2 class="group-title">Notificações</h2><div class="boxed-list">
-<label class="row"><span class="row-text"><span class="row-title">Receber notificações</span><span class="row-subtitle">Ativa os avisos de mensagens do whatRust.</span></span><input type="checkbox" class="switch" id="notifications"></label><label class="row"><span class="row-text"><span class="row-title">Avisar com o aplicativo aberto</span><span class="row-subtitle">Receber avisos mesmo com a janela em primeiro plano.</span></span><input type="checkbox" class="switch" id="notify_when_focused"></label><label class="row"><span class="row-text"><span class="row-title">Avisar na conversa que estou lendo</span><span class="row-subtitle">Também avisar mensagens novas na conversa aberta.</span></span><input type="checkbox" class="switch" id="notify_active_chat"></label><label class="row"><span class="row-text"><span class="row-title">Respeitar conversas silenciadas</span><span class="row-subtitle">Quando o silenciamento não puder ser confirmado, o detector adicional permanece silencioso.</span></span><input type="checkbox" class="switch" id="respect_muted"></label></div><p class="group-note">O detector adicional só usa mensagens novas identificáveis. Conversas silenciadas, histórico e estados desconhecidos não geram avisos adicionais.</p></section>
+      <section class="group" id="sec-notificacoes"><h2 class="group-title">Notifications</h2><div class="boxed-list">
+<label class="row"><span class="row-text"><span class="row-title">Receive notifications</span><span class="row-subtitle">Turns on whatRust message alerts.</span></span><input type="checkbox" class="switch" id="notifications"></label><label class="row"><span class="row-text"><span class="row-title">Notify while the app is open</span><span class="row-subtitle">Get alerts even when the window is in the foreground.</span></span><input type="checkbox" class="switch" id="notify_when_focused"></label><label class="row"><span class="row-text"><span class="row-title">Notify in the chat I am reading</span><span class="row-subtitle">Also alert for new messages in the open chat.</span></span><input type="checkbox" class="switch" id="notify_active_chat"></label><label class="row"><span class="row-text"><span class="row-title">Respect muted chats</span><span class="row-subtitle">When muting cannot be confirmed, the additional detector stays silent.</span></span><input type="checkbox" class="switch" id="respect_muted"></label>
+<label class="row"><span class="row-text"><span class="row-title">Mentions, replies, and direct messages</span><span class="row-subtitle">Does not alert on @everyone</span></span><input type="checkbox" class="switch" id="mention_alert"></label>
+<label class="row"><span class="row-text"><span class="row-title">Alert sound</span><span class="row-subtitle">Plays the distinct sound. With the popup off, the ordinary whatRust alert still appears.</span></span><input type="checkbox" class="switch" id="mention_alert_sound"></label>
+<div class="row" id="mention_alert_sound_file_row"><span class="row-text"><span class="row-title">Sound file</span><span class="row-subtitle" id="mention_alert_sound_file_subtitle">Built-in sound</span></span><div class="hotkey-row"><button type="button" id="choose_mention_sound" class="secondary">Choose sound…</button><button type="button" id="preview_mention_sound" class="secondary">Test</button><button type="button" id="reset_mention_sound" class="secondary">Reset to default</button></div></div>
+<label class="row"><span class="row-text"><span class="row-title">Reply popup</span><span class="row-subtitle">Shows the message and lets you reply. Replaces the ordinary alert for that message.</span></span><input type="checkbox" class="switch" id="mention_alert_popup"></label></div>
+<p class="group-note">Alerts even in a muted chat and while the app is in the foreground.</p>
+<p class="group-note" id="mention_alert_idle" hidden>With the sound and the popup off, this alert does nothing.</p>
+<p class="group-note">The additional detector only uses identifiable new messages. Muted chats, history and unknown states do not produce additional alerts.</p></section>
 
       <section class="group" id="sec-sistema">
-        <h2 class="group-title">Comportamento</h2>
+        <h2 class="group-title">Behavior</h2>
         <div class="boxed-list">
           <label class="row">
-            <span class="row-text"><span class="row-title">Continuar em segundo plano ao fechar</span>
-              <span class="row-subtitle">Com uma conta aberta, fechar a janela a deixa conectada. Com mais de uma, fechar uma janela encerra só essa conta</span></span>
+            <span class="row-text"><span class="row-title">Keep running in the background when closed</span>
+              <span class="row-subtitle">With one account open, closing the window leaves it connected. With more than one, closing a window ends just that account</span></span>
             <input type="checkbox" class="switch" id="close_to_tray" />
           </label>
           <label class="row">
-            <span class="row-text"><span class="row-title">Iniciar minimizado</span>
-              <span class="row-subtitle">Iniciar sem abrir a janela principal</span></span>
+            <span class="row-text"><span class="row-title">Start minimized</span>
+              <span class="row-subtitle">Start without opening the main window</span></span>
             <input type="checkbox" class="switch" id="start_minimized" />
           </label>
           <label class="row">
-            <span class="row-text"><span class="row-title">Iniciar com o sistema</span></span>
+            <span class="row-text"><span class="row-title">Start with the system</span></span>
             <input type="checkbox" class="switch" id="autostart" />
           </label>
           <label class="row mac-only" id="menu_bar_icon_row" hidden>
-            <span class="row-text"><span class="row-title">Mostrar ícone na barra de menus</span>
-              <span class="row-subtitle" id="menu_bar_icon_subtitle">Quando desativado, clique no ícone do Dock para abrir o whatRust</span></span>
+            <span class="row-text"><span class="row-title">Show icon in the menu bar</span>
+              <span class="row-subtitle" id="menu_bar_icon_subtitle">When off, click the Dock icon to open whatRust</span></span>
             <input type="checkbox" class="switch" id="menu_bar_icon" />
           </label>
           <label class="row mac-only" hidden>
-            <span class="row-text"><span class="row-title">Somente na barra de menus</span>
-              <span class="row-subtitle" id="menubar_only_subtitle">Sem ícone no Dock nem janela principal. A conta aberta continua conectada com o painel fechado; as outras carregam quando você as abre</span></span>
+            <span class="row-text"><span class="row-title">Menu bar only</span>
+              <span class="row-subtitle" id="menubar_only_subtitle">No Dock icon or main window. The open account stays connected while the panel is closed; other accounts load when you open them</span></span>
             <input type="checkbox" class="switch" id="menubar_only" />
           </label>
           <label class="row mac-only" hidden>
-            <span class="row-text"><span class="row-title">Ocultar ícone do Dock</span>
-              <span class="row-subtitle">Mantém a janela principal; o ícone da barra de menus passa a ser a forma de reabrir o whatRust</span></span>
+            <span class="row-text"><span class="row-title">Hide Dock icon</span>
+              <span class="row-subtitle">Keeps the main window; the menu bar icon becomes the way to reopen whatRust</span></span>
             <input type="checkbox" class="switch" id="hide_dock_icon" />
           </label>
         </div>
       </section>
 
       <section class="group" id="sec-voz">
-        <h2 class="group-title">Transcrição</h2>
+        <h2 class="group-title">Transcription</h2>
         <div class="boxed-list">
           <label class="row">
-            <span class="row-text"><span class="row-title">Transcrever notas de voz</span>
-              <span class="row-subtitle">Mostra a transcrição embaixo de cada nota de voz. O áudio fica neste computador e é transcrito pelo FluidVoice.</span></span>
+            <span class="row-text"><span class="row-title">Transcribe voice notes</span>
+              <span class="row-subtitle">Shows the transcript under each voice note. The audio stays on this computer and is transcribed by FluidVoice.</span></span>
             <input type="checkbox" class="switch" id="voice_transcribe" />
           </label>
           <label class="row">
-            <span class="row-text"><span class="row-title">Transcrever vídeos</span>
-              <span class="row-subtitle">Mostra um botão em cada vídeo. O áudio fica neste computador e é transcrito pelo FluidVoice.</span></span>
+            <span class="row-text"><span class="row-title">Transcribe videos</span>
+              <span class="row-subtitle">Shows a button on each video. The audio stays on this computer and is transcribed by FluidVoice.</span></span>
             <input type="checkbox" class="switch" id="video_transcribe" />
           </label>
           <label class="row">
-            <span class="row-text"><span class="row-title">Porta do FluidVoice</span>
-              <span class="row-subtitle">API local do FluidVoice. O padrão é 47733.</span></span>
-            <input type="number" id="fluidvoice_port" min="1" max="65535" value="47733" aria-label="Porta do FluidVoice" />
+            <span class="row-text"><span class="row-title">FluidVoice port</span>
+              <span class="row-subtitle">FluidVoice's local API. The default is 47733.</span></span>
+            <input type="number" id="fluidvoice_port" min="1" max="65535" value="47733" aria-label="FluidVoice port" />
           </label>
           <div class="row">
-            <span class="row-text"><span class="row-title">Conexão</span>
-              <span class="row-subtitle" id="fluidvoice_status">Ainda não verificada.</span></span>
-            <button type="button" id="test_fluidvoice" class="secondary">Testar conexão</button>
+            <span class="row-text"><span class="row-title">Connection</span>
+              <span class="row-subtitle" id="fluidvoice_status">Not checked yet.</span></span>
+            <button type="button" id="test_fluidvoice" class="secondary">Test connection</button>
           </div>
           <div class="row" id="fluidvoice_install_row" hidden>
-            <span class="row-text"><span class="row-title">FluidVoice no Windows</span>
-              <span class="row-subtitle">Opcional. Abre o instalador oficial da versão beta para Windows. O FluidVoice é um aplicativo separado.</span></span>
-            <button type="button" id="install_fluidvoice" class="secondary">Instalar FluidVoice</button>
+            <span class="row-text"><span class="row-title">FluidVoice on Windows</span>
+              <span class="row-subtitle">Optional. Opens the official Windows beta installer. FluidVoice is a separate app.</span></span>
+            <button type="button" id="install_fluidvoice" class="secondary">Install FluidVoice</button>
           </div>
           <label class="row">
-            <span class="row-text"><span class="row-title">Traduzir transcrições</span>
-              <span class="row-subtitle">Envia só o texto da transcrição para o provedor escolhido.</span></span>
+            <span class="row-text"><span class="row-title">Translate transcripts</span>
+              <span class="row-subtitle">Sends only the transcript text to the chosen provider.</span></span>
             <input type="checkbox" class="switch" id="translate_enabled" />
           </label>
           <label class="row">
-            <span class="row-text"><span class="row-title">Idioma da tradução</span></span>
-            <input type="text" id="translate_target_lang" placeholder="English" aria-label="Idioma da tradução" />
+            <span class="row-text"><span class="row-title">Translation language</span></span>
+            <input type="text" id="translate_target_lang" placeholder="English" aria-label="Translation language" />
           </label>
           <label class="row">
-            <span class="row-text"><span class="row-title">Provedor de IA</span></span>
-            <select id="ai_provider" aria-label="Provedor de IA">
+            <span class="row-text"><span class="row-title">AI provider</span></span>
+            <select id="ai_provider" aria-label="AI provider">
               <option value="openrouter">OpenRouter</option>
               <option value="gemini">Gemini</option>
               <option value="anthropic">Anthropic</option>
             </select>
           </label>
           <div class="row">
-            <span class="row-text"><span class="row-title">Modelo da tradução</span>
-              <span class="row-subtitle" id="translate_model_hint">Nome do modelo aceito por esse provedor.</span></span>
-            <input type="text" class="model-choice" id="translate_model" aria-label="Modelo da tradução" />
-            <select class="model-choice" id="translate_model_select" aria-label="Modelo da tradução" hidden></select>
+            <span class="row-text"><span class="row-title">Translation model</span>
+              <span class="row-subtitle" id="translate_model_hint">Model name accepted by that provider.</span></span>
+            <input type="text" class="model-choice" id="translate_model" aria-label="Translation model" />
+            <select class="model-choice" id="translate_model_select" aria-label="Translation model" hidden></select>
           </div>
           <div class="row">
-            <span class="row-text"><span class="row-title">Modelo do resumo</span>
-              <span class="row-subtitle" id="summary_model_hint">Usado pelo botão Resumir em cada transcrição e pelos resumos de conversa.</span></span>
-            <input type="text" class="model-choice" id="summary_model" aria-label="Modelo do resumo" />
-            <select class="model-choice" id="summary_model_select" aria-label="Modelo do resumo" hidden></select>
+            <span class="row-text"><span class="row-title">Summary model</span>
+              <span class="row-subtitle" id="summary_model_hint">Used by the Summarize button on each transcript and by chat summaries.</span></span>
+            <input type="text" class="model-choice" id="summary_model" aria-label="Summary model" />
+            <select class="model-choice" id="summary_model_select" aria-label="Summary model" hidden></select>
           </div>
           <label class="row entry-row">
-            <span class="row-title">Chave da API</span>
-            <input type="password" id="ai_key" autocomplete="off" aria-label="Chave da API" />
+            <span class="row-title">API key</span>
+            <input type="password" id="ai_key" autocomplete="off" aria-label="API key" />
           </label>
         </div>
         <div class="group-actions">
-          <button type="button" id="save_ai_key">Guardar chave</button>
-          <button type="button" id="remove_ai_key" class="secondary">Remover chave</button>
+          <button type="button" id="save_ai_key">Save key</button>
+          <button type="button" id="remove_ai_key" class="secondary">Remove key</button>
         </div>
-        <p id="ai_key_state" class="key-status" role="status">Nenhuma chave guardada.</p>
+        <p id="ai_key_state" class="key-status" role="status">No key saved.</p>
         <div class="row">
-          <span class="row-text"><span class="row-title">Resumos de conversa</span>
-            <span class="row-subtitle" id="chat_summary_consent_state">Ainda não permitido.</span></span>
-          <button type="button" id="chat_summary_revoke" class="secondary" hidden>Revogar</button>
+          <span class="row-text"><span class="row-title">Chat summaries</span>
+            <span class="row-subtitle" id="chat_summary_consent_state">Not allowed yet.</span></span>
+          <button type="button" id="chat_summary_revoke" class="secondary" hidden>Revoke</button>
         </div>
-        <p class="group-note">A chave fica neste computador e nunca entra na página do WhatsApp. A tradução e o botão Resumir usam o modelo escolhido para cada um. Um resumo de conversa fica neste computador, não no telefone, e não é enviado no chat.</p>
+        <p class="group-note">The key stays on this computer and never enters the WhatsApp page. Translation and the Summarize button each use the model chosen for them. A chat summary stays on this computer, not on the phone, and is not sent into the chat.</p>
       </section>
 
       <section class="group" id="sec-standin">
@@ -268,112 +275,112 @@ Set asked_if_ai to true only when the contact asks whether you are an AI, a bot,
       </section>
 
       <section class="group" id="sec-aparencia">
-        <h2 class="group-title">Aparência</h2>
+        <h2 class="group-title">Appearance</h2>
         <div class="boxed-list">
           <label class="row">
-            <span class="row-text"><span class="row-title">Aparelho de origem</span>
-              <span class="row-subtitle">Um ícone ao lado do horário indica um aparelho Apple, um Android ou um computador, quando o identificador da mensagem permite.</span></span>
+            <span class="row-text"><span class="row-title">Source device</span>
+              <span class="row-subtitle">An icon next to the time shows an Apple device, Android, or a computer, when the message id gives a good indication.</span></span>
             <input type="checkbox" class="switch" id="show_message_device" />
           </label>
           <label class="row">
-            <span class="row-text"><span class="row-title">Tamanho da interface</span>
-              <span class="row-subtitle">Ajusta o tamanho do WhatsApp sem alterar as outras contas.</span></span>
+            <span class="row-text"><span class="row-title">Interface size</span>
+              <span class="row-subtitle">Adjusts the size of WhatsApp without changing the other accounts.</span></span>
             <select id="zoom">
-              <option value="0.75">Muito pequeno</option>
-              <option value="0.85">Pequeno</option>
-              <option value="1">Padrão</option>
-              <option value="1.15">Grande</option>
+              <option value="0.75">Very small</option>
+              <option value="0.85">Small</option>
+              <option value="1">Default</option>
+              <option value="1.15">Large</option>
             </select>
           </label>
           <label class="row linux-only" id="title_bar_row" hidden>
-            <span class="row-text"><span class="row-title">Barra de título</span>
-              <span class="row-subtitle" id="title_bar_subtitle">Gerenciadores de janelas lado a lado, como o Hyprland, não usam barra de título.</span></span>
+            <span class="row-text"><span class="row-title">Title bar</span>
+              <span class="row-subtitle" id="title_bar_subtitle">Tiling window managers such as Hyprland don't use a title bar.</span></span>
             <select id="title_bar">
-              <option value="auto">Automático</option>
-              <option value="show">Mostrar</option>
-              <option value="hide">Ocultar</option>
+              <option value="auto">Automatic</option>
+              <option value="show">Show</option>
+              <option value="hide">Hide</option>
             </select>
           </label>
           <label class="row">
-            <span class="row-text"><span class="row-title">Idioma</span>
-              <span class="row-subtitle">Idioma da interface do whatRust.</span></span>
+            <span class="row-text"><span class="row-title">Language</span>
+              <span class="row-subtitle">Language of the whatRust interface.</span></span>
             <select id="language">
               <option value="pt-BR">Português (Brasil)</option>
               <option value="en">English</option>
             </select>
           </label>
           <div class="row">
-            <span class="row-text"><span class="row-title">Ícone do aplicativo</span>
-              <span class="row-subtitle" id="icon_subtitle">Padrão</span></span>
+            <span class="row-text"><span class="row-title">App icon</span>
+              <span class="row-subtitle" id="icon_subtitle">Default</span></span>
             <div class="hotkey-row">
-              <button type="button" id="choose_icon" class="secondary">Escolher PNG…</button>
-              <button type="button" id="reset_icon" class="secondary">Restaurar padrão</button>
+              <button type="button" id="choose_icon" class="secondary">Choose PNG…</button>
+              <button type="button" id="reset_icon" class="secondary">Reset to default</button>
             </div>
           </div>
-          <p class="group-note" id="icon_note">Imagem PNG quadrada, de 32 a 1024 px e até 5 MB. Vale para o aplicativo todo; a bandeja não muda. No Linux com Wayland, o ícone da janela vem do arquivo .desktop e não muda.</p>
+          <p class="group-note" id="icon_note">Square PNG image, 32 to 1024 px and up to 5 MB. Applies to the whole app; the tray icon does not change. On Linux with Wayland the window icon comes from the .desktop file and does not change.</p>
           <div class="row">
-            <span class="row-text"><span class="row-title">Pasta de downloads</span>
-              <span class="row-subtitle" id="download_dir_subtitle">Pasta Downloads do sistema</span></span>
+            <span class="row-text"><span class="row-title">Download folder</span>
+              <span class="row-subtitle" id="download_dir_subtitle">System Downloads folder</span></span>
             <div class="hotkey-row">
-              <button type="button" id="choose_download_dir" class="secondary">Escolher pasta…</button>
-              <button type="button" id="reset_download_dir" class="secondary">Restaurar Downloads</button>
+              <button type="button" id="choose_download_dir" class="secondary">Choose folder…</button>
+              <button type="button" id="reset_download_dir" class="secondary">Reset to Downloads</button>
             </div>
           </div>
         </div>
       </section>
 
       <section class="group" id="sec-rede">
-        <h2 class="group-title">Rede</h2>
+        <h2 class="group-title">Network</h2>
         <div class="boxed-list">
           <label class="row">
             <span class="row-text"><span class="row-title">Proxy</span>
-              <span class="row-subtitle">Encaminha todo o tráfego das contas do WhatsApp por um proxy.</span></span>
+              <span class="row-subtitle">Routes all WhatsApp account traffic through a proxy.</span></span>
             <select id="proxy_mode">
-              <option value="off">Desativado</option>
+              <option value="off">Off</option>
               <option value="socks5">SOCKS5</option>
               <option value="http">HTTP</option>
             </select>
           </label>
           <label class="row entry-row proxy-field">
-            <span class="row-title">Servidor</span>
+            <span class="row-title">Host</span>
             <input type="text" id="proxy_host" autocomplete="off" spellcheck="false" placeholder="127.0.0.1" />
           </label>
           <label class="row entry-row proxy-field">
-            <span class="row-title">Porta</span>
+            <span class="row-title">Port</span>
             <input type="text" id="proxy_port" inputmode="numeric" autocomplete="off" placeholder="1080" />
           </label>
         </div>
-        <p class="group-note">Proxy com usuário e senha não é suportado: os navegadores embutidos não aceitam credenciais por esse caminho. A alteração vale após reiniciar o whatRust.</p>
-        <p id="proxy_restart" class="hotkey-hint" hidden><span>Reinicie o whatRust para aplicar o proxy.</span> <button type="button" id="proxy_restart_btn" class="secondary">Reiniciar agora</button></p>
+        <p class="group-note">Proxies that need a username and password are not supported: the built-in browser engines do not accept credentials this way. Changes take effect after restarting whatRust.</p>
+        <p id="proxy_restart" class="hotkey-hint" hidden><span>Restart whatRust to apply the proxy.</span> <button type="button" id="proxy_restart_btn" class="secondary">Restart now</button></p>
       </section>
 
       <!-- Fork: self-update section hidden.
       <section class="group" id="sec-atualizacoes">
-        <h2 class="group-title">Atualizações</h2>
+        <h2 class="group-title">Updates</h2>
         <div class="boxed-list">
           <label class="row">
-            <span class="row-text"><span class="row-title">Verificar atualizações automaticamente</span>
-              <span class="row-subtitle">Consulta o GitHub (api.github.com) um minuto após iniciar e a cada 6 horas. Só pergunta qual é a versão mais recente.</span></span>
+            <span class="row-text"><span class="row-title">Check for updates automatically</span>
+              <span class="row-subtitle">Asks GitHub (api.github.com) a minute after start and every 6 hours which version is the newest. Nothing else is sent.</span></span>
             <input type="checkbox" class="switch" id="auto_update_check" />
           </label>
           <label class="row">
-            <span class="row-text"><span class="row-title">Instalar atualizações automaticamente</span>
-              <span class="row-subtitle" id="auto_update_install_subtitle">Só age quando não é preciso senha.</span></span>
+            <span class="row-text"><span class="row-title">Install updates automatically</span>
+              <span class="row-subtitle" id="auto_update_install_subtitle">Only acts where no password is needed.</span></span>
             <input type="checkbox" class="switch" id="auto_update_install" />
           </label>
         </div>
         <div class="boxed-list">
           <div class="row">
-            <span class="row-text"><span class="row-title">Versão instalada</span>
+            <span class="row-text"><span class="row-title">Installed version</span>
               <span class="row-subtitle" id="upd_current"></span></span>
-            <button type="button" id="upd_check" class="secondary">Verificar agora</button>
+            <button type="button" id="upd_check" class="secondary">Check now</button>
           </div>
           <div class="row">
-            <span class="row-text"><span class="row-title">Tipo de instalação</span>
+            <span class="row-text"><span class="row-title">Install type</span>
               <span class="row-subtitle" id="upd_method"></span></span>
           </div>
           <div class="row">
-            <span class="row-text"><span class="row-title">Última verificação</span>
+            <span class="row-text"><span class="row-title">Last check</span>
               <span class="row-subtitle" id="upd_last"></span></span>
           </div>
         </div>
@@ -383,119 +390,120 @@ Set asked_if_ai to true only when the contact asks whether you are an AI, a bot,
           <p id="upd_message" class="group-note" role="status" aria-live="polite"></p>
           <p id="upd_error" class="hotkey-hint" role="alert" hidden></p>
           <div class="group-actions">
-            <button type="button" id="upd_install" hidden>Baixar e instalar</button>
-            <button type="button" id="upd_apply" hidden>Reiniciar e instalar</button>
-            <button type="button" id="upd_restart" hidden>Reiniciar agora</button>
-            <button type="button" id="upd_page" class="secondary" hidden>Ver no GitHub</button>
+            <button type="button" id="upd_install" hidden>Download and install</button>
+            <button type="button" id="upd_apply" hidden>Restart and install</button>
+            <button type="button" id="upd_restart" hidden>Restart now</button>
+            <button type="button" id="upd_page" class="secondary" hidden>View on GitHub</button>
           </div>
           <div id="upd_flatpak" class="upd-flatpak" hidden>
             <code id="upd_command"></code>
-            <button type="button" id="upd_copy" class="secondary">Copiar</button>
+            <button type="button" id="upd_copy" class="secondary">Copy</button>
           </div>
         </div>
         <div id="upd_notes_box" hidden>
-          <h3>Novidades</h3>
+          <h3>What's new</h3>
           <div id="upd_notes" class="notes"></div>
         </div>
-        <p class="group-note">Versões 0.6.10 e anteriores não atualizam sozinhas: instale esta versão manualmente uma vez. Cada arquivo baixado é conferido com a soma de verificação (SHA-256) publicada na versão antes de ser instalado.</p>
+        <p class="group-note">Versions 0.6.10 and older cannot update themselves: install this version by hand once. Every downloaded file is checked against the checksum (SHA-256) published with the release before it is installed.</p>
       </section>
       -->
 
       <section class="group" id="sec-atalhos">
-        <h2 class="group-title">Atalhos</h2>
+        <h2 class="group-title">Shortcuts</h2>
         <div class="boxed-list">
           <label class="row">
-            <span class="row-text"><span class="row-title">Atalho para mostrar ou ocultar</span>
-              <span class="row-subtitle">Uma combinação de teclas para mostrar ou ocultar o aplicativo</span></span>
+            <span class="row-text"><span class="row-title">Shortcut to show or hide</span>
+              <span class="row-subtitle">A key combination to show or hide the app</span></span>
             <input type="checkbox" class="switch" id="hotkey_enabled" />
           </label>
           <div class="row">
-            <span class="row-text"><span class="row-title">Atalho</span></span>
+            <span class="row-text"><span class="row-title">Shortcut</span></span>
             <div class="hotkey-row">
-              <input type="text" id="hotkey" placeholder="CmdOrCtrl+Shift+W" aria-label="Atalho" />
-              <button type="button" id="record_hotkey" class="secondary">Gravar</button>
+              <input type="text" id="hotkey" placeholder="CmdOrCtrl+Shift+W" aria-label="Shortcut" />
+              <button type="button" id="record_hotkey" class="secondary">Record</button>
             </div>
           </div>
           <label class="row">
-            <span class="row-text"><span class="row-title">Atalho para desfocar</span>
-              <span class="row-subtitle">Liga ou desliga o desfoque de privacidade em todas as contas. Para escolher o que é desfocado, pressione Ctrl+Shift+P (⌘+Shift+P no Mac) numa janela do WhatsApp.</span></span>
+            <span class="row-text"><span class="row-title">Privacy blur shortcut</span>
+              <span class="row-subtitle">Turns the privacy blur on or off in every account. To choose what gets blurred, press Ctrl+Shift+P (⌘+Shift+P on a Mac) in a WhatsApp window.</span></span>
             <input type="checkbox" class="switch" id="blur_hotkey_enabled" />
           </label>
           <div class="row">
-            <span class="row-text"><span class="row-title">Atalho</span></span>
+            <span class="row-text"><span class="row-title">Shortcut</span></span>
             <div class="hotkey-row">
-              <input type="text" id="blur_hotkey" placeholder="CmdOrCtrl+Shift+B" aria-label="Atalho" />
-              <button type="button" id="record_blur_hotkey" class="secondary">Gravar</button>
+              <input type="text" id="blur_hotkey" placeholder="CmdOrCtrl+Shift+B" aria-label="Shortcut" />
+              <button type="button" id="record_blur_hotkey" class="secondary">Record</button>
             </div>
           </div>
         </div>
         <p id="hotkey_hint" class="hotkey-hint" hidden></p>
-        <p class="group-note">No Linux/Wayland, configure <code>whatrust --toggle</code> nos atalhos do sistema.</p>
+        <p class="group-note">On Linux/Wayland, set <code>whatrust --toggle</code> in the system shortcuts.</p>
       </section>
 
       <section class="group" id="sec-seguranca">
-        <h2 class="group-title">Segurança</h2>
+        <h2 class="group-title">Security</h2>
 
         <div id="lock-disabled">
           <div class="boxed-list">
             <label class="row entry-row">
-              <span class="row-title">Senha</span>
-              <input type="password" id="lock_pw1" autocomplete="new-password" placeholder="Pelo menos 6 caracteres" />
+              <span class="row-title">Password</span>
+              <input type="password" id="lock_pw1" autocomplete="new-password" placeholder="At least 6 characters" />
             </label>
             <label class="row entry-row">
-              <span class="row-title">Confirmar</span>
+              <span class="row-title">Confirm</span>
               <input type="password" id="lock_pw2" autocomplete="new-password" />
             </label>
           </div>
           <div class="group-actions">
-            <button id="enable_lock">Ativar bloqueio</button>
+            <button id="enable_lock">Turn on lock</button>
           </div>
         </div>
 
         <div id="lock-enabled" hidden>
           <div class="boxed-list">
             <label class="row" id="biometric_row" hidden>
-              <span class="row-text"><span class="row-title" id="biometric_label">Usar biometria</span></span>
+              <span class="row-text"><span class="row-title" id="biometric_label">Use biometrics</span></span>
               <input type="checkbox" class="switch" id="biometric_enabled" />
             </label>
             <label class="row">
-              <span class="row-text"><span class="row-title">Bloquear ao iniciar</span></span>
+              <span class="row-text"><span class="row-title">Lock on launch</span></span>
               <input type="checkbox" class="switch" id="lock_on_launch" />
             </label>
             <label class="row">
-              <span class="row-text"><span class="row-title">Bloquear ao ocultar</span></span>
+              <span class="row-text"><span class="row-title">Lock when hidden</span></span>
               <input type="checkbox" class="switch" id="lock_on_hide" />
             </label>
             <label class="row">
-              <span class="row-text"><span class="row-title">Bloquear por inatividade</span>
-                <span class="row-subtitle">Minutos; 0 desativa</span></span>
+              <span class="row-text"><span class="row-title">Lock when idle</span>
+                <span class="row-subtitle">Minutes; 0 turns it off</span></span>
               <input type="number" id="idle_min" min="0" step="1" value="0" />
             </label>
           </div>
           <div class="group-actions">
-            <button id="lock_now">Bloquear agora</button>
-            <button id="change_pw" class="secondary">Alterar senha…</button>
-            <button id="disable_lock" class="secondary">Desativar…</button>
+            <button id="lock_now">Lock now</button>
+            <button id="change_pw" class="secondary">Change password…</button>
+            <button id="disable_lock" class="secondary">Turn off…</button>
           </div>
         </div>
 
-        <p class="group-note">O bloqueio protege o acesso às janelas do whatRust. Ele
-          <strong>não</strong> criptografa os dados no disco.</p>
+        <p class="group-note">The lock protects access to the whatRust windows. It
+          <strong>does not</strong> encrypt the data on disk.</p>
       </section>
-      <section class="group" id="sec-diagnostico"><h2 class="group-title">Diagnóstico de notificações</h2>
-      <div class="boxed-list"><div class="row"><span class="row-text"><span class="row-title">Verificar avisos do Windows</span><span class="row-subtitle">O teste confirma o envio; confira se o Windows exibe o banner.</span></span><button id="test-notification" type="button">Testar</button></div><div class="row"><span class="row-text">Permissões e Não perturbe</span><button id="windows-notifications" class="secondary" type="button">Abrir no Windows</button></div></div>
+      <section class="group" id="sec-diagnostico"><h2 class="group-title">Notification diagnostics</h2>
+      <div class="boxed-list"><div class="row"><span class="row-text"><span class="row-title">Check Windows alerts</span><span class="row-subtitle">The test confirms sending; check that Windows shows the banner.</span></span><button id="test-notification" type="button">Test</button></div><div class="row"><span class="row-text">Permissions and Do Not Disturb</span><button id="windows-notifications" class="secondary" type="button">Open in Windows</button></div></div>
       <p id="diagnostic-note" class="group-note" role="status"></p><div id="route-status" class="boxed-list"></div>
-      <h3>Atividade desta sessão</h3><p class="group-note">Somente horário, conta e resultado. Não armazena o texto das mensagens.</p><div id="notification-history" class="boxed-list"></div>
+      <h3>Activity this session</h3><p class="group-note">Time, account and result only. Message text is not stored.</p><div id="notification-history" class="boxed-list"></div>
       </section>
     </main></div>
 
     <footer class="footer">
       <span id="note" class="note" role="status" aria-live="polite"></span>
-      <button id="save">Salvar</button>
+      <button id="save">Save</button>
     </footer>
 
     <script src="dialog.js"></script>
     <script src="hotkey.js"></script>
+    <script src="mention-alert.js"></script>
     <script src="main.js"></script>
     <script src="panel.js"></script>
     <script src="notes.js"></script>

@@ -87,7 +87,8 @@ pub fn validate_new_password(new: &str, confirm: &str) -> Result<(), String> {
 }
 
 /// Whether a window label should be hidden behind the lock screen. Pure, unit-tested.
-/// The lock window itself is never hidden; everything user-facing (`wa-*` + settings) is.
+/// The lock window itself is never hidden. Mention popups are parked by
+/// `mention::on_lock` instead, so unlocking does not uncover a stale card.
 pub fn should_hide(label: &str) -> bool {
     label != "lock"
         && (label.starts_with("wa-")
@@ -161,6 +162,7 @@ fn lock_on_main(app: &AppHandle, prompt: bool) {
     }
     crate::notify::on_lock(app);
     crate::todo::on_lock(app);
+    crate::mention::on_lock(app);
     crate::integration::broadcast(app);
     crate::voice::push_prefs(app, &crate::settings::load(app));
     let mut hidden = Vec::new();
@@ -235,6 +237,7 @@ fn unlock_on_main(app: &AppHandle) {
         crate::sessions::restore_pending(app);
     }
     crate::integration::broadcast(app);
+    crate::mention::on_unlock(app);
 }
 
 /// Create-or-show the dedicated lock window. `content_protected` blocks screen
@@ -312,6 +315,7 @@ mod tests {
         assert!(should_hide("wa-default"));
         assert!(should_hide("wa-acct-3"));
         assert!(should_hide("settings"));
+        assert!(!should_hide("mention-1"));
     }
 
     #[test]

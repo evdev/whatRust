@@ -7,7 +7,7 @@ let busy = false;
 async function tryUnlock() {
   if (busy) return;
   const password = pwd.value;
-  if (!password) { errEl.textContent = "Digite sua senha."; return; }
+  if (!password) { errEl.textContent = "Enter your password."; return; }
   busy = true;
   document.getElementById("unlock").disabled = true;
   document.getElementById("biometric").disabled = true;
@@ -15,15 +15,15 @@ async function tryUnlock() {
   try {
     const ok = await invoke("unlock_password", { password });
     if (!ok) {
-      errEl.textContent = "Senha incorreta. Tente novamente.";
+      errEl.textContent = "Wrong password. Try again.";
       pwd.value = "";
       pwd.focus();
     }
   } catch (e) {
     const wait = /^throttled:(\d+)$/.exec(String(e));
     errEl.textContent = wait
-      ? t("Muitas tentativas. Tente de novo em {0}s.", [wait[1]])
-      : t("Não foi possível desbloquear. Tente novamente.");
+      ? t("Too many attempts. Try again in {0}s.", [wait[1]])
+      : t("Could not unlock. Try again.");
   } finally {
     busy = false;
     document.getElementById("unlock").disabled = false;
@@ -39,9 +39,9 @@ async function tryBiometric() {
   errEl.textContent = "";
   try {
     const ok = await invoke("unlock_biometric");
-    if (!ok) errEl.textContent = "Não foi possível confirmar a biometria. Digite sua senha.";
+    if (!ok) errEl.textContent = "Could not confirm biometrics. Enter your password.";
   } catch (e) {
-    errEl.textContent = "Não foi possível desbloquear. Tente novamente.";
+    errEl.textContent = "Could not unlock. Try again.";
   } finally {
     busy = false;
     document.getElementById("unlock").disabled = false;
@@ -59,21 +59,21 @@ async function init() {
   document.getElementById("reset").addEventListener("click", async (e) => {
     e.preventDefault();
     const ok = await Dlg.confirm(
-      "Isso desconecta todas as contas deste aplicativo e remove o bloqueio. Você precisará vincular o WhatsApp novamente pelo QR Code. Suas conversas continuam no celular.",
-      { title: "Redefinir o whatRust?", okLabel: "Redefinir", danger: true }
+      "This signs out every account in this app and removes the lock. You will need to link WhatsApp again with the QR code. Your chats stay on your phone.",
+      { title: "Reset whatRust?", okLabel: "Reset", danger: true }
     );
     if (!ok) return;
     try {
       await invoke("reset_app_lock", { confirmed: true });
     } catch (err) {
-      errEl.textContent = "Não foi possível redefinir o aplicativo. Tente novamente.";
+      errEl.textContent = "Could not reset the app. Try again.";
     }
   });
 
   try {
     const s = await invoke("get_lock_status");
     if (s.biometric_enabled) {
-      bio.textContent = s.biometric_label ? t("Usar {0}", [s.biometric_label]) : t("Usar biometria");
+      bio.textContent = s.biometric_label ? t("Use {0}", [s.biometric_label]) : t("Use biometrics");
       bio.hidden = false;
       tryBiometric(); // auto-prompt on load
     }

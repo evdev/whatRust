@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>whatRust</title>
+    <script src="i18n.js"></script>
+    <link rel="stylesheet" href="mention-popup.css" />
+  </head>
+  <body>
+    <article class="card">
+      <header>
+        <button id="open" type="button">
+          <span id="avatar" aria-hidden="true"></span>
+          <span class="who">
+            <strong id="sender"></strong>
+            <span id="meta"></span>
+          </span>
+        </button>
+        <button id="close" type="button" aria-label="Close"></button>
+      </header>
+      <button id="body" type="button"></button>
+      <form id="reply">
+        <div id="attachment" hidden>
+          <span id="attachment-name"></span>
+          <button id="attachment-clear" type="button" aria-label="Remove the file"></button>
+        </div>
+        <audio id="voice-preview" hidden controls></audio>
+        <textarea id="text" rows="2" maxlength="4096" placeholder="Write a reply"></textarea>
+        <div class="actions">
+          <button id="attach" type="button" aria-label="Attach a file"></button>
+          <button id="voice" type="button" aria-label="Record a voice note"></button>
+          <span id="error" role="status"></span>
+          <button id="send" type="submit">Send</button>
+        </div>
+      </form>
+      <input id="file" type="file" hidden />
+    </article>
+    <script src="mention-popup.js"></script>
+  </body>
+</html>

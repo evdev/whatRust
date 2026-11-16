@@ -501,8 +501,14 @@
       }, function () {});
     } catch (e) {}
   }
+  function mentionHolds(title, body) {
+    try {
+      return typeof window.__whatrustMentionSuppress === "function" && window.__whatrustMentionSuppress(title, body);
+    } catch (e) { return false; }
+  }
   function nativeNotify(title, body, icon) {
     if(window.__whatrustLocked)return false;
+    if (mentionHolds(title, body)) return false;
     var epoch=window.__whatrustNotificationEpoch||0;
     function deliver(args){if(window.__WHATRUST_WINDOWS__)args.epoch=epoch;invoke("notify",args);}
     title = String(title || "WhatsApp");
@@ -657,6 +663,14 @@
       }).catch(function(){notePath("browser permission unavailable; page fallback");});
     }
     function ShimNotification(title, options) {
+      options = options || {};
+      if (mentionHolds(title, options.body)) {
+        notePath("mention popup holds this alert");
+        this.title = title;
+        this.body = options.body || "";
+        this.close = function () {};
+        return;
+      }
       if (window.__whatrustPreferNative && typeof OriginalNotification === "function" && OriginalNotification.permission === "granted") {
         try {
           notePath("native Notification()");

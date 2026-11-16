@@ -174,6 +174,9 @@ macro_rules! account_webview {
             .initialization_script(include_str!("../resources/todo.js"))
             .initialization_script(include_str!("../resources/autoreply.js"))
             .initialization_script(include_str!("../resources/summary.js"))
+            .initialization_script(crate::mention::boot_script($app))
+            .initialization_script(include_str!("../resources/mention-chime.js"))
+            .initialization_script(include_str!("../resources/mention.js"))
             // Drag-and-drop is done by capturing the OS drop in Rust and streaming the file
             // into the page (see `register_drop_handler` + bridge.js `__whatrustDropFeed`).
             // We deliberately KEEP Tauri's drag-drop handler enabled (except on Windows, see
@@ -511,8 +514,12 @@ fn choose_download_destination(
     for (slot, unit) in buffer.iter_mut().zip(suggested_name.encode_utf16()) {
         *slot = unit;
     }
-    let filter: Vec<u16> = "Todos os arquivos\0*.*\0\0".encode_utf16().collect();
-    let title: Vec<u16> = "Salvar arquivo\0".encode_utf16().collect();
+    let filter: Vec<u16> = format!("{}\0*.*\0\0", tr("Todos os arquivos"))
+        .encode_utf16()
+        .collect();
+    let title: Vec<u16> = format!("{}\0", tr("Salvar arquivo"))
+        .encode_utf16()
+        .collect();
     // The dialog opens in the configured download folder (issue #40); without
     // one, Windows picks its usual last-used folder.
     let initial: Vec<u16> = {
@@ -1354,6 +1361,35 @@ pub fn ensure_isolation_supported() -> Result<(), String> {
     }
 }
 
+/// The reply popup records a voice note in its own webview. macOS grants capture
+/// from the app's microphone usage string. Linux and Windows deny it unless this
+/// window asks, and this window only loads our popup page.
+pub(crate) fn allow_popup_microphone(win: &tauri::WebviewWindow) {
+    #[cfg(target_os = "linux")]
+    {
+        use webkit2gtk::glib::prelude::ObjectExt;
+        use webkit2gtk::{PermissionRequestExt, WebViewExt};
+        let _ = win.with_webview(|webview| {
+            let wv = webview.inner();
+            if let Some(settings) = WebViewExt::settings(&wv) {
+                settings.set_property("enable-media-stream", true);
+            }
+            wv.connect_permission_request(|_wv, req| {
+                req.allow();
+                true
+            });
+        });
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = win.with_webview(allow_popup_microphone_windows);
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = win;
+    }
+}
+
 /// Grant microphone/camera + media settings to WhatsApp Web, and make sure the
 /// site actually sees our Chrome UA. The system webview denies getUserMedia by
 /// default, which blocks voice messages (the "Allow microphone" prompt). We
@@ -1588,6 +1624,42 @@ pub fn native_report(app: &AppHandle, id: &str, action: &str) {
             NATIVE_NOTIFICATIONS.with(|items| items.borrow_mut().insert(id, n));
         });
     });
+}
+
+#[cfg(target_os = "windows")]
+fn allow_popup_microphone_windows(webview: tauri::webview::PlatformWebview) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2, ICoreWebView2PermissionRequestedEventArgs, COREWEBVIEW2_PERMISSION_KIND,
+        COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+        COREWEBVIEW2_PERMISSION_STATE_DENY,
+    };
+    use webview2_com::PermissionRequestedEventHandler;
+    use windows_core::Interface;
+    unsafe {
+        let controller = webview.controller();
+        let core: ICoreWebView2 = match controller.CoreWebView2() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let handler = PermissionRequestedEventHandler::create(Box::new(
+            move |_wv: Option<ICoreWebView2>,
+                  args: Option<ICoreWebView2PermissionRequestedEventArgs>|
+                  -> windows_core::Result<()> {
+                if let Some(args) = args {
+                    let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
+                    args.PermissionKind(&mut kind)?;
+                    if kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE {
+                        args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
+                    } else {
+                        args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
+                    }
+                }
+                Ok(())
+            },
+        ));
+        let mut token: i64 = 0;
+        let _ = core.add_PermissionRequested(&handler, &mut token);
+    }
 }
 
 /// Windows (WebView2): auto-allow microphone/camera permission requests so WhatsApp
