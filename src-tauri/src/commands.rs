@@ -481,6 +481,18 @@ pub fn switcher_accounts(
         .collect())
 }
 
+/// Reload the account page that asked. WhatsApp's reconnect button calls
+/// `location.reload()`, and the page cancels that while a send is still queued.
+/// The button then does nothing until the app is quit. The page asks for this
+/// only after that reload has not navigated.
+#[tauri::command]
+pub fn reload_account_page(window: tauri::Webview, app: tauri::AppHandle) -> Result<(), String> {
+    crate::integration::remote(&window)?;
+    lock::require_unlocked(&app)?;
+    crate::dlog::log("sync: reconnect reloaded the account page");
+    window.reload().map_err(|e| e.to_string())
+}
+
 /// Zoom shortcuts from the WhatsApp page (Ctrl/Cmd +/-/0, Ctrl+wheel): step the
 /// shared display zoom, persist it and apply it to every account webview. The
 /// page only names the action; the new level is computed from the saved value,

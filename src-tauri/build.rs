@@ -27,6 +27,7 @@ fn main() {
             "reveal_download",
             "switcher_accounts",
             "switch_account",
+            "reload_account_page",
             "zoom_step",
             "voice_prefs",
             "voice_lookup",

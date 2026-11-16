@@ -170,6 +170,112 @@
     return Promise.resolve();
   }
 
+  // WhatsApp's reconnect control calls `location.reload()`. While a send or a
+  // sync is still queued, `beforeunload` returns a warning string. This
+  // webview treats that as "cancel" and shows no dialog, so the click does
+  // nothing and only quitting the app loads a fresh page. An intentional
+  // reload is allowed through. If the banner is still there afterwards, Rust
+  // reloads the webview — the same recovery as restarting, without the quit.
+  var nativeReload = null;
+  try { nativeReload = Location.prototype.reload; } catch (e) {}
+  function allowReload() {
+    try { window.onbeforeunload = null; } catch (e) {}
+  }
+  var recovery = 0;
+  function reloadFresh(self, args) {
+    // A stuck service worker keeps the dead socket across location.reload().
+    // Quitting the app kills that worker; unregistering it is the same step.
+    allowReload();
+    var done = false;
+    function go() {
+      if (done) return;
+      done = true;
+      allowReload();
+      try { nativeReload.apply(self, args); } catch (e) {}
+    }
+    try {
+      var sw = navigator.serviceWorker;
+      if (sw && typeof sw.getRegistrations === "function") {
+        var timer = setTimeout(go, 800);
+        sw.getRegistrations().then(function (regs) {
+          return Promise.all((regs || []).map(function (reg) { return reg.unregister(); }));
+        }).then(function () { clearTimeout(timer); go(); }, function () { clearTimeout(timer); go(); });
+        return;
+      }
+    } catch (e) {}
+    go();
+  }
+  if (typeof nativeReload === "function") {
+    try {
+      Location.prototype.reload = function () {
+        reloadFresh(this, arguments);
+      };
+    } catch (e) {}
+  }
+  function reconnectLabel(text) {
+    if (!text || text.length > 80) return false;
+    if (/qr|log out|logout|sair|cerrar sesi[oó]n/.test(text)) return false;
+    return /reconnect|reconect|use here|usar aqui|usar aqu[ií]|reload|recarregar|recargar/.test(text);
+  }
+  function reconnectControl(node) {
+    if (!node || !node.closest) return null;
+    var el = node.closest("button, [role='button']");
+    if (!el || !el.closest) return null;
+    if (el.closest("[id^='__whatrust'], [data-whatrust-standin], [data-wr-todo-menu], [data-wr-todo-badge], [data-wr-voice], [data-wr-summary-menu], [data-wr-chat-summary]")) return null;
+    var testid = el.getAttribute("data-testid") || "";
+    if (testid === "link_device_qr_expired_refresh_button" || testid === "link_device_qr_offline_refresh_button") return null;
+    var label = [el.getAttribute("aria-label"), el.getAttribute("title"), el.innerText]
+      .filter(Boolean).join(" ").replace(/\s+/g, " ").trim().toLowerCase();
+    if (reconnectLabel(label)) return el;
+    var icon = el.querySelector && el.querySelector("[data-icon]");
+    var iconName = icon ? (icon.getAttribute("data-icon") || "") : "";
+    if (!/refresh|reconnect|alert/.test(iconName)) return null;
+    var host = el.parentElement;
+    for (var i = 0; host && i < 4; i++, host = host.parentElement) {
+      var text = (host.innerText || "").replace(/\s+/g, " ").trim().toLowerCase();
+      if (text.length > 240) continue;
+      if (/not connected|n[aã]o conectad|no internet|sem internet|reconnect|reconect/.test(text)) return el;
+    }
+    return null;
+  }
+  function reconnectStillShown() {
+    var nodes;
+    try { nodes = document.querySelectorAll("button, [role='button']"); }
+    catch (e) { return false; }
+    for (var i = 0; i < nodes.length; i++) {
+      if (reconnectControl(nodes[i])) return true;
+    }
+    return false;
+  }
+  function recoverConnection() {
+    if (recovery < 0) return;
+    recovery = -1;
+    allowReload();
+    var hid = false;
+    window.addEventListener("pagehide", function () { hid = true; }, { capture: true, once: true });
+    if (typeof nativeReload === "function") reloadFresh(window.location, []);
+    setTimeout(function () {
+      if (hid) return;
+      invoke("reload_account_page");
+      setTimeout(function () {
+        if (recovery < 0 && document.visibilityState !== "hidden") recovery = 0;
+      }, 1500);
+    }, 1200);
+  }
+  document.addEventListener("click", function (event) {
+    var control = reconnectControl(event.target);
+    if (!control) return;
+    var token = ++recovery;
+    setTimeout(function () {
+      if (token !== recovery) return;
+      // React swaps the button when the label changes to "Connecting…".
+      // The warning staying on screen is what means the click did not reconnect.
+      if (!control.isConnected && !reconnectStillShown()) return;
+      recoverConnection();
+    }, 1500);
+  }, true);
+  window.addEventListener("pagehide", function () { recovery++; }, true);
+
   // Zoom shortcuts: Ctrl (Cmd on macOS) with + / - / 0, and Ctrl+wheel. The page
   // only names the action; Rust steps the saved zoom and applies it to every
   // account (zoom_step). Native webview zoom is switched off in window.rs, so

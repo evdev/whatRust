@@ -16,6 +16,7 @@
     "allow-reveal-download",
     "allow-switcher-accounts",
     "allow-switch-account",
+    "allow-reload-account-page",
     "allow-zoom-step",
     "notification:allow-is-permission-granted",
     "allow-integration-state",
