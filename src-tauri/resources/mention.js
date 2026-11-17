@@ -18,7 +18,11 @@
  *   treats /(?<![\w@.+-])@all\b/ as MENTION_ALL, and that flag's value is 1
  *   (nonJidMentions bit). @everyone is the same kind of tag.
  * - Reply to me: quotedParticipant is me, or the quoted message is from me.
- *   quotedStanzaID alone is not enough. Quote send, later, is
+ *   quotedStanzaID alone is not enough. quotedMsgId is the only message
+ *   getter wa-js adds that throws: message_not_have_a_reply unless
+ *   quotedStanzaID is set. mentionedJidList and nonJidMentions do not.
+ *   isGroupMsg and isStatusV3 are booleans on some builds and methods on
+ *   others. Quote send, later, is
  *   WPP.chat.sendTextMessage(chatId, text, { quotedMsg: msgId }). The
  *   default send options set markIsRead, so that send also marks the chat
  *   read. WPP.chat.markIsRead(chatId) is the explicit form.
@@ -50,13 +54,13 @@
   function widText(value) {
     if (!value) return "";
     if (typeof value === "string") return value;
-    if (typeof value._serialized === "string") return value._serialized;
-    if (typeof value.toString === "function") {
-      try {
+    try {
+      if (typeof value._serialized === "string") return value._serialized;
+      if (typeof value.toString === "function") {
         var text = String(value.toString());
         if (text && text !== "[object Object]") return text;
-      } catch (e) {}
-    }
+      }
+    } catch (e) {}
     return "";
   }
 
@@ -95,10 +99,14 @@
   function asList(value) {
     if (!value) return [];
     if (typeof value === "string") return [value];
-    if (typeof value.length === "number") {
-      var out = [];
-      for (var i = 0; i < value.length; i++) out.push(widText(value[i]));
-      return out;
+    try {
+      if (typeof value.length === "number") {
+        var out = [];
+        for (var i = 0; i < value.length; i++) out.push(widText(value[i]));
+        return out;
+      }
+    } catch (e) {
+      return [];
     }
     return [widText(value)];
   }
@@ -113,19 +121,19 @@
   }
 
   function textOf(msg) {
-    return String((msg && (msg.body || msg.caption)) || "");
+    return String(field(msg, "body") || field(msg, "caption") || "");
   }
 
   // @everyone, @all, and nonJidMentions bit 1 (MENTION_ALL) are a group tag.
   // A direct chat is not an everyone alert, even when the text says @everyone.
   function mentionsEveryone(msg, body, group) {
     if (!group) return false;
-    if ((Number(msg && msg.nonJidMentions) & 1) === 1) return true;
+    if ((Number(field(msg, "nonJidMentions")) & 1) === 1) return true;
     return /(?<![\w@.+-])@(everyone|all)\b/i.test(body);
   }
 
   function mentionsSelf(msg, selfIds, body) {
-    var list = asList(msg && msg.mentionedJidList);
+    var list = asList(field(msg, "mentionedJidList"));
     for (var i = 0; i < list.length; i++) {
       if (matchesAny(list[i], selfIds)) return true;
     }
@@ -140,29 +148,49 @@
     return false;
   }
 
+  // A throwing model getter must not abort the rest of classification.
+  function field(obj, name) {
+    try {
+      return obj == null ? undefined : obj[name];
+    } catch (e) {
+      return undefined;
+    }
+  }
+
   function quotesSelf(msg, selfIds) {
-    if (matchesAny(msg && msg.quotedParticipant, selfIds)) return true;
-    var quoted = msg && msg.quotedMsg;
-    if (quoted && (quoted.fromMe || (quoted.id && quoted.id.fromMe))) return true;
-    var quotedId = quoted ? (typeof quoted.id === "string" ? quoted.id : widText(quoted.id)) : "";
-    if (quotedId.indexOf("true_") === 0) return true;
-    var key = msg && (typeof msg.quotedMsgId === "string" ? msg.quotedMsgId : widText(msg.quotedMsgId));
-    return typeof key === "string" && key.indexOf("true_") === 0;
+    try {
+      if (matchesAny(field(msg, "quotedParticipant"), selfIds)) return true;
+      var quoted = field(msg, "quotedMsg");
+      var quotedKey = field(quoted, "id");
+      if (quoted && (field(quoted, "fromMe") || (quotedKey && field(quotedKey, "fromMe")))) return true;
+      var quotedId = quotedKey != null
+        ? (typeof quotedKey === "string" ? quotedKey : widText(quotedKey))
+        : "";
+      if (quotedId.indexOf("true_") === 0) return true;
+      // Reading quotedMsgId on a message with no quote throws inside wa-js.
+      if (!field(msg, "quotedStanzaID")) return false;
+      var raw = field(msg, "quotedMsgId");
+      var key = typeof raw === "string" ? raw : widText(raw);
+      return key.indexOf("true_") === 0;
+    } catch (e) {
+      return false;
+    }
   }
 
   function messageId(msg) {
-    var id = msg && msg.id;
+    var id = field(msg, "id");
     if (typeof id === "string") return id;
     return widText(id);
   }
 
   function fromMe(msg, id) {
-    if (msg.id && msg.id.fromMe) return true;
+    var key = field(msg, "id");
+    if (key && field(key, "fromMe")) return true;
     return id.indexOf("true_") === 0;
   }
 
   function atMs(msg) {
-    var at = Number(msg.t || msg.timestamp || 0);
+    var at = Number(field(msg, "t") || field(msg, "timestamp") || 0);
     if (at > 0 && at < 1e12) at *= 1000;
     return at;
   }
@@ -179,30 +207,45 @@
   }
 
   function chatOf(msg) {
-    var id = msg.id;
+    var id = field(msg, "id");
     var raw = "";
     if (typeof id === "string") {
       var compound = /^(?:true|false)_([^_]+@[^_]+)_/.exec(id);
       if (compound) raw = compound[1];
     }
-    if (!raw && id) raw = widText(id.remote);
-    if (!raw && msg.chat) raw = widText(msg.chat.id);
+    if (!raw && id) raw = widText(field(id, "remote"));
+    if (!raw) raw = widText(field(field(msg, "chat"), "id"));
     var chat = parseId(raw);
     if (chat) return chat;
-    if (fromMe(msg, messageId(msg))) return parseId(widText(msg.to));
-    return parseId(widText(msg.from));
+    if (fromMe(msg, messageId(msg))) return parseId(widText(field(msg, "to")));
+    return parseId(widText(field(msg, "from")));
+  }
+
+  // Some WhatsApp builds store these as booleans, others as methods.
+  // A method is truthy on its own, which would mark every message.
+  function callFlag(obj, name) {
+    var value = field(obj, name);
+    if (typeof value !== "function") return !!value;
+    try {
+      return !!value.call(obj);
+    } catch (e) {
+      return false;
+    }
   }
 
   function isStatus(msg, chat) {
-    if (msg.isStatusV3) return true;
+    if (callFlag(msg, "isStatusV3")) return true;
     if (chat && chat.host === "broadcast" && chat.local === "status") return true;
-    var remote = parseId(widText(msg.id && msg.id.remote));
+    var remote = parseId(widText(field(field(msg, "id"), "remote")));
     return !!(remote && remote.host === "broadcast" && remote.local === "status");
   }
 
   function isGroup(msg, chat) {
-    if (msg.isGroupMsg) return true;
-    if (msg.chat && (msg.chat.isGroup || msg.chat.groupMetadata)) return true;
+    if (callFlag(msg, "isGroupMsg")) return true;
+    var live = field(msg, "chat");
+    if (callFlag(live, "isGroup")) return true;
+    var meta = field(live, "groupMetadata");
+    if (meta && typeof meta !== "function") return true;
     return !!(chat && chat.host === "g.us");
   }
 
@@ -211,8 +254,8 @@
   }
 
   function senderOf(msg, chat, group) {
-    var author = parseId(widText(msg.author));
-    var from = parseId(widText(msg.from));
+    var author = parseId(widText(field(msg, "author")));
+    var from = parseId(widText(field(msg, "from")));
     if (group && author) return author.serialized;
     if (from && (!chat || from.serialized !== chat.serialized)) return from.serialized;
     if (author) return author.serialized;
@@ -224,7 +267,7 @@
     ctx = ctx || {};
     var id = messageId(msg);
     if (!id || fromMe(msg, id)) return null;
-    var type = String(msg.type || "").toLowerCase();
+    var type = String(field(msg, "type") || "").toLowerCase();
     if (SKIP_TYPE[type]) return null;
     if (!isLive(atMs(msg), ctx.readyAt, ctx.now)) return null;
     var selfIds = selfList(ctx.selfIds);
@@ -355,8 +398,8 @@
   }
 
   function stillUnread(chat, msg) {
-    if (msg && (msg.type === "revoked" || msg.isRevoked)) return false;
-    if (chat && Number(chat.unreadCount) === 0) return false;
+    if (msg && (field(msg, "type") === "revoked" || field(msg, "isRevoked"))) return false;
+    if (chat && Number(field(chat, "unreadCount")) === 0) return false;
     return true;
   }
 

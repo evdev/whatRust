@@ -185,6 +185,114 @@ assert(kind({
 }) === null, "a reply to someone else stays quiet");
 
 assert(kind() === "direct", "a new direct message alerts");
+{
+  const throwing = {
+    id: "false_1@c.us_THROW",
+    t: ready + 1000,
+    from: "1@c.us",
+    type: "chat",
+    body: "hello",
+  };
+  Object.defineProperty(throwing, "quotedMsgId", {
+    get: function () { throw new Error("message_not_have_a_reply"); },
+  });
+  const hit = api.classify(throwing, ctx());
+  assert(hit && hit.kind === "direct" && hit.direct === true, "a direct message still alerts when quotedMsgId throws");
+}
+{
+  const mention = {
+    id: "false_999@g.us_MTHROW",
+    t: ready + 1000,
+    from: "999@g.us",
+    author: "444@c.us",
+    isGroupMsg: true,
+    type: "chat",
+    body: "hey",
+    mentionedJidList: ["15551212@c.us"],
+  };
+  Object.defineProperty(mention, "quotedMsgId", {
+    get: function () { throw new Error("message_not_have_a_reply"); },
+  });
+  const hit = api.classify(mention, ctx());
+  assert(hit && hit.kind === "mention" && hit.mentions === true, "a mention still alerts when quotedMsgId throws");
+}
+{
+  const everyone = {
+    id: "false_999@g.us_ETHROW",
+    t: ready + 1000,
+    from: "999@g.us",
+    author: "444@c.us",
+    isGroupMsg: true,
+    type: "chat",
+    body: "@everyone",
+  };
+  Object.defineProperty(everyone, "quotedMsgId", {
+    get: function () { throw new Error("message_not_have_a_reply"); },
+  });
+  const hit = api.classify(everyone, ctx());
+  assert(hit && hit.kind === "everyone" && hit.everyone === true, "an everyone tag still alerts when quotedMsgId throws");
+}
+{
+  const reply = {
+    id: "false_999@g.us_RTHROW",
+    t: ready + 1000,
+    from: "999@g.us",
+    author: "444@c.us",
+    isGroupMsg: true,
+    type: "chat",
+    body: "about this",
+    quotedParticipant: "15551212@c.us",
+    quotedStanzaID: "OLD",
+  };
+  Object.defineProperty(reply, "quotedMsgId", {
+    get: function () { throw new Error("message_not_have_a_reply"); },
+  });
+  Object.defineProperty(reply, "quotedMsg", {
+    get: function () { throw new Error("quoted_msg_unavailable"); },
+  });
+  const hit = api.classify(reply, ctx());
+  assert(hit && hit.kind === "quote" && hit.replies === true, "a reply still alerts when quotedMsg and quotedMsgId throw");
+}
+assert(kind({ isGroupMsg: function () { return false; } }) === "direct", "a direct message stays direct when isGroupMsg is a method");
+assert(kind({
+  id: "false_999@g.us_GFN",
+  from: "999@g.us",
+  author: "444@c.us",
+  body: "hey",
+  mentionedJidList: ["15551212@c.us"],
+  isGroupMsg: function () { return true; },
+}) === "mention", "a group stays a group when isGroupMsg is a method");
+assert(kind({ isStatusV3: function () { return false; } }) === "direct", "a direct message stays direct when isStatusV3 is a method");
+assert(kind({ isStatusV3: function () { return true; } }) === null, "a status method stays quiet");
+{
+  const dm = {
+    id: "false_1@c.us_MLIST",
+    t: ready + 1000,
+    from: "1@c.us",
+    type: "chat",
+    body: "hello",
+  };
+  Object.defineProperty(dm, "mentionedJidList", {
+    get: function () { throw new Error("no_mentions"); },
+  });
+  Object.defineProperty(dm, "nonJidMentions", {
+    get: function () { throw new Error("no_everyone"); },
+  });
+  Object.defineProperty(dm, "quotedMsg", {
+    get: function () { throw new Error("quoted_msg_unavailable"); },
+  });
+  const hit = api.classify(dm, ctx());
+  assert(hit && hit.direct === true, "a direct message still alerts when mention fields throw");
+}
+assert(kind({
+  id: "false_999@g.us_Q4",
+  from: "999@g.us",
+  author: "444@c.us",
+  isGroupMsg: true,
+  body: "about this",
+  quotedStanzaID: "OLD",
+  quotedMsgId: "true_999@g.us_OLD",
+}) === "quote", "a quote key that starts with true_ is a reply to me");
 assert(kind({ t: Math.floor((ready + 1000) / 1000) }) === "direct", "a WhatsApp seconds timestamp counts as live");
 assert(kind({ body: "@everyone" }) === "direct", "a direct message still alerts when the text says @everyone");
 assert(flags({ body: "@everyone" }).everyone !== true, "a direct chat is not an everyone alert");
