@@ -192,6 +192,19 @@
     return widText(id);
   }
 
+  // The serialized id gains a chat jid and, once the type settles, sometimes a
+  // participant suffix. The token in the middle is the message. A picture is
+  // emitted once as each form, and both are the same message.
+  function messageToken(id) {
+    var raw = String(id || "");
+    var legacy = /^(?:true|false)_([^_]+@[^_]+)_(.+)$/.exec(raw);
+    if (!legacy) return raw;
+    var rest = legacy[2];
+    var cut = rest.lastIndexOf("_");
+    if (cut > 0 && /^[^_@]+@[^_]+$/.test(rest.slice(cut + 1))) return rest.slice(0, cut);
+    return rest;
+  }
+
   function fromMe(msg, id) {
     // The message flag and the key flag are both used. A voice note we just
     // sent can carry either one before its id string gains the true_ prefix.
@@ -355,10 +368,13 @@
       var seen = Object.create(null);
       var order = [];
       function remember(id) {
-        if (!id || seen[id]) return false;
+        var token = messageToken(id);
+        if (!id || seen[id] || (token && seen["t:" + token])) return false;
         seen[id] = true;
+        if (token) seen["t:" + token] = true;
         order.push(id);
-        if (order.length > SEEN_CAP) delete seen[order.shift()];
+        if (token) order.push("t:" + token);
+        while (order.length > SEEN_CAP) delete seen[order.shift()];
         return true;
       }
       wpp.on("chat.new_message", function (msg) {
@@ -385,9 +401,43 @@
     return String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   }
 
+  // WhatsApp's own notification for a picture, video, sticker, or voice note
+  // is a fixed label ("Foto", "Photo", "Mensagem de voz"), not the caption.
+  // A sender prefix may sit in front of it ("Ada: Foto" or "Ada\nFoto").
+  var MEDIA_NOTICE = {
+    photo: true,
+    image: true,
+    picture: true,
+    foto: true,
+    imagem: true,
+    video: true,
+    audio: true,
+    sticker: true,
+    figurinha: true,
+    gif: true,
+    document: true,
+    documento: true,
+    arquivo: true,
+    "voice message": true,
+    "mensagem de voz": true,
+    "audio message": true,
+    "mensagem de audio": true,
+  };
+
+  function mediaNotice(text) {
+    var raw = fold(text);
+    var cut = Math.max(raw.lastIndexOf(":"), raw.lastIndexOf("\n"));
+    var body = (cut >= 0 ? raw.slice(cut + 1) : raw).trim();
+    var word = body.replace(/[^a-z0-9\s]+/g, " ").replace(/\s+/g, " ").trim();
+    if (MEDIA_NOTICE[word]) return true;
+    return !word && !/[a-z0-9]/.test(body);
+  }
+
   // A popup replaces the ordinary notification for that message. A short body
   // only counts when the notification title also names the sender or the chat,
-  // so a text like "ok" does not swallow an unrelated alert.
+  // so a text like "ok" does not swallow an unrelated alert. A picture has no
+  // words to match, so its popup holds a notification that is only the media
+  // label for that sender or chat.
   function shouldSuppress(rows, title, body, now) {
     now = Number(now) || 0;
     var text = fold(body);
@@ -398,13 +448,13 @@
       var row = rows[i];
       if (!row || Number(row.until) <= now) continue;
       kept.push(row);
-      var key = fold(row.key);
-      if (!key || text.indexOf(key) === -1) continue;
       var sender = fold(row.sender);
       var chat = fold(row.chat);
       var named = sender.length > 1 && head.indexOf(sender) !== -1;
       var inChat = chat.length > 1 && head.indexOf(chat) !== -1;
-      if (key.length >= 8 || named || inChat) hit = true;
+      var key = fold(row.key);
+      if (key && text.indexOf(key) !== -1 && (key.length >= 8 || named || inChat)) hit = true;
+      if (row.media && (named || inChat) && mediaNotice(text)) hit = true;
     }
     return { rows: kept, hit: hit };
   }
@@ -551,6 +601,12 @@
     return type === "ptt" || type === "audio";
   }
 
+  function isMedia(msg) {
+    var type = String(field(msg, "type") || "").toLowerCase();
+    return type === "image" || type === "sticker" || type === "video" || type === "gif"
+      || type === "ptv" || type === "document" || isVoice(msg);
+  }
+
   function voiceSeconds(msg) {
     var raw = Number(field(msg, "duration"));
     if (!isFinite(raw) || raw <= 0) raw = Number(field(field(msg, "mediaData"), "duration"));
@@ -590,6 +646,7 @@
       body: media.text,
       preview: media.preview,
       voice: media.voice,
+      media: !!(media.preview || media.voice || isMedia(msg)),
       seconds: media.seconds,
       at: atMs(msg),
     };
@@ -639,9 +696,13 @@
   }
 
   function remember(view) {
-    if (!prefs.popup || !view.body) return;
+    if (!prefs.popup) return;
+    var key = String(view.body || "").slice(0, 240);
+    var media = !!(view.media || view.preview || view.voice);
+    if (!key && !media) return;
     suppressed.push({
-      key: view.body.slice(0, 240),
+      key: key,
+      media: media,
       sender: view.senderName,
       chat: view.chatName,
       until: Date.now() + 8000,

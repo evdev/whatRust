@@ -40,6 +40,27 @@ const photo = api.displayFrom({
 assert(photo.senderName === "Ada Lovelace", "a saved name beats a phone jid and a push name");
 assert(photo.body === "look at this" && !photo.body.includes("/9j/"), "a photo caption is the text, not the thumbnail");
 assert(photo.preview.startsWith("data:image/jpeg;base64,/9j/"), "the thumbnail is passed as a picture");
+assert(photo.media === true, "a photo is media, so it can hold the ordinary notification");
+assert(shown.media === false, "a text message is not media");
+
+const barePhoto = api.displayFrom({
+  notifyName: "Ada",
+  type: "image",
+  chat: { formattedTitle: "Ada" },
+  t: 1_763_000_000,
+}, { kind: "direct", chatId: "1@c.us", senderId: "1@c.us", msgId: "false_1@c.us_P" });
+assert(barePhoto.body === "" && barePhoto.media === true, "a photo with no caption is still media");
+const photoHold = [{ key: "", media: true, sender: "Ada", chat: "Ada", until: 5_000 }];
+assert(api.shouldSuppress(photoHold, "Ada", "📷 Foto", 1_000).hit, "a photo popup holds the Foto notification");
+assert(api.shouldSuppress(photoHold, "Ada", "Photo", 1_000).hit, "a photo popup holds the Photo notification");
+assert(api.shouldSuppress(photoHold, "Family", "Ada: 📷 Photo", 1_000).hit === false, "a photo label from another chat is not held");
+assert(!api.shouldSuppress(photoHold, "Ada", "hello there", 1_000).hit, "a later text from the same person is not held");
+assert(api.shouldSuppress(
+  [{ key: "look at this", media: true, sender: "Ada", chat: "Ada", until: 5_000 }],
+  "Ada",
+  "Foto",
+  1_000,
+).hit, "a captioned photo still holds a notification that only says Foto");
 
 context.WPP = {
   whatsapp: {
@@ -516,6 +537,43 @@ assert(settled.length === 3
   && settled[2][0] === "15551212@c.us" && settled[2][1] === clock,
   "a live outgoing text or voice note settles that chat once, after ciphertext");
 assert(answerAlerts.join() === "direct", "an outgoing message does not alert, and an incoming one still does");
+
+const pictures = fakeWpp(true);
+const pictureHits = [];
+clock = now;
+api.attach(pictures, {
+  now: () => clock,
+  selfIds: () => self,
+  emit: (hit) => pictureHits.push(hit.msgId),
+  settle: () => {},
+});
+const token = "AbCdEfGh12345678";
+pictures.emit("chat.new_message", incoming({
+  id: "false_15551212@c.us_" + token,
+  type: "image",
+  body: "",
+  t: clock,
+}));
+pictures.emit("chat.new_message", incoming({
+  id: "false_777@lid_" + token,
+  type: "image",
+  caption: "look",
+  t: clock,
+}));
+pictures.emit("chat.new_message", incoming({
+  id: "false_15551212@c.us_" + token + "_15551212@c.us",
+  type: "image",
+  t: clock,
+}));
+pictures.emit("chat.new_message", incoming({
+  id: "false_15551212@c.us_ZzYyXxWw98765432",
+  type: "image",
+  t: clock,
+}));
+assert(pictureHits.length === 2
+  && pictureHits[0] === "false_15551212@c.us_" + token
+  && pictureHits[1] === "false_15551212@c.us_ZzYyXxWw98765432",
+  "a picture reported again when its type settles alerts once, and another picture still alerts");
 
 const bundle = readFileSync(join(here, "wppconnect-wa.js"), "utf8");
 assert(bundle.includes("t.sendTextMessage=async function"), "wa-js can send a text message");

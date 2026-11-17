@@ -418,6 +418,32 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, ()> {
     Ok(out)
 }
 
+/// The part of a WhatsApp id that stays put when a picture is reported
+/// again as its type settles. `false_<chat>_<token>` and
+/// `false_<chat>_<token>_<participant>` are one message.
+fn message_token(id: &str) -> String {
+    let Some(rest) = id
+        .strip_prefix("true_")
+        .or_else(|| id.strip_prefix("false_"))
+    else {
+        return id.to_string();
+    };
+    let Some(split) = rest.find('_') else {
+        return id.to_string();
+    };
+    let tail = &rest[split + 1..];
+    if tail.is_empty() {
+        return id.to_string();
+    }
+    if let Some(cut) = tail.rfind('_') {
+        let participant = &tail[cut + 1..];
+        if participant.contains('@') && !participant.contains('_') {
+            return tail[..cut].to_string();
+        }
+    }
+    tail.to_string()
+}
+
 fn plausible_id(value: &str) -> bool {
     let n = value.chars().count();
     (3..=180).contains(&n)
@@ -673,7 +699,7 @@ pub fn mention_event(
         inner
             .seen
             .retain(|_, at| now.duration_since(*at) <= SEEN_FOR);
-        let key = (account.clone(), msg_id);
+        let key = (account.clone(), message_token(&msg_id));
         if inner.seen.contains_key(&key) {
             return Ok(());
         }
@@ -1586,7 +1612,8 @@ fn reveal_account(app: &AppHandle, label: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        answered_by, boot_script_from, hold_drop_chat, hold_push, popup_origin, prepare_reply,
+        answered_by, boot_script_from, hold_drop_chat, hold_push, message_token, popup_origin,
+        prepare_reply,
         release_of, reply_text,
         send_script, shown_body, shown_name, shown_preview, Held, Release, FILE_MAX, POPUP_H,
         POPUP_W,
@@ -1703,6 +1730,21 @@ mod tests {
                 .filter(|held| held.msg_id == "false_1@g.us_10")
                 .count()
                 == 1
+        );
+    }
+
+    #[test]
+    fn a_picture_keeps_one_token_when_its_id_grows() {
+        let token = "AbCdEfGh12345678";
+        assert_eq!(message_token(&format!("false_15551212@c.us_{token}")), token);
+        assert_eq!(message_token(&format!("false_777@lid_{token}")), token);
+        assert_eq!(
+            message_token(&format!("false_15551212@c.us_{token}_15551212@c.us")),
+            token
+        );
+        assert_ne!(
+            message_token("false_15551212@c.us_ZzYyXxWw98765432"),
+            token
         );
     }
 
