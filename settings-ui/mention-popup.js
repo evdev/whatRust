@@ -25,7 +25,21 @@ async function load() {
   document.getElementById("avatar").textContent = initials(sender);
   const meta = [card.chat_name, when(card.at_ms), card.account_name].filter(Boolean);
   document.getElementById("meta").textContent = meta.join(" · ");
-  document.getElementById("body").textContent = card.body || "New message";
+  const picture = document.getElementById("incoming");
+  const text = document.getElementById("body-text");
+  if (card.preview) {
+    picture.hidden = false;
+    picture.onerror = () => {
+      picture.hidden = true;
+      picture.removeAttribute("src");
+      if (!text.textContent) text.textContent = "Photo";
+    };
+    picture.src = card.preview;
+  } else {
+    picture.hidden = true;
+    picture.removeAttribute("src");
+  }
+  text.textContent = card.body || (card.preview ? "" : "New message");
 }
 
 async function openChat() {

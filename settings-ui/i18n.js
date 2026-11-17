@@ -160,6 +160,7 @@
     "Write a reply.": "Escreva uma resposta.",
     "Send": "Enviar",
     "New message": "Nova mensagem",
+    "Photo": "Foto",
     "Could not send.": "Não foi possível enviar.",
     "WhatsApp is still opening. Try again.": "O WhatsApp ainda está abrindo. Tente de novo.",
     "The reply is too long.": "A resposta é longa demais.",

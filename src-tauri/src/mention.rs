@@ -57,6 +57,7 @@ struct Card {
     chat_name: String,
     sender_name: String,
     body: String,
+    preview: String,
     at_ms: u64,
     sound: bool,
     account_name: String,
@@ -73,6 +74,7 @@ struct Held {
     chat_name: String,
     sender_name: String,
     body: String,
+    preview: String,
     at_ms: u64,
     account_name: String,
     mentions: bool,
@@ -94,6 +96,7 @@ pub struct CardView {
     chat_name: String,
     sender_name: String,
     body: String,
+    preview: String,
     at_ms: u64,
     account_name: String,
     sound: bool,
@@ -413,6 +416,52 @@ fn clip(value: &str, max: usize) -> String {
     value.trim().chars().take(max).collect()
 }
 
+fn shown_name(value: &str) -> String {
+    let text = clip(value, 120);
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("@c.us")
+        || lower.contains("@g.us")
+        || lower.contains("@lid")
+        || lower.contains("@s.whatsapp.net")
+    {
+        return String::new();
+    }
+    text
+}
+
+/// A JPEG thumbnail is base64 with no spaces. It is a picture, not the message.
+fn shown_body(value: &str) -> String {
+    let text = clip(value, 500);
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let blob = compact.chars().count() >= 80
+        && compact
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='));
+    if blob { String::new() } else { text }
+}
+
+fn shown_preview(value: &str) -> String {
+    let text = value.trim();
+    let Some(rest) = text.strip_prefix("data:image/") else {
+        return String::new();
+    };
+    let Some((mime, data)) = rest.split_once(";base64,") else {
+        return String::new();
+    };
+    if mime.is_empty()
+        || !mime
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '+' | '-' | '.'))
+        || !(64..=100_000).contains(&data.len())
+        || !data
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+    {
+        return String::new();
+    }
+    text.to_string()
+}
+
 fn hold_prune(queue: &mut VecDeque<Held>, now: Instant) {
     queue.retain(|held| now.saturating_duration_since(held.queued) <= HOLD_TTL);
 }
@@ -507,6 +556,7 @@ pub fn mention_event(
     chat_name: String,
     sender_name: String,
     body: String,
+    preview: String,
     at_ms: u64,
     mentions: bool,
     replies: bool,
@@ -528,9 +578,10 @@ pub fn mention_event(
         account_label: account.clone(),
         chat_id,
         msg_id: msg_id.clone(),
-        chat_name: clip(&chat_name, 120),
-        sender_name: clip(&sender_name, 120),
-        body: clip(&body, 500),
+        chat_name: shown_name(&chat_name),
+        sender_name: shown_name(&sender_name),
+        body: shown_body(&body),
+        preview: shown_preview(&preview),
         at_ms: millis(at_ms),
         account_name: account_name(&app, &account),
         mentions,
@@ -582,6 +633,7 @@ pub fn mention_card(window: tauri::Webview, app: AppHandle) -> Result<CardView, 
         chat_name: card.chat_name.clone(),
         sender_name: card.sender_name.clone(),
         body: card.body.clone(),
+        preview: card.preview.clone(),
         at_ms: card.at_ms,
         account_name: card.account_name.clone(),
         sound: card.sound,
@@ -877,6 +929,7 @@ fn stage(app: &AppHandle, held: Held, sound: bool) -> String {
             chat_name: held.chat_name,
             sender_name: held.sender_name,
             body: held.body,
+            preview: held.preview,
             at_ms: held.at_ms,
             sound,
             account_name: held.account_name,
@@ -917,6 +970,7 @@ pub fn on_lock(app: &AppHandle) {
                     chat_name: card.chat_name,
                     sender_name: card.sender_name,
                     body: card.body,
+                    preview: card.preview,
                     at_ms: card.at_ms,
                     account_name: card.account_name,
                     mentions: card.mentions,
@@ -1301,7 +1355,8 @@ fn reveal_account(app: &AppHandle, label: &str) {
 mod tests {
     use super::{
         boot_script_from, hold_push, popup_origin, prepare_reply, release_of, reply_text,
-        send_script, Held, Release, FILE_MAX, POPUP_H, POPUP_W,
+        send_script, shown_body, shown_name, shown_preview, Held, Release, FILE_MAX, POPUP_H,
+        POPUP_W,
     };
     use crate::settings::MentionAccountPrefs;
     use std::collections::VecDeque;
@@ -1320,6 +1375,18 @@ mod tests {
     fn a_short_screen_keeps_the_popup_on_it() {
         let (_, y) = popup_origin(0.0, 20.0, 800.0, 400.0, 5);
         assert!(y < 20.0 + 400.0 - POPUP_H);
+    }
+
+    #[test]
+    fn a_thumbnail_is_a_picture_and_a_jid_is_not_a_name() {
+        let blob = format!("/9j/{}", "A".repeat(90));
+        assert!(shown_body(&blob).is_empty());
+        assert_eq!(shown_body("look at this"), "look at this");
+        let url = format!("data:image/jpeg;base64,/9j/{}", "A".repeat(80));
+        assert_eq!(shown_preview(&url), url);
+        assert!(shown_preview("data:text/plain;base64,AAAA").is_empty());
+        assert!(shown_name("15551212@c.us").is_empty());
+        assert_eq!(shown_name("Ada Lovelace"), "Ada Lovelace");
     }
 
     #[test]
@@ -1363,6 +1430,7 @@ mod tests {
             chat_name: "Family".into(),
             sender_name: "Ada".into(),
             body: "hello".into(),
+            preview: String::new(),
             at_ms: 0,
             account_name: String::new(),
             mentions: true,

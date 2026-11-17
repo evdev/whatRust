@@ -26,6 +26,48 @@ const shown = api.displayFrom({
 }, { kind: "direct", chatId: "1@c.us", senderId: "1@c.us", msgId: "false_1@c.us_A" });
 assert(shown.senderName === "Ada" && shown.chatName === "Family" && shown.body === "hello", "the popup gets the sender, chat, and text");
 assert(shown.at === 1_763_000_000_000, "a seconds timestamp is shown in milliseconds");
+
+const thumb = "/9j/" + "A".repeat(90);
+const photo = api.displayFrom({
+  notifyName: "15551212@c.us",
+  sender: { name: "Ada Lovelace", pushname: "Ada" },
+  chat: { formattedTitle: "Family" },
+  body: thumb,
+  caption: "look at this",
+  t: 1_763_000_000,
+}, { kind: "direct", chatId: "1@c.us", senderId: "15551212@c.us", msgId: "false_1@c.us_A" });
+assert(photo.senderName === "Ada Lovelace", "a saved name beats a phone jid and a push name");
+assert(photo.body === "look at this" && !photo.body.includes("/9j/"), "a photo caption is the text, not the thumbnail");
+assert(photo.preview.startsWith("data:image/jpeg;base64,/9j/"), "the thumbnail is passed as a picture");
+
+context.WPP = {
+  whatsapp: {
+    ContactStore: {
+      get(wid) {
+        const key = typeof wid === "string" ? wid : "";
+        if (key === "15551212@c.us") return { name: "Ada" };
+        if (key === "15559999@c.us") return { name: "Bea" };
+        return null;
+      },
+    },
+  },
+};
+const named = api.displayFrom({
+  notifyName: "15551212@c.us",
+  from: "15551212@c.us",
+  chat: { formattedTitle: "15551212@c.us", id: "15551212@c.us" },
+  body: "hi @15559999",
+  mentionedJidList: ["15559999@c.us"],
+}, { kind: "direct", chatId: "15551212@c.us", senderId: "15551212@c.us", msgId: "false_15551212@c.us_B" });
+assert(named.senderName === "Ada" && named.chatName === "Ada", "a stored contact name replaces the phone jid");
+assert(named.body === "hi @Bea", "an @phone in the message is shown as that person's name");
+
+const unsaved = api.displayFrom({
+  notifyName: "15550000@c.us",
+  from: "15550000@c.us",
+  body: "hey",
+}, { kind: "direct", chatId: "15550000@c.us", senderId: "15550000@c.us", msgId: "false_15550000@c.us_C" });
+assert(unsaved.senderName === "+15550000" && !unsaved.senderName.includes("@"), "a contact with no name is a phone number, not a jid");
 assert(api.stillUnread({ unreadCount: 2 }, null) === true, "an unread chat is still waiting");
 assert(api.stillUnread({ unreadCount: 0 }, null) === false, "a chat read on the phone is not shown after unlock");
 assert(api.stillUnread({ unreadCount: 3 }, { type: "revoked" }) === false, "a revoked message is closed");

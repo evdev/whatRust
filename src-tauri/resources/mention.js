@@ -121,7 +121,12 @@
   }
 
   function textOf(msg) {
-    return String(field(msg, "body") || field(msg, "caption") || "");
+    var body = String(field(msg, "body") || "");
+    var caption = String(field(msg, "caption") || "");
+    // An image, sticker, or video keeps its JPEG thumbnail in body. The
+    // words, including an @mention, are the caption.
+    if (looksLikeBlob(body) || dataUrl(body)) return caption;
+    return body || caption;
   }
 
   // @everyone, @all, and nonJidMentions bit 1 (MENTION_ALL) are a group tag.
@@ -371,21 +376,164 @@
     return { rows: kept, hit: hit };
   }
 
+  var CARD_FIELDS = ["name", "shortName", "formattedShortName", "mentionName", "verifiedName"];
+  var OWN_FIELDS = ["pushname", "notifyName"];
+  var SHOWN_FIELDS = ["formattedName"];
+
+  function looksLikeBlob(value) {
+    var text = String(value || "").replace(/\s+/g, "");
+    return text.length >= 80 && /^[A-Za-z0-9+/]+=*$/.test(text);
+  }
+
+  // WhatsApp stores the small JPEG (or PNG, GIF, WebP) on the message itself.
+  function dataUrl(value) {
+    var raw = String(value || "").trim();
+    var mime = "";
+    var payload = raw.replace(/\s+/g, "");
+    var prefixed = /^data:image\/([a-z0-9.+-]+);base64,/i.exec(raw);
+    if (prefixed) {
+      mime = prefixed[1].toLowerCase();
+      payload = raw.slice(raw.indexOf(",") + 1).replace(/\s+/g, "");
+    } else if (payload.indexOf("/9j/") === 0) mime = "jpeg";
+    else if (payload.indexOf("iVBORw0KGgo") === 0) mime = "png";
+    else if (payload.indexOf("R0lGOD") === 0) mime = "gif";
+    else if (payload.indexOf("UklGR") === 0) mime = "webp";
+    if (!mime || payload.length < 64 || payload.length > 100000) return "";
+    if (!/^[A-Za-z0-9+/]+=*$/.test(payload)) return "";
+    return "data:image/" + mime + ";base64," + payload;
+  }
+
+  function humanText(value) {
+    var text = String(value || "").trim();
+    if (!text || looksLikeBlob(text) || dataUrl(text)) return "";
+    return text;
+  }
+
+  function usableName(value) {
+    var text = String(value == null ? "" : value).replace(/\s+/g, " ").trim();
+    if (!text || text === "[object Object]") return "";
+    if (parseId(text)) return "";
+    if (/^@?\d{6,}$/.test(text.replace(/\s/g, ""))) return "";
+    if (/^\+?\d[\d\s().-]{5,}$/.test(text)) return "";
+    return text.slice(0, 120);
+  }
+
+  function readName(obj, keys) {
+    if (!obj || typeof obj !== "object") return "";
+    for (var i = 0; i < keys.length; i++) {
+      var value = field(obj, keys[i]);
+      if (typeof value === "function") {
+        try { value = value.call(obj); } catch (e) { value = ""; }
+      }
+      var text = usableName(value);
+      if (text) return text;
+    }
+    var attrs = field(obj, "attributes");
+    if (attrs && typeof attrs === "object" && attrs !== obj) return readName(attrs, keys);
+    return "";
+  }
+
+  function displayName(contact, msg) {
+    if (contact && typeof contact !== "object") contact = null;
+    var card = readName(contact, CARD_FIELDS);
+    var own = readName(contact, OWN_FIELDS) || readName(msg, OWN_FIELDS);
+    return card || own || readName(contact, SHOWN_FIELDS) || readName(msg, SHOWN_FIELDS);
+  }
+
+  function storeContact(wid) {
+    var store = root.WPP && root.WPP.whatsapp && root.WPP.whatsapp.ContactStore;
+    if (!store || typeof store.get !== "function" || wid == null || wid === "") return null;
+    var keys = [wid];
+    var serial = widText(wid);
+    if (serial && serial !== wid) keys.push(serial);
+    for (var i = 0; i < keys.length; i++) {
+      try {
+        var found = store.get(keys[i]);
+        if (found && typeof found.then !== "function") return found;
+      } catch (e) {}
+    }
+    return null;
+  }
+
+  function phoneLabel(value) {
+    var id = parseId(widText(value));
+    if (!id || (id.host !== "c.us" && id.host !== "s.whatsapp.net")) return "";
+    if (!/^\d{6,}$/.test(id.local)) return "";
+    return "+" + id.local;
+  }
+
+  function personName(msg, fallbackId) {
+    var locals = [field(msg, "sender"), field(msg, "senderObj"), field(msg, "contact")];
+    var i;
+    for (i = 0; i < locals.length; i++) {
+      var direct = displayName(locals[i], null);
+      if (direct) return direct;
+    }
+    var ids = [field(msg, "author"), field(msg, "from"), fallbackId, field(msg, "notifyName")];
+    for (i = 0; i < ids.length; i++) {
+      var stored = displayName(storeContact(ids[i]), null);
+      if (stored) return stored;
+    }
+    var own = displayName(null, msg);
+    if (own) return own;
+    for (i = 0; i < ids.length; i++) {
+      var phone = phoneLabel(ids[i]);
+      if (phone) return phone;
+    }
+    return "";
+  }
+
+  function chatTitle(msg) {
+    var chat = field(msg, "chat");
+    var title = usableName(field(chat, "formattedTitle")) || usableName(field(chat, "name"));
+    if (title) return title;
+    var contact = displayName(field(chat, "contact"), null) || displayName(storeContact(field(chat, "id")), null);
+    if (contact) return contact;
+    return phoneLabel(field(chat, "id")) || phoneLabel(field(chat, "formattedTitle")) || phoneLabel(field(chat, "name"));
+  }
+
+  // @15551212 in the text becomes @Ada when that contact has a name.
+  function nameMentions(msg, text) {
+    if (!text || text.indexOf("@") === -1) return text;
+    var names = Object.create(null);
+    function remember(wid) {
+      var id = parseId(widText(wid));
+      if (!id || names[id.local]) return;
+      var named = wid && typeof wid === "object" ? displayName(wid, null) : "";
+      if (!named) named = displayName(storeContact(wid), null);
+      if (named) names[id.local] = named;
+    }
+    var list = field(msg, "mentionedJidList");
+    if (list) {
+      var items = typeof list.length === "number" ? list : [list];
+      for (var i = 0; i < items.length; i++) remember(items[i]);
+    }
+    return text.replace(/(?<![\w@.+-])@(\d{6,})\b/g, function (token, digits) {
+      return names[digits] ? "@" + names[digits] : token;
+    });
+  }
+
+  function mediaView(msg) {
+    var media = field(msg, "mediaData");
+    var preview = dataUrl(field(msg, "body"))
+      || dataUrl(field(msg, "thumbnail"))
+      || dataUrl(field(media, "preview"))
+      || dataUrl(field(media, "thumbnail"));
+    var text = humanText(field(msg, "caption")) || humanText(field(msg, "body"));
+    return { text: nameMentions(msg, text).slice(0, 500), preview: preview };
+  }
+
   function displayFrom(msg, hit) {
-    var sender = "";
-    var chatName = "";
-    try { sender = msg.notifyName || (msg.senderObj && (msg.senderObj.pushname || msg.senderObj.name)) || ""; } catch (e) {}
-    try {
-      chatName = (msg.chat && (msg.chat.formattedTitle || msg.chat.name)) || "";
-    } catch (e) {}
+    var media = mediaView(msg || {});
     return {
       kind: hit.kind,
       chatId: hit.chatId,
       senderId: hit.senderId,
       msgId: hit.msgId,
-      chatName: String(chatName || "").trim().slice(0, 120),
-      senderName: String(sender || "").trim().slice(0, 120),
-      body: textOf(msg).trim().slice(0, 500),
+      chatName: chatTitle(msg).slice(0, 120),
+      senderName: personName(msg, hit && hit.senderId).slice(0, 120),
+      body: media.text,
+      preview: media.preview,
       at: atMs(msg),
     };
   }
@@ -565,6 +713,7 @@
           chatName: view.chatName,
           senderName: view.senderName,
           body: view.body,
+          preview: view.preview,
           atMs: view.at,
           mentions: !!hit.mentions,
           replies: !!hit.replies,
