@@ -184,9 +184,12 @@
   }
 
   function fromMe(msg, id) {
+    // The message flag and the key flag are both used. A voice note we just
+    // sent can carry either one before its id string gains the true_ prefix.
+    if (callFlag(msg, "fromMe")) return true;
     var key = field(msg, "id");
-    if (key && field(key, "fromMe")) return true;
-    return id.indexOf("true_") === 0;
+    if (callFlag(key, "fromMe")) return true;
+    return String(id || "").indexOf("true_") === 0;
   }
 
   function atMs(msg) {
@@ -493,6 +496,9 @@
         if (kind === "voice") {
           options.type = "audio";
           options.isPtt = true;
+        } else if (type.indexOf("image/") === 0) {
+          options.type = "image";
+          if (text) options.caption = text;
         } else if (text) {
           options.caption = text;
         }

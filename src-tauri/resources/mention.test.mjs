@@ -310,6 +310,10 @@ assert(kind({
 }) === "direct", "a direct message that quotes someone else still alerts");
 
 assert(kind({ id: "true_15551212@c.us_ME", from: "15551212@c.us" }) === null, "my own message stays quiet");
+assert(kind({ fromMe: true, type: "ptt", body: "" }) === null, "an outgoing voice note stays quiet");
+assert(kind({ id: { fromMe: true, _serialized: "false_15551212@c.us_OUT" }, type: "ptt" }) === null, "an outgoing key stays quiet");
+assert(kind({ fromMe: function () { return true; } }) === null, "a fromMe method that returns true stays quiet");
+assert(kind({ fromMe: function () { return false; } }) === "direct", "a fromMe method that returns false still alerts");
 assert(kind({ type: "ciphertext" }) === null, "an undecrypted message stays quiet");
 assert(kind({
   id: "false_999@g.us_BIT",

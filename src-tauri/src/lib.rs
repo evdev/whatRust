@@ -219,6 +219,17 @@ pub fn run() {
         .manage(todo::TodoState::default())
         .manage(autoreply::AutoreplyState::default())
         .manage(mention::Popups::default())
+        // A dead web view is reloaded so an account comes back. A reply popup
+        // must not: reloading it drops the recording and shows the same card again.
+        .on_web_content_process_terminate(|webview| {
+            if webview.label().starts_with("mention-") {
+                crate::dlog::log("mention: popup webview terminated");
+                return;
+            }
+            if webview.reload().is_ok() {
+                crate::dlog::log("webview: terminated and reloaded");
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             integration::integration_state,
             integration::report_integration,

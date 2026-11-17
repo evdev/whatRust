@@ -186,12 +186,20 @@ textarea {
 #attachment {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
   color: var(--dim);
   font-size: 12px;
 }
-#attachment[hidden], #voice-preview[hidden], #voice-player[hidden] { display: none; }
+#attachment[hidden], #attachment-preview[hidden], #voice-preview[hidden], #voice-player[hidden] { display: none; }
+#attachment-preview {
+  flex: 0 0 72px;
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: var(--field);
+}
 #attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #voice-player {
   display: flex;

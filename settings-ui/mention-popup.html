@@ -22,10 +22,11 @@
       <button id="body" type="button"></button>
       <form id="reply">
         <div id="attachment" hidden>
+          <img id="attachment-preview" alt="" hidden />
           <span id="attachment-name"></span>
           <button id="attachment-clear" type="button" aria-label="Remove the file"></button>
         </div>
-        <audio id="voice-preview" hidden preload="metadata"></audio>
+        <audio id="voice-preview" hidden preload="none"></audio>
         <div id="voice-player" hidden>
           <button id="voice-play" type="button" aria-label="Play the voice note">
             <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>

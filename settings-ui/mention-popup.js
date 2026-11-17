@@ -38,8 +38,10 @@ const VOICE_RATE = 16000;
 const SPEEDS = [1, 1.5, 2];
 let speedIndex = 0;
 let attached = null;
+let attachmentUrl = "";
 let voiceBlob = null;
 let voiceUrl = "";
+let voiceSeconds = 0;
 let recorder = null;
 let recordStream = null;
 
@@ -63,6 +65,7 @@ function clearVoice() {
   recordStream = null;
   recorder = null;
   voiceBlob = null;
+  voiceSeconds = 0;
   resetPlayer();
   if (voiceUrl) URL.revokeObjectURL(voiceUrl);
   voiceUrl = "";
@@ -72,11 +75,37 @@ function clearVoice() {
   document.getElementById("text").hidden = false;
 }
 
+function imageMime(file) {
+  const type = file.type || "";
+  if (type.startsWith("image/")) return type;
+  const name = String(file.name || "").toLowerCase();
+  if (name.endsWith(".png")) return "image/png";
+  if (name.endsWith(".gif")) return "image/gif";
+  if (name.endsWith(".webp")) return "image/webp";
+  if (name.endsWith(".bmp")) return "image/bmp";
+  if (name.endsWith(".heic")) return "image/heic";
+  if (name.endsWith(".heif")) return "image/heif";
+  if (name.endsWith(".avif")) return "image/avif";
+  if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
+  return "";
+}
+
+function clearAttachmentPreview() {
+  const img = document.getElementById("attachment-preview");
+  img.onload = null;
+  img.onerror = null;
+  img.hidden = true;
+  img.removeAttribute("src");
+  if (attachmentUrl) URL.revokeObjectURL(attachmentUrl);
+  attachmentUrl = "";
+}
+
 function clearFile() {
   attached = null;
   document.getElementById("file").value = "";
   document.getElementById("attachment").hidden = true;
   document.getElementById("attachment-name").textContent = "";
+  clearAttachmentPreview();
 }
 
 function wavBytes(samples, rate) {
@@ -166,7 +195,7 @@ async function payload() {
       text,
       kind: "file",
       filename: attached.name || "file",
-      mime: attached.type || "application/octet-stream",
+      mime: imageMime(attached) || attached.type || "application/octet-stream",
       data: bytesToBase64(bytes),
     };
   }
@@ -205,8 +234,19 @@ document.getElementById("file").addEventListener("change", () => {
   if (!file) return;
   clearVoice();
   attached = file;
+  clearAttachmentPreview();
   document.getElementById("attachment-name").textContent = file.name;
   document.getElementById("attachment").hidden = false;
+  const mime = imageMime(file);
+  if (!mime) return;
+  attachmentUrl = URL.createObjectURL(file);
+  const img = document.getElementById("attachment-preview");
+  img.onload = () => { img.hidden = false; };
+  img.onerror = () => {
+    img.hidden = true;
+    img.removeAttribute("src");
+  };
+  img.src = attachmentUrl;
 });
 document.getElementById("attachment-clear").addEventListener("click", clearFile);
 document.getElementById("attach").addEventListener("click", () => {
@@ -214,6 +254,7 @@ document.getElementById("attach").addEventListener("click", () => {
 });
 const WAVE_BARS = 28;
 let audioCtx = null;
+let meterSource = null;
 let analyser = null;
 let waveLevels = [];
 let waveTimer = 0;
@@ -266,10 +307,10 @@ function startMeters(stream) {
   stopMeters();
   try {
     audioCtx = new AudioContext();
-    const source = audioCtx.createMediaStreamSource(stream);
+    meterSource = audioCtx.createMediaStreamSource(stream);
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 512;
-    source.connect(analyser);
+    meterSource.connect(analyser);
     if (audioCtx.state === "suspended") audioCtx.resume();
   } catch (error) {
     analyser = null;
@@ -296,9 +337,19 @@ function stopMeters() {
   if (waveTimer) clearInterval(waveTimer);
   clockTimer = 0;
   waveTimer = 0;
-  if (audioCtx) audioCtx.close().catch(() => {});
-  audioCtx = null;
+  if (meterSource) {
+    try { meterSource.disconnect(); } catch (error) {}
+    meterSource = null;
+  }
+  if (analyser) {
+    try { analyser.disconnect(); } catch (error) {}
+  }
   analyser = null;
+  const ctx = audioCtx;
+  audioCtx = null;
+  // Closing the context in the same turn as stopping the microphone kills
+  // this webview on macOS. The popup would then reload and drop the take.
+  if (ctx) setTimeout(() => { ctx.close().catch(() => {}); }, 400);
   const status = document.getElementById("voice-status");
   if (status) status.hidden = true;
 }
@@ -385,10 +436,9 @@ document.getElementById("voice").addEventListener("click", async () => {
       return;
     }
     voiceBlob = blob;
+    voiceSeconds = Math.max(1, Math.round((Date.now() - recordStarted) / 1000));
+    if (voiceUrl) URL.revokeObjectURL(voiceUrl);
     voiceUrl = URL.createObjectURL(voiceBlob);
-    const preview = document.getElementById("voice-preview");
-    preview.src = voiceUrl;
-    preview.playbackRate = SPEEDS[0];
     showVoicePlayer();
     button.setAttribute("aria-label", "Cancel the recording");
   };
@@ -434,22 +484,28 @@ function showVoicePlayer() {
   play.classList.remove("playing");
   play.setAttribute("aria-label", "Play the voice note");
   document.querySelector("#voice-progress i").style.width = "0";
+  document.getElementById("voice-duration").textContent = clockText(voiceSeconds);
   document.getElementById("voice-player").hidden = false;
 }
 
 function paintPlayback() {
   const audio = document.getElementById("voice-preview");
-  const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
-  const ratio = duration ? Math.min(1, audio.currentTime / duration) : 0;
+  const decoded = Number.isFinite(audio.duration) && audio.duration ? audio.duration : 0;
+  const duration = decoded || voiceSeconds;
+  const ratio = duration ? Math.min(1, (audio.currentTime || 0) / duration) : 0;
   document.querySelector("#voice-progress i").style.width = (ratio * 100) + "%";
-  const shown = audio.paused && audio.currentTime < 0.2 && duration ? duration : audio.currentTime;
+  const shown = !decoded || (audio.paused && audio.currentTime < 0.2) ? duration : audio.currentTime;
   document.getElementById("voice-duration").textContent = clockText(shown);
 }
 
 document.getElementById("voice-play").addEventListener("click", async () => {
   const audio = document.getElementById("voice-preview");
   const play = document.getElementById("voice-play");
-  if (!audio.src) return;
+  if (!voiceUrl) return;
+  if (!audio.getAttribute("src")) {
+    audio.preload = "auto";
+    audio.src = voiceUrl;
+  }
   if (audio.paused) {
     try { await audio.play(); } catch (error) { return; }
     play.classList.add("playing");
