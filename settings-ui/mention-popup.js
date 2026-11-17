@@ -1,4 +1,6 @@
-const invoke = window.__TAURI__.core.invoke;
+const invoke = window.__TAURI__
+  ? window.__TAURI__.core.invoke
+  : () => Promise.reject(new Error("WhatsApp is still opening. Try again."));
 
 function initials(name) {
   const parts = String(name || "").trim().split(/\s+/).filter(Boolean).slice(0, 2);
@@ -31,7 +33,10 @@ async function openChat() {
 }
 
 const FILE_MAX = 8 * 1024 * 1024;
-const VOICE_MAX = 2 * 1024 * 1024;
+const VOICE_WAV_MAX = 8 * 1024 * 1024;
+const VOICE_RATE = 16000;
+const SPEEDS = [1, 1.5, 2];
+let speedIndex = 0;
 let attached = null;
 let voiceBlob = null;
 let voiceUrl = "";
@@ -58,12 +63,9 @@ function clearVoice() {
   recordStream = null;
   recorder = null;
   voiceBlob = null;
+  resetPlayer();
   if (voiceUrl) URL.revokeObjectURL(voiceUrl);
   voiceUrl = "";
-  const preview = document.getElementById("voice-preview");
-  preview.pause();
-  preview.removeAttribute("src");
-  preview.hidden = true;
   const button = document.getElementById("voice");
   button.classList.remove("recording");
   button.setAttribute("aria-label", "Record a voice note");
@@ -77,15 +79,85 @@ function clearFile() {
   document.getElementById("attachment-name").textContent = "";
 }
 
+function wavBytes(samples, rate) {
+  const n = samples.length;
+  const buf = new ArrayBuffer(44 + n * 2);
+  const view = new DataView(buf);
+  const mark = (at, text) => {
+    for (let i = 0; i < text.length; i++) view.setUint8(at + i, text.charCodeAt(i));
+  };
+  mark(0, "RIFF");
+  view.setUint32(4, 36 + n * 2, true);
+  mark(8, "WAVE");
+  mark(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  mark(36, "data");
+  view.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    let sample = samples[i];
+    if (sample > 1) sample = 1;
+    if (sample < -1) sample = -1;
+    view.setInt16(44 + i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+  }
+  return new Uint8Array(buf);
+}
+
+async function voiceWav(blob) {
+  let ctx;
+  try {
+    ctx = new AudioContext();
+    const decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
+    const frames = Math.max(1, Math.ceil(decoded.duration * VOICE_RATE));
+    const offline = new OfflineAudioContext(1, frames, VOICE_RATE);
+    const mixed = offline.createBuffer(1, decoded.length, decoded.sampleRate);
+    const target = mixed.getChannelData(0);
+    const count = decoded.numberOfChannels || 1;
+    for (let c = 0; c < count; c++) {
+      const src = decoded.getChannelData(c);
+      for (let i = 0; i < src.length; i++) target[i] += src[i] / count;
+    }
+    const source = offline.createBufferSource();
+    source.buffer = mixed;
+    source.connect(offline.destination);
+    source.start();
+    const rendered = await offline.startRendering();
+    return wavBytes(rendered.getChannelData(0), VOICE_RATE);
+  } catch (error) {
+    throw new Error("The voice note could not be prepared.");
+  } finally {
+    if (ctx) ctx.close().catch(() => {});
+  }
+}
+
+async function alreadyOgg(blob) {
+  if (!String(blob.type || "").includes("ogg")) return null;
+  const head = new Uint8Array(await blob.slice(0, 128).arrayBuffer());
+  let text = "";
+  for (let i = 0; i < head.length; i++) text += String.fromCharCode(head[i]);
+  if (!text.startsWith("OggS") || !text.includes("OpusHead")) return null;
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
 async function payload() {
   const text = document.getElementById("text").value;
   if (voiceBlob) {
-    if (voiceBlob.size > VOICE_MAX) throw new Error("The voice note is larger than 2 MB.");
-    const bytes = new Uint8Array(await voiceBlob.arrayBuffer());
+    const ogg = await alreadyOgg(voiceBlob);
+    const bytes = ogg || (await voiceWav(voiceBlob));
     if (!bytes.length) throw new Error("The recording was empty. Try again.");
-    const mime = voiceBlob.type || "audio/webm";
-    const ext = mime.includes("mp4") ? "m4a" : mime.includes("ogg") ? "ogg" : "webm";
-    return { text: "", kind: "voice", filename: "voice." + ext, mime, data: bytesToBase64(bytes) };
+    if (bytes.length > VOICE_WAV_MAX) throw new Error("The voice note is too long.");
+    return {
+      text: "",
+      kind: "voice",
+      filename: ogg ? "voice.ogg" : "voice.wav",
+      mime: ogg ? "audio/ogg" : "audio/wav",
+      data: bytesToBase64(bytes),
+    };
   }
   if (attached) {
     if (attached.size > FILE_MAX) throw new Error("The file is larger than 8 MB.");
@@ -316,7 +388,8 @@ document.getElementById("voice").addEventListener("click", async () => {
     voiceUrl = URL.createObjectURL(voiceBlob);
     const preview = document.getElementById("voice-preview");
     preview.src = voiceUrl;
-    preview.hidden = false;
+    preview.playbackRate = SPEEDS[0];
+    showVoicePlayer();
     button.setAttribute("aria-label", "Cancel the recording");
   };
   try {
@@ -332,6 +405,86 @@ document.getElementById("voice").addEventListener("click", async () => {
   document.getElementById("voice").classList.add("recording");
   document.getElementById("voice").setAttribute("aria-label", "Stop recording");
   showError("");
+});
+
+function clockText(seconds) {
+  const total = Math.max(0, Math.floor(seconds || 0));
+  return Math.floor(total / 60) + ":" + String(total % 60).padStart(2, "0");
+}
+
+function resetPlayer() {
+  speedIndex = 0;
+  const audio = document.getElementById("voice-preview");
+  audio.pause();
+  audio.playbackRate = SPEEDS[0];
+  audio.removeAttribute("src");
+  const play = document.getElementById("voice-play");
+  play.classList.remove("playing");
+  play.setAttribute("aria-label", "Play the voice note");
+  document.getElementById("voice-speed").textContent = SPEEDS[0].toFixed(1) + "x";
+  document.querySelector("#voice-progress i").style.width = "0";
+  document.getElementById("voice-duration").textContent = "";
+  document.getElementById("voice-player").hidden = true;
+}
+
+function showVoicePlayer() {
+  speedIndex = 0;
+  document.getElementById("voice-speed").textContent = SPEEDS[0].toFixed(1) + "x";
+  const play = document.getElementById("voice-play");
+  play.classList.remove("playing");
+  play.setAttribute("aria-label", "Play the voice note");
+  document.querySelector("#voice-progress i").style.width = "0";
+  document.getElementById("voice-player").hidden = false;
+}
+
+function paintPlayback() {
+  const audio = document.getElementById("voice-preview");
+  const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+  const ratio = duration ? Math.min(1, audio.currentTime / duration) : 0;
+  document.querySelector("#voice-progress i").style.width = (ratio * 100) + "%";
+  const shown = audio.paused && audio.currentTime < 0.2 && duration ? duration : audio.currentTime;
+  document.getElementById("voice-duration").textContent = clockText(shown);
+}
+
+document.getElementById("voice-play").addEventListener("click", async () => {
+  const audio = document.getElementById("voice-preview");
+  const play = document.getElementById("voice-play");
+  if (!audio.src) return;
+  if (audio.paused) {
+    try { await audio.play(); } catch (error) { return; }
+    play.classList.add("playing");
+    play.setAttribute("aria-label", "Pause the voice note");
+  } else {
+    audio.pause();
+    play.classList.remove("playing");
+    play.setAttribute("aria-label", "Play the voice note");
+  }
+  paintPlayback();
+});
+document.getElementById("voice-speed").addEventListener("click", () => {
+  speedIndex = (speedIndex + 1) % SPEEDS.length;
+  const rate = SPEEDS[speedIndex];
+  document.getElementById("voice-preview").playbackRate = rate;
+  document.getElementById("voice-speed").textContent = rate.toFixed(1) + "x";
+});
+document.getElementById("voice-progress").addEventListener("click", (event) => {
+  const audio = document.getElementById("voice-preview");
+  const bar = event.currentTarget;
+  if (!Number.isFinite(audio.duration) || !audio.duration) return;
+  const rect = bar.getBoundingClientRect();
+  const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+  audio.currentTime = ratio * audio.duration;
+  paintPlayback();
+});
+const preview = document.getElementById("voice-preview");
+preview.addEventListener("timeupdate", paintPlayback);
+preview.addEventListener("loadedmetadata", paintPlayback);
+preview.addEventListener("ended", () => {
+  preview.currentTime = 0;
+  const play = document.getElementById("voice-play");
+  play.classList.remove("playing");
+  play.setAttribute("aria-label", "Play the voice note");
+  paintPlayback();
 });
 
 document.getElementById("open").addEventListener("click", openChat);

@@ -475,9 +475,14 @@
         var binary = atob(media.data || "");
         var bytes = new Uint8Array(binary.length);
         for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        var type = media.mime || (kind === "voice" ? "audio/webm" : "application/octet-stream");
+        // A voice note has to be Ogg Opus. Anything else fails WhatsApp's
+        // media check with InvalidMediaCheckRepairFailedType.
+        var type = kind === "voice"
+          ? "audio/ogg; codecs=opus"
+          : (media.mime || "application/octet-stream");
         var blob = new Blob([bytes], { type: type });
-        var file = new File([blob], media.filename || (kind === "voice" ? "voice.webm" : "file"), { type: type });
+        var name = kind === "voice" ? "voice.ogg" : (media.filename || "file");
+        var file = new File([blob], name, { type: type });
         var options = {
           quotedMsg: msgId,
           markIsRead: true,

@@ -46,6 +46,7 @@ mod unread;
 mod update_service;
 mod updater;
 mod voice;
+mod voice_ogg;
 #[cfg(target_os = "macos")]
 mod webcrypto;
 mod window;

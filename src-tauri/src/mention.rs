@@ -23,6 +23,8 @@ const SEEN_FOR: Duration = Duration::from_secs(120);
 const REPLY_MAX: usize = 4096;
 const FILE_MAX: usize = 8 * 1024 * 1024;
 const VOICE_MAX: usize = 2 * 1024 * 1024;
+/// A few minutes of 16 kHz mono PCM, before it is encoded to a small Ogg file.
+const VOICE_WAV_MAX: usize = 8 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct Popups {
@@ -188,10 +190,14 @@ fn prepare_reply(
             media: None,
         });
     }
-    let max = if kind == "voice" { VOICE_MAX } else { FILE_MAX };
+    let max = if kind == "voice" {
+        VOICE_WAV_MAX
+    } else {
+        FILE_MAX
+    };
     if data.len() > max.saturating_mul(4) / 3 + 8 {
         return Err(if kind == "voice" {
-            tr("O áudio tem mais de 2 MB.").into_owned()
+            tr("O áudio é longo demais.").into_owned()
         } else {
             tr("O arquivo tem mais de 8 MB.").into_owned()
         });
@@ -202,25 +208,21 @@ fn prepare_reply(
     }
     if bytes.len() > max {
         return Err(if kind == "voice" {
-            tr("O áudio tem mais de 2 MB.").into_owned()
+            tr("O áudio é longo demais.").into_owned()
         } else {
             tr("O arquivo tem mais de 8 MB.").into_owned()
         });
     }
-    let fallback = if kind == "voice" {
-        "voice.webm"
+    let (filename, mime, bytes) = if kind == "voice" {
+        let ogg = voice_ogg(&bytes)?;
+        ("voice.ogg".to_string(), "audio/ogg".to_string(), ogg)
     } else {
-        "file"
+        (
+            safe_filename(filename, "file"),
+            safe_mime(mime, "application/octet-stream"),
+            bytes,
+        )
     };
-    let filename = safe_filename(filename, fallback);
-    let mime = safe_mime(
-        mime,
-        if kind == "voice" {
-            "audio/webm"
-        } else {
-            "application/octet-stream"
-        },
-    );
     let caption = text.trim();
     if caption.chars().count() > REPLY_MAX
         || caption
@@ -239,6 +241,30 @@ fn prepare_reply(
             voice: kind == "voice",
         }),
     })
+}
+
+fn voice_ogg(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let ogg = if is_ogg_opus(bytes) {
+        bytes.to_vec()
+    } else {
+        match crate::voice_ogg::ogg_opus_from_wav(bytes) {
+            Ok(ogg) => ogg,
+            Err(err) => {
+                let code = err.code();
+                crate::dlog::log(&format!("mention: voice encode {code}"));
+                return Err(tr("Não foi possível preparar o áudio.").into_owned());
+            }
+        }
+    };
+    if ogg.len() > VOICE_MAX {
+        return Err(tr("O áudio tem mais de 2 MB.").into_owned());
+    }
+    Ok(ogg)
+}
+
+fn is_ogg_opus(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(128)];
+    head.starts_with(b"OggS") && head.windows(8).any(|window| window == b"OpusHead")
 }
 
 fn fold_ascii(c: char) -> String {
@@ -1442,5 +1468,45 @@ mod tests {
         assert!(prepare_reply("hi", "text", "", "", "").is_ok());
         let huge = "A".repeat(FILE_MAX * 2);
         assert!(prepare_reply("", "voice", "voice.webm", "audio/webm", &huge).is_err());
+        assert!(prepare_reply("", "voice", "voice.m4a", "audio/mp4", "bm90YXVkaW8=").is_err());
+        let mut samples = Vec::new();
+        for i in 0..1600 {
+            let tone = ((i as f32) / 16_000.0 * 440.0 * std::f32::consts::TAU).sin();
+            samples.push((tone * 8000.0) as i16);
+        }
+        let wav = crate::voice_ogg::pcm_wav(&samples, 16_000, 1);
+        let voice = prepare_reply("", "voice", "voice.m4a", "audio/mp4", &b64(&wav)).unwrap();
+        let media = voice.media.unwrap();
+        assert_eq!(media.filename, "voice.ogg");
+        assert_eq!(media.mime, "audio/ogg");
+        assert!(media.voice);
+        assert!(media.bytes.starts_with(b"OggS"));
+        let again =
+            prepare_reply("", "voice", "voice.wav", "audio/wav", &b64(&media.bytes)).unwrap();
+        assert_eq!(again.media.unwrap().bytes, media.bytes);
+    }
+
+    fn b64(data: &[u8]) -> String {
+        const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in data.chunks(3) {
+            let b0 = chunk[0];
+            let b1 = chunk.get(1).copied().unwrap_or(0);
+            let b2 = chunk.get(2).copied().unwrap_or(0);
+            let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+            out.push(TABLE[((n >> 18) & 63) as usize] as char);
+            out.push(TABLE[((n >> 12) & 63) as usize] as char);
+            out.push(if chunk.len() > 1 {
+                TABLE[((n >> 6) & 63) as usize] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                TABLE[(n & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+        out
     }
 }

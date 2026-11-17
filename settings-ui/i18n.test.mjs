@@ -16,7 +16,7 @@ function check(name, fn) {
 }
 
 // Text that is the same in both languages, or a proper name.
-const SAME = new Set(["whatRust", "WhatsApp", "OK", "Português (Brasil)", "English", "⇄", "⋮", "⚙",
+const SAME = new Set(["whatRust", "WhatsApp", "OK", "Português (Brasil)", "English", "⇄", "⋮", "⚙", "1.0x",
   "CmdOrCtrl+Shift+W", "CmdOrCtrl+Shift+B", "whatrust --toggle", "Esc", "SOCKS5", "HTTP", "127.0.0.1", "1080", "https://"]);
 
 function visibleTexts(html) {

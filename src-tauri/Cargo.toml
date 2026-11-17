@@ -33,6 +33,9 @@ argon2 = { version = "0.5.3", features = ["std"] }  # Argon2id password hashing 
 getrandom = "0.2.17"
 semver = "1"
 sha2 = "0.10"
+# Voice-note replies have to be Ogg Opus. This is a pure-Rust encoder, so the
+# build does not need cmake or a system libopus.
+opus-rs = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Version-matched to wry 0.55's webkit2gtk so PlatformWebview::inner() types unify.

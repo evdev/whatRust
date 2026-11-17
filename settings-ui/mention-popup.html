@@ -25,7 +25,16 @@
           <span id="attachment-name"></span>
           <button id="attachment-clear" type="button" aria-label="Remove the file"></button>
         </div>
-        <audio id="voice-preview" hidden controls></audio>
+        <audio id="voice-preview" hidden preload="metadata"></audio>
+        <div id="voice-player" hidden>
+          <button id="voice-play" type="button" aria-label="Play the voice note">
+            <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+            <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>
+          </button>
+          <span id="voice-progress"><i></i></span>
+          <span id="voice-duration"></span>
+          <button id="voice-speed" type="button" aria-label="Playback speed">1.0x</button>
+        </div>
         <div id="voice-status" hidden>
           <span id="voice-dot" aria-hidden="true"></span>
           <span id="voice-time"></span>
@@ -33,7 +42,9 @@
         </div>
         <textarea id="text" rows="2" maxlength="4096" placeholder="Write a reply"></textarea>
         <div class="actions">
-          <button id="attach" type="button" aria-label="Attach a file"></button>
+          <button id="attach" type="button" aria-label="Attach a file">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M10.5 4.5h3v6h6v3h-6v6h-3v-6h-6v-3h6z"/></svg>
+          </button>
           <button id="voice" type="button" aria-label="Record a voice note">
             <svg class="icon-mic" viewBox="0 0 24 24" aria-hidden="true">
               <path fill="currentColor" d="M11.999 14.942c2.001 0 3.531-1.53 3.531-3.531V4.35c0-2.001-1.53-3.531-3.531-3.531S8.469 2.35 8.469 4.35v7.061c0 2.001 1.53 3.531 3.53 3.531zm6.238-3.53c0 3.531-2.942 6.238-6.237 6.238-3.296 0-6.238-2.707-6.238-6.238H3.761c0 4.003 3.061 7.296 6.945 7.767v3.531h2.588v-3.531c3.884-.471 6.945-3.764 6.945-7.767h-2.002z"/>
