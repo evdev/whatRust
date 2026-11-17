@@ -180,6 +180,7 @@
       fold: fold,
       isVideoCallControl: isVideoCallControl,
       videoCallButton: videoCallButton,
+      blockedChat: blockedChat,
     };
     return;
   }
@@ -265,17 +266,28 @@
     return !!mine[normalizeChatId(id)];
   }
 
+  // Some builds store these as booleans, others as methods. A method is
+  // truthy by itself, which would hide Stand-in on every chat.
+  function callFlag(obj, name) {
+    if (!obj) return false;
+    var value;
+    try { value = obj[name]; } catch (e) { return false; }
+    if (typeof value !== "function") return !!value;
+    try { return !!value.call(obj); } catch (e) { return false; }
+  }
+
   function blockedChat(chat) {
     if (!chat) return false;
-    if (chat.isGroup || chat.groupMetadata) return true;
+    var id = normalizeChatId(widText(chat.id));
+    var title = String(chat.formattedTitle || chat.name || "").trim();
+    if (/^meta ai$/i.test(title)) return true;
+    if (isDirectId(id)) return false;
+    if (/@(g\.us|broadcast|newsletter)$/.test(id)) return true;
+    if (callFlag(chat, "isGroup")) return true;
     var wid = chat.id;
-    try {
-      if (wid && typeof wid.isGroup === "function" && wid.isGroup()) return true;
-      if (wid && typeof wid.isPSA === "function" && wid.isPSA()) return true;
-      if (wid && typeof wid.isNewsletter === "function" && wid.isNewsletter()) return true;
-      if (wid && typeof wid.isBroadcast === "function" && wid.isBroadcast()) return true;
-    } catch (e) {}
-    return /^meta ai$/i.test(String(chat.formattedTitle || chat.name || "").trim());
+    if (callFlag(wid, "isGroup") || callFlag(wid, "isPSA") || callFlag(wid, "isNewsletter") || callFlag(wid, "isBroadcast")) return true;
+    var meta = chat.groupMetadata;
+    return !!(meta && typeof meta !== "function");
   }
 
   function rememberSend(chatId, text, token) {
@@ -418,19 +430,67 @@
     paint();
   };
 
+  function headerTitle() {
+    if (typeof document === "undefined" || !document.querySelector) return "";
+    var header = document.querySelector("#main header");
+    if (!header || !header.querySelector) return "";
+    var title = header.querySelector("span[dir='auto'], span[title]");
+    var text = title && (title.getAttribute("title") || title.textContent) || "";
+    return String(text).replace(/\s+/g, " ").trim().slice(0, 160);
+  }
+
+  function firstDirectId(node) {
+    if (!node || !node.querySelectorAll) return "";
+    var rows = node.querySelectorAll("[data-id]");
+    for (var i = 0; i < rows.length && i < 40; i++) {
+      var id = normalizeChatId(rows[i].getAttribute("data-id"));
+      if (isDirectId(id)) return id;
+    }
+    return "";
+  }
+
+  // The header is already on screen before WPP can name the chat. The second
+  // account often hits that gap (its data store asks for the keychain first),
+  // and Stand-in would otherwise stay missing beside the video call.
+  function domDirectChat() {
+    if (typeof document === "undefined" || !document.getElementById) return null;
+    var id = firstDirectId(document.getElementById("main"));
+    if (!id) {
+      var side = document.getElementById("pane-side") || document.getElementById("side");
+      var selected = side && side.querySelector ? side.querySelector('[aria-selected="true"]') : null;
+      var node = selected;
+      for (var n = 0; node && n < 6 && !id; n++) {
+        var raw = normalizeChatId(node.getAttribute && node.getAttribute("data-id"));
+        id = isDirectId(raw) ? raw : "";
+        if (!id) id = firstDirectId(node);
+        node = node.parentElement;
+      }
+    }
+    if (!isDirectId(id) || isMine(id)) return null;
+    var name = headerTitle() || id;
+    if (/^meta ai$/i.test(name)) return null;
+    return { id: id, name: name, chat: null };
+  }
+
   function activeChat() {
     var wpp = root.WPP;
-    if (!wpp || !wpp.chat || typeof wpp.chat.getActiveChat !== "function") return null;
-    try {
-      var chat = wpp.chat.getActiveChat();
-      if (!chat || typeof chat.then === "function") return null;
-      var id = normalizeChatId(widText(chat.id));
-      if (!isDirectId(id) || isMine(id) || blockedChat(chat)) return null;
-      var name = chat.formattedTitle || chat.name || chat.contact && (chat.contact.pushname || chat.contact.name) || id;
-      return { id: id, name: String(name).slice(0, 160), chat: chat };
-    } catch (e) {
-      return null;
+    if (wpp && wpp.chat && typeof wpp.chat.getActiveChat === "function") {
+      try {
+        var chat = wpp.chat.getActiveChat();
+        if (chat && typeof chat.then !== "function") {
+          var id = normalizeChatId(widText(chat.id));
+          // An unreadable id still leaves the open chat in the header.
+          // A parsed group or broadcast must not fall through to that.
+          if (id && !isDirectId(id)) return null;
+          if (isDirectId(id) && !blockedChat(chat) && !isMine(id)) {
+            var name = chat.formattedTitle || chat.name || chat.contact && (chat.contact.pushname || chat.contact.name) || headerTitle() || id;
+            return { id: id, name: String(name).slice(0, 160), chat: chat };
+          }
+          if (isDirectId(id)) return null;
+        }
+      } catch (e) {}
     }
+    return domDirectChat();
   }
 
   function rowFor(id) {
@@ -662,11 +722,11 @@
       if (panelHost) panelHost.style.display = "none";
     }
     var blocked = pageBlocked();
-    // Background refreshes wait while a WhatsApp menu is opening, because
-    // rewriting the header closes it. The click that opens this panel is
-    // itself that gesture, and a header-menu hold lasts half a minute, so a
-    // click cannot wait its turn.
-    if (blocked && !immediate) return;
+    // Once the pill is in the header, leave it while a WhatsApp menu is open.
+    // Rewriting the header closes that menu. A hold must not be what keeps
+    // the pill from appearing in the first place. Opening this panel is
+    // itself a click, so that click does not wait.
+    if (blocked && !immediate && host && host.parentNode) return;
     var current = activeChat();
     if (!current) {
       if (!blocked) hideStandin();
@@ -1485,7 +1545,8 @@
       if (timer) return;
       timer = setTimeout(function () {
         timer = 0;
-        if ((typeof root.__whatrustPageBusy === "function" && root.__whatrustPageBusy()) || Date.now() < menuQuietUntil) return;
+        var held = (typeof root.__whatrustPageBusy === "function" && root.__whatrustPageBusy()) || Date.now() < menuQuietUntil;
+        if (held && host && host.parentNode) return;
         markStandin();
         if (!activeChat()) {
           hideStandin();

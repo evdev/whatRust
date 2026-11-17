@@ -134,6 +134,32 @@ assert(api.isVideoCallControl(iconButton("", "Chamada de vídeo")), "a Portugues
 assert(!api.isVideoCallControl(iconButton("menu", "Menu")), "the menu is not the video call");
 assert(!api.isVideoCallControl(iconButton("voice-call", "Voice call")), "the voice call is not the video call");
 
+assert(
+  !api.blockedChat({
+    id: { _serialized: "1555@c.us" },
+    isGroup: function () { return false; },
+    groupMetadata: {},
+    formattedTitle: "Ada",
+  }),
+  "a 1:1 chat stays eligible when isGroup is a method"
+);
+assert(
+  api.blockedChat({
+    id: { _serialized: "1555@g.us" },
+    isGroup: function () { return true; },
+    formattedTitle: "Team",
+  }),
+  "a group stays ineligible"
+);
+assert(
+  api.blockedChat({
+    id: { _serialized: "1555@c.us" },
+    isGroup: false,
+    formattedTitle: "Meta AI",
+  }),
+  "Meta AI stays ineligible"
+);
+
 if (failures) {
   console.error(`\n${failures} failed`);
   process.exit(1);

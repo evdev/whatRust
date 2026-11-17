@@ -11,6 +11,11 @@
 //! created, the website data store's private delegate is set to return that
 //! file. WebKit then never calls `SecItem` for it. A brand-new install
 //! generates the key locally and never creates the keychain item.
+//!
+//! WebKit keeps one master key per app, not per data store, so every account
+//! store is given this same key. Setting the delegate is main-thread-only.
+//! Opening another account runs off that thread, and skipping the call there
+//! is what made that store read the login keychain on every open.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -40,6 +45,17 @@ extern "C" {
     static kCFBooleanTrue: *const std::ffi::c_void;
     static kCFBooleanFalse: *const std::ffi::c_void;
     fn CFRelease(cf: *const std::ffi::c_void);
+}
+
+#[link(name = "System", kind = "dylib")]
+extern "C" {
+    // `dispatch_get_main_queue()` is a macro for the address of this object.
+    static _dispatch_main_q: u8;
+    fn dispatch_sync_f(
+        queue: *mut std::ffi::c_void,
+        context: *mut std::ffi::c_void,
+        work: unsafe extern "C" fn(*mut std::ffi::c_void),
+    );
 }
 
 #[link(name = "Security", kind = "framework")]
@@ -80,25 +96,50 @@ define_class!(
     unsafe impl NSObjectProtocol for WebCryptoDelegate {}
 );
 
-/// Load (or import) the master key and point the default data store at it.
-/// Account stores are attached again in `attach` just before each webview exists.
+/// Load (or import) the master key and point every account store at it.
+/// Stores are attached again in `attach` just before each webview exists.
 pub fn prepare(app: &AppHandle) {
     if !ensure_key(app) {
         return;
     }
     attach(None);
+    for account in crate::accounts::load(app).accounts {
+        if let Some(uuid) = account.store_uuid {
+            attach(Some(uuid));
+        }
+    }
 }
 
 /// Point one website data store at the local master key.
 /// `None` is the default store (the `default` account).
+///
+/// Returns only after the delegate is set. A caller that is about to build a
+/// webview off the main thread waits, so WebKit cannot read the keychain first.
 pub fn attach(store_uuid: Option<[u8; 16]>) {
     if KEY.get().is_none() {
         return;
     }
     if objc2::MainThreadMarker::new().is_none() {
-        crate::dlog::log("webcrypto: skipped store attach off the main thread");
+        struct Job {
+            uuid: Option<[u8; 16]>,
+        }
+        unsafe extern "C" fn run(ctx: *mut std::ffi::c_void) {
+            let job = Box::from_raw(ctx.cast::<Job>());
+            attach_on_main(job.uuid);
+        }
+        let job = Box::into_raw(Box::new(Job { uuid: store_uuid }));
+        // The main queue runs this before `dispatch_sync_f` returns. The work
+        // only sets a delegate, so it does not take locks the caller holds.
+        unsafe {
+            let queue = std::ptr::addr_of!(_dispatch_main_q).cast_mut().cast();
+            dispatch_sync_f(queue, job.cast(), run);
+        }
         return;
     }
+    attach_on_main(store_uuid);
+}
+
+fn attach_on_main(store_uuid: Option<[u8; 16]>) {
     let Some(cls) = AnyClass::get(c"WKWebsiteDataStore") else {
         crate::dlog::log("webcrypto: WebKit is not loaded");
         return;
@@ -130,7 +171,20 @@ pub fn attach(store_uuid: Option<[u8; 16]>) {
     unsafe {
         let _: () = msg_send![&*store, set_delegate: delegate];
     }
-    crate::dlog::log("webcrypto: website data store will not read the login keychain");
+    crate::dlog::log(&format!(
+        "webcrypto: {} website data store will not read the login keychain",
+        store_label(store_uuid)
+    ));
+}
+
+fn store_label(uuid: Option<[u8; 16]>) -> String {
+    match uuid {
+        None => "default".into(),
+        Some(bytes) => format!(
+            "account {:02x}{:02x}{:02x}{:02x}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ),
+    }
 }
 
 fn delegate() -> &'static WebCryptoDelegate {
@@ -438,6 +492,17 @@ mod tests {
         assert_eq!(decode_keychain_blob(&[9u8; 32]).unwrap(), vec![9u8; 32]);
         assert_eq!(decode_keychain_blob(b"not-a-key"), None);
         assert_eq!(decode_keychain_blob(&[1u8; 24]), None);
+    }
+
+    #[test]
+    fn store_label_names_the_default_and_an_account() {
+        assert_eq!(store_label(None), "default");
+        assert_eq!(
+            store_label(Some([
+                0xca, 0x31, 0x30, 0x68, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            ])),
+            "account ca313068"
+        );
     }
 
     #[test]
