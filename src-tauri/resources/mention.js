@@ -491,7 +491,23 @@
         } else if (text) {
           options.caption = text;
         }
-        return wpp.chat.sendFileMessage(chatId, file, options);
+        function sendMedia(opts) {
+          return wpp.chat.sendFileMessage(chatId, file, opts);
+        }
+        return Promise.resolve(sendMedia(options)).catch(function (err) {
+          var code = err && err.code;
+          if (code !== "invalid_quoted_msg" && code !== "quoted_msg_can_not_reply") throw err;
+          var retry = {
+            markIsRead: options.markIsRead,
+            createChat: false,
+            filename: options.filename,
+            mimetype: options.mimetype,
+            type: options.type,
+          };
+          if (kind === "voice") retry.isPtt = true;
+          else if (options.caption) retry.caption = options.caption;
+          return sendMedia(retry);
+        });
       });
     } else {
       if (typeof wpp.chat.sendTextMessage !== "function") {
@@ -504,7 +520,11 @@
         createChat: false,
       }));
     }
-    Promise.resolve(send).then(function () { finish(true, ""); }, function () { finish(false, "Não foi possível enviar."); });
+    Promise.resolve(send).then(function () { finish(true, ""); }, function (err) {
+      var code = (err && (err.code || err.name)) || "send_failed";
+      try { invoke("dlog", { msg: ("mention: send failed " + String(code)).slice(0, 180) }); } catch (e) {}
+      finish(false, "Não foi possível enviar.");
+    });
   };
 
   root.__whatrustMentionOpen = function (chatId) {

@@ -52,6 +52,7 @@ let voiceStarting = false;
 
 function clearVoice() {
   voiceEpoch += 1;
+  stopMeters();
   if (recorder && recorder.state === "recording") recorder.stop();
   if (recordStream) recordStream.getTracks().forEach((track) => track.stop());
   recordStream = null;
@@ -66,6 +67,7 @@ function clearVoice() {
   const button = document.getElementById("voice");
   button.classList.remove("recording");
   button.setAttribute("aria-label", "Record a voice note");
+  document.getElementById("text").hidden = false;
 }
 
 function clearFile() {
@@ -78,12 +80,12 @@ function clearFile() {
 async function payload() {
   const text = document.getElementById("text").value;
   if (voiceBlob) {
-    if (text.trim()) throw new Error("Voice notes cannot include a caption. Remove the text or clear the recording.");
     if (voiceBlob.size > VOICE_MAX) throw new Error("The voice note is larger than 2 MB.");
     const bytes = new Uint8Array(await voiceBlob.arrayBuffer());
+    if (!bytes.length) throw new Error("The recording was empty. Try again.");
     const mime = voiceBlob.type || "audio/webm";
-    const ext = mime.includes("mp4") ? "m4a" : "webm";
-    return { text, kind: "voice", filename: "voice." + ext, mime, data: bytesToBase64(bytes) };
+    const ext = mime.includes("mp4") ? "m4a" : mime.includes("ogg") ? "ogg" : "webm";
+    return { text: "", kind: "voice", filename: "voice." + ext, mime, data: bytesToBase64(bytes) };
   }
   if (attached) {
     if (attached.size > FILE_MAX) throw new Error("The file is larger than 8 MB.");
@@ -101,10 +103,7 @@ async function payload() {
 
 async function send(event) {
   event.preventDefault();
-  if (recorder && recorder.state === "recording") {
-    recorder.stop();
-    return;
-  }
+  if (recorder && recorder.state === "recording") await finishRecording();
   const text = document.getElementById("text");
   const button = document.getElementById("send");
   let body;
@@ -141,6 +140,119 @@ document.getElementById("attachment-clear").addEventListener("click", clearFile)
 document.getElementById("attach").addEventListener("click", () => {
   document.getElementById("file").click();
 });
+const WAVE_BARS = 28;
+let audioCtx = null;
+let analyser = null;
+let waveLevels = [];
+let waveTimer = 0;
+let clockTimer = 0;
+let recordStarted = 0;
+
+function micError(error) {
+  const name = error && error.name;
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    showError("Allow microphone access for whatRust in System Settings, then try again.");
+  } else if (name === "NotFoundError" || name === "OverconstrainedError") {
+    showError("No microphone was found.");
+  } else {
+    showError("The microphone is not available.");
+  }
+}
+
+function ensureWave() {
+  const wave = document.getElementById("voice-wave");
+  if (wave.childElementCount) return;
+  for (let i = 0; i < WAVE_BARS; i++) {
+    wave.appendChild(document.createElement("i"));
+  }
+}
+
+function paintWave() {
+  const bars = document.getElementById("voice-wave").children;
+  for (let i = 0; i < bars.length; i++) {
+    const level = waveLevels[i] || 0;
+    bars[i].style.height = (4 + Math.round(level * 18)) + "px";
+  }
+}
+
+function sampleLevel() {
+  if (!analyser) return 0.12;
+  const data = new Uint8Array(analyser.fftSize);
+  analyser.getByteTimeDomainData(data);
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) {
+    const v = (data[i] - 128) / 128;
+    sum += v * v;
+  }
+  return Math.max(0.08, Math.min(1, Math.sqrt(sum / data.length) * 4));
+}
+
+function startMeters(stream) {
+  ensureWave();
+  waveLevels = Array(WAVE_BARS).fill(0.12);
+  paintWave();
+  stopMeters();
+  try {
+    audioCtx = new AudioContext();
+    const source = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    source.connect(analyser);
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch (error) {
+    analyser = null;
+  }
+  recordStarted = Date.now();
+  document.getElementById("voice-time").textContent = "0:00";
+  document.getElementById("voice-status").hidden = false;
+  document.getElementById("text").hidden = true;
+  clockTimer = setInterval(() => {
+    const secs = Math.floor((Date.now() - recordStarted) / 1000);
+    const min = Math.floor(secs / 60);
+    const sec = String(secs % 60).padStart(2, "0");
+    document.getElementById("voice-time").textContent = min + ":" + sec;
+  }, 200);
+  waveTimer = setInterval(() => {
+    waveLevels.push(sampleLevel());
+    if (waveLevels.length > WAVE_BARS) waveLevels.shift();
+    paintWave();
+  }, 90);
+}
+
+function stopMeters() {
+  if (clockTimer) clearInterval(clockTimer);
+  if (waveTimer) clearInterval(waveTimer);
+  clockTimer = 0;
+  waveTimer = 0;
+  if (audioCtx) audioCtx.close().catch(() => {});
+  audioCtx = null;
+  analyser = null;
+  const status = document.getElementById("voice-status");
+  if (status) status.hidden = true;
+}
+
+function finishRecording() {
+  if (!recorder || recorder.state !== "recording") return Promise.resolve();
+  return new Promise((resolve) => {
+    const rec = recorder;
+    const previous = rec.onstop;
+    rec.onstop = (event) => {
+      if (typeof previous === "function") previous(event);
+      resolve();
+    };
+    try { rec.stop(); }
+    catch (error) { resolve(); }
+  });
+}
+
+function voiceMime() {
+  if (!window.MediaRecorder || typeof MediaRecorder.isTypeSupported !== "function") return "";
+  if (MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")) return "audio/ogg;codecs=opus";
+  if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) return "audio/webm;codecs=opus";
+  if (MediaRecorder.isTypeSupported("audio/mp4")) return "audio/mp4";
+  return "";
+}
+
 document.getElementById("voice").addEventListener("click", async () => {
   if (voiceStarting) return;
   if (recorder && recorder.state === "recording") {
@@ -156,10 +268,13 @@ document.getElementById("voice").addEventListener("click", async () => {
   const epoch = voiceEpoch;
   let stream;
   try {
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
+      throw new Error("no-mic");
+    }
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (error) {
     voiceStarting = false;
-    showError("The microphone is not available.");
+    micError(error);
     return;
   }
   voiceStarting = false;
@@ -168,30 +283,52 @@ document.getElementById("voice").addEventListener("click", async () => {
     return;
   }
   recordStream = stream;
-  const mime = window.MediaRecorder && MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-    ? "audio/webm;codecs=opus"
-    : window.MediaRecorder && MediaRecorder.isTypeSupported("audio/mp4")
-      ? "audio/mp4"
-      : "";
-  recorder = new MediaRecorder(recordStream, mime ? { mimeType: mime } : undefined);
+  const mime = voiceMime();
+  let rec;
+  try {
+    rec = new MediaRecorder(recordStream, mime ? { mimeType: mime } : undefined);
+  } catch (error) {
+    stream.getTracks().forEach((track) => track.stop());
+    recordStream = null;
+    micError(error);
+    return;
+  }
+  recorder = rec;
   const chunks = [];
-  recorder.ondataavailable = (event) => {
+  rec.ondataavailable = (event) => {
     if (event.data && event.data.size) chunks.push(event.data);
   };
-  recorder.onstop = () => {
+  rec.onstop = () => {
+    stopMeters();
     if (recordStream) recordStream.getTracks().forEach((track) => track.stop());
     recordStream = null;
+    const button = document.getElementById("voice");
+    button.classList.remove("recording");
+    document.getElementById("text").hidden = false;
     if (epoch !== voiceEpoch) return;
-    voiceBlob = new Blob(chunks, { type: (recorder && recorder.mimeType) || mime || "audio/webm" });
+    const blob = new Blob(chunks, { type: rec.mimeType || mime || "audio/webm" });
+    if (!blob.size) {
+      showError("The recording was empty. Try again.");
+      button.setAttribute("aria-label", "Record a voice note");
+      return;
+    }
+    voiceBlob = blob;
     voiceUrl = URL.createObjectURL(voiceBlob);
     const preview = document.getElementById("voice-preview");
     preview.src = voiceUrl;
     preview.hidden = false;
-    const button = document.getElementById("voice");
-    button.classList.remove("recording");
     button.setAttribute("aria-label", "Cancel the recording");
   };
-  recorder.start();
+  try {
+    rec.start(250);
+  } catch (error) {
+    stream.getTracks().forEach((track) => track.stop());
+    recordStream = null;
+    recorder = null;
+    micError(error);
+    return;
+  }
+  startMeters(stream);
   document.getElementById("voice").classList.add("recording");
   document.getElementById("voice").setAttribute("aria-label", "Stop recording");
   showError("");

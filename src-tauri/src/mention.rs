@@ -12,8 +12,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilder};
 
-pub const POPUP_W: f64 = 360.0;
-pub const POPUP_H: f64 = 312.0;
+pub const POPUP_W: f64 = 368.0;
+pub const POPUP_H: f64 = 332.0;
 const POPUP_GAP: f64 = 8.0;
 const POPUP_MARGIN: f64 = 12.0;
 const POPUP_MAX: usize = 4;
@@ -1136,6 +1136,7 @@ fn present(app: &AppHandle, label: &str) {
         .inner_size(POPUP_W, POPUP_H)
         .resizable(false)
         .decorations(false)
+        .shadow(true)
         .always_on_top(true)
         .skip_taskbar(true)
         .focused(false)
