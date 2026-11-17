@@ -51,6 +51,20 @@ struct Inner {
     /// Parked while locked, or waiting for a free slot. Newest first.
     waiting: VecDeque<Held>,
     seen: HashMap<(String, String), Instant>,
+    /// Pictures accepted in the last few seconds, including ones whose window
+    /// is not in `cards` yet. The second report of a photo arrives before the
+    /// first window exists.
+    photos: Vec<PhotoStamp>,
+}
+
+struct PhotoStamp {
+    account: String,
+    chat: String,
+    sender: String,
+    body: String,
+    preview: String,
+    at_ms: u64,
+    when: Instant,
 }
 
 struct Card {
@@ -418,6 +432,83 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, ()> {
     Ok(out)
 }
 
+/// A second copy of a picture that WhatsApp reports under another id.
+/// Different pictures keep their own popups: their thumbnails disagree.
+fn duplicate_photo(
+    cards: &HashMap<String, Card>,
+    waiting: &VecDeque<Held>,
+    photos: &[PhotoStamp],
+    held: &Held,
+) -> bool {
+    let incoming = Arrival::from_held(held);
+    cards.values().any(|card| incoming.same_photo(&Arrival::from_card(card)))
+        || waiting.iter().any(|item| incoming.same_photo(&Arrival::from_held(item)))
+        || photos.iter().any(|item| incoming.same_photo(&Arrival::from_stamp(item)))
+}
+
+struct Arrival<'a> {
+    account: &'a str,
+    chat: &'a str,
+    sender: &'a str,
+    body: &'a str,
+    preview: &'a str,
+    at_ms: u64,
+}
+
+impl<'a> Arrival<'a> {
+    fn from_card(card: &'a Card) -> Self {
+        Self {
+            account: &card.account_label,
+            chat: &card.chat_id,
+            sender: &card.sender_name,
+            body: &card.body,
+            preview: &card.preview,
+            at_ms: card.at_ms,
+        }
+    }
+
+    fn from_held(held: &'a Held) -> Self {
+        Self {
+            account: &held.account_label,
+            chat: &held.chat_id,
+            sender: &held.sender_name,
+            body: &held.body,
+            preview: &held.preview,
+            at_ms: held.at_ms,
+        }
+    }
+
+    fn from_stamp(stamp: &'a PhotoStamp) -> Self {
+        Self {
+            account: &stamp.account,
+            chat: &stamp.chat,
+            sender: &stamp.sender,
+            body: &stamp.body,
+            preview: &stamp.preview,
+            at_ms: stamp.at_ms,
+        }
+    }
+
+    fn same_photo(&self, other: &Arrival<'_>) -> bool {
+        if self.account != other.account || self.at_ms.abs_diff(other.at_ms) > 8_000 {
+            return false;
+        }
+        if !self.preview.is_empty() && self.preview == other.preview {
+            return true;
+        }
+        if self.body != other.body {
+            return false;
+        }
+        if self.preview.is_empty() && other.preview.is_empty() {
+            return false;
+        }
+        if !self.preview.is_empty() && !other.preview.is_empty() {
+            return false;
+        }
+        self.chat == other.chat || (!self.sender.is_empty() && self.sender == other.sender)
+    }
+}
+
 /// The part of a WhatsApp id that stays put when a picture is reported
 /// again as its type settles. `false_<chat>_<token>` and
 /// `false_<chat>_<token>_<participant>` are one message.
@@ -707,6 +798,22 @@ pub fn mention_event(
         if inner.seen.len() > 2048 {
             inner.seen.clear();
             inner.seen.insert(key, now);
+        }
+        inner.photos.retain(|stamp| now.duration_since(stamp.when) <= Duration::from_secs(8));
+        if duplicate_photo(&inner.cards, &inner.waiting, &inner.photos, &held) {
+            crate::dlog::log("mention: duplicate photo skipped");
+            return Ok(());
+        }
+        if !held.preview.is_empty() {
+            inner.photos.push(PhotoStamp {
+                account: held.account_label.clone(),
+                chat: held.chat_id.clone(),
+                sender: held.sender_name.clone(),
+                body: held.body.clone(),
+                preview: held.preview.clone(),
+                at_ms: held.at_ms,
+                when: now,
+            });
         }
         if !lock::is_unlocked(&app) {
             hold_push(&mut inner.waiting, held, now);
@@ -1612,14 +1719,15 @@ fn reveal_account(app: &AppHandle, label: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        answered_by, boot_script_from, hold_drop_chat, hold_push, message_token, popup_origin,
+        answered_by, boot_script_from, duplicate_photo, hold_drop_chat, hold_push, message_token,
+        popup_origin,
         prepare_reply,
         release_of, reply_text,
         send_script, shown_body, shown_name, shown_preview, Held, Release, FILE_MAX, POPUP_H,
         POPUP_W,
     };
     use crate::settings::MentionAccountPrefs;
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -1731,6 +1839,30 @@ mod tests {
                 .count()
                 == 1
         );
+    }
+
+    #[test]
+    fn a_second_copy_of_a_photo_is_not_another_popup() {
+        let mut first = sample("wa-default", "false_1@c.us_A", Instant::now());
+        first.preview = "data:image/jpeg;base64,SAME".into();
+        first.body = "look".into();
+        first.sender_name = "Ada".into();
+        first.at_ms = 5_000;
+        let mut copy = sample("wa-default", "false_9@lid_B", Instant::now());
+        copy.chat_id = "9@lid".into();
+        copy.preview = first.preview.clone();
+        copy.body = first.body.clone();
+        copy.sender_name = first.sender_name.clone();
+        copy.at_ms = first.at_ms;
+        let mut other = sample("wa-default", "false_1@c.us_C", Instant::now());
+        other.preview = "data:image/jpeg;base64,OTHER".into();
+        other.body = "look".into();
+        other.sender_name = "Ada".into();
+        other.at_ms = 5_000;
+        let mut waiting = VecDeque::new();
+        waiting.push_back(first);
+        assert!(duplicate_photo(&HashMap::new(), &waiting, &[], &copy));
+        assert!(!duplicate_photo(&HashMap::new(), &waiting, &[], &other));
     }
 
     #[test]

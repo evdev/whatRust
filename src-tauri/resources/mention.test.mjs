@@ -551,7 +551,7 @@ const token = "AbCdEfGh12345678";
 pictures.emit("chat.new_message", incoming({
   id: "false_15551212@c.us_" + token,
   type: "image",
-  body: "",
+  caption: "first",
   t: clock,
 }));
 pictures.emit("chat.new_message", incoming({
@@ -565,15 +565,31 @@ pictures.emit("chat.new_message", incoming({
   type: "image",
   t: clock,
 }));
+const jpeg = "/9j/" + "A".repeat(90);
+const otherJpeg = "/9j/" + "B".repeat(90);
+pictures.emit("chat.new_message", incoming({
+  id: "false_15551212@c.us_QqWwEeRrTtYyUuIi",
+  type: "image",
+  body: jpeg,
+  t: clock,
+}));
+pictures.emit("chat.new_message", incoming({
+  id: "false_999@lid_MmNnBbVvCcXxZzLl",
+  type: "image",
+  body: jpeg,
+  caption: "",
+  t: clock,
+}));
 pictures.emit("chat.new_message", incoming({
   id: "false_15551212@c.us_ZzYyXxWw98765432",
   type: "image",
+  body: otherJpeg,
   t: clock,
 }));
-assert(pictureHits.length === 2
-  && pictureHits[0] === "false_15551212@c.us_" + token
-  && pictureHits[1] === "false_15551212@c.us_ZzYyXxWw98765432",
-  "a picture reported again when its type settles alerts once, and another picture still alerts");
+assert(pictureHits.length === 3
+  && pictureHits[1] === "false_15551212@c.us_QqWwEeRrTtYyUuIi"
+  && pictureHits[2] === "false_15551212@c.us_ZzYyXxWw98765432",
+  "the same photo under a new id alerts once, and a different photo still alerts");
 
 const bundle = readFileSync(join(here, "wppconnect-wa.js"), "utf8");
 assert(bundle.includes("t.sendTextMessage=async function"), "wa-js can send a text message");

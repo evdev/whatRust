@@ -377,6 +377,39 @@
         while (order.length > SEEN_CAP) delete seen[order.shift()];
         return true;
       }
+      // A photo is often delivered twice, with two unrelated ids: once as the
+      // message, again when its picture settles. The thumbnail and caption
+      // identify it. A different picture has a different thumbnail.
+      var photos = [];
+      function thumbKey(msg) {
+        var body = String(field(msg, "body") || "").replace(/\s+/g, "");
+        if (body.length < 40) return "";
+        return body.length + ":" + body.slice(0, 32);
+      }
+      function photoSig(hit, msg) {
+        var type = String(field(msg, "type") || "").toLowerCase();
+        var visual = type === "image" || type === "sticker" || type === "video" || type === "gif" || !!dataUrl(field(msg, "body"));
+        if (!visual) return null;
+        var media = field(msg, "mediaData");
+        return {
+          chat: hit.chatId,
+          sender: personName(msg, hit.senderId),
+          caption: textOf(msg).slice(0, 180),
+          hash: String(field(msg, "filehash") || field(media, "filehash") || ""),
+          thumb: thumbKey(msg),
+          at: atMs(msg),
+        };
+      }
+      function samePhoto(a, b) {
+        if (Math.abs((a.at || 0) - (b.at || 0)) > 8000) return false;
+        if (a.hash && b.hash && a.hash !== b.hash) return false;
+        if (a.thumb && b.thumb && a.thumb !== b.thumb) return false;
+        if ((a.thumb && a.thumb === b.thumb) || (a.hash && a.hash === b.hash)) return true;
+        if (a.caption !== b.caption) return false;
+        var sameChat = a.chat && a.chat === b.chat;
+        var sameSender = a.sender && b.sender && fold(a.sender) === fold(b.sender);
+        return !!(sameChat || sameSender);
+      }
       wpp.on("chat.new_message", function (msg) {
         var moment = hooks.now();
         var own = ownChat(msg, { readyAt: readyAt, now: moment });
@@ -389,6 +422,20 @@
         try { ids = hooks.selfIds() || []; } catch (e) { ids = []; }
         var hit = classify(msg, { selfIds: ids, readyAt: readyAt, now: moment });
         if (!hit || !remember(hit.msgId)) return;
+        var sig = photoSig(hit, msg);
+        if (sig) {
+          var kept = [];
+          var dup = false;
+          for (var i = 0; i < photos.length; i++) {
+            if (Math.abs((photos[i].at || 0) - (sig.at || 0)) > 8000) continue;
+            kept.push(photos[i]);
+            if (samePhoto(photos[i], sig)) dup = true;
+          }
+          photos = kept;
+          if (dup) return;
+          photos.push(sig);
+          if (photos.length > 30) photos.shift();
+        }
         hooks.emit(hit, msg);
       });
     }
@@ -401,36 +448,19 @@
     return String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   }
 
-  // WhatsApp's own notification for a picture, video, sticker, or voice note
-  // is a fixed label ("Foto", "Photo", "Mensagem de voz"), not the caption.
-  // A sender prefix may sit in front of it ("Ada: Foto" or "Ada\nFoto").
-  var MEDIA_NOTICE = {
-    photo: true,
-    image: true,
-    picture: true,
-    foto: true,
-    imagem: true,
-    video: true,
-    audio: true,
-    sticker: true,
-    figurinha: true,
-    gif: true,
-    document: true,
-    documento: true,
-    arquivo: true,
-    "voice message": true,
-    "mensagem de voz": true,
-    "audio message": true,
-    "mensagem de audio": true,
-  };
+  function mediaLabel(text) {
+    var bare = String(text || "").replace(/^[^:]{1,40}:\s*/, "");
+    bare = bare.replace(/[^a-z0-9: ]/g, " ").replace(/\s+/g, " ").trim();
+    if (!bare) return true;
+    if (/^\d{1,2}:\d{2}$/.test(bare)) return true;
+    return /^(foto|photo|image|imagem|video|gif|audio|voice message|mensagem de voz|document|documento|sticker|figurinha)$/.test(bare);
+  }
 
-  function mediaNotice(text) {
-    var raw = fold(text);
-    var cut = Math.max(raw.lastIndexOf(":"), raw.lastIndexOf("\n"));
-    var body = (cut >= 0 ? raw.slice(cut + 1) : raw).trim();
-    var word = body.replace(/[^a-z0-9\s]+/g, " ").replace(/\s+/g, " ").trim();
-    if (MEDIA_NOTICE[word]) return true;
-    return !word && !/[a-z0-9]/.test(body);
+  function namesOverlap(title, name) {
+    if (!title || !name) return false;
+    if (title.length > 1 && name.indexOf(title) !== -1) return true;
+    if (name.length > 1 && title.indexOf(name) !== -1) return true;
+    return false;
   }
 
   // A popup replaces the ordinary notification for that message. A short body
@@ -454,7 +484,11 @@
       var inChat = chat.length > 1 && head.indexOf(chat) !== -1;
       var key = fold(row.key);
       if (key && text.indexOf(key) !== -1 && (key.length >= 8 || named || inChat)) hit = true;
-      if (row.media && (named || inChat) && mediaNotice(text)) hit = true;
+      // A picture's ordinary notification may quote the caption, say "Foto",
+      // or carry only a duration. A later text from the same person is left
+      // alone, because that popup is for the picture.
+      var who = namesOverlap(head, sender) || namesOverlap(head, chat);
+      if (row.media && (named || inChat || who) && mediaLabel(text)) hit = true;
     }
     return { rows: kept, hit: hit };
   }
