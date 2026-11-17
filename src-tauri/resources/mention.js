@@ -1,10 +1,11 @@
-/* Detection spike for mention alerts. Not injected yet.
+/* Mention alerts.
  *
- * Settings copy, under the mention switches in Notifications:
- *   "Does not alert on @everyone" (Portuguese: "Não avisa em @everyone")
- * A group message that only tags everyone stays quiet. A personal @mention
- * in that same message still alerts. A direct chat alerts because it is a
- * direct chat, even if the text says @everyone.
+ * Each account chooses mentions, replies, direct messages, and @everyone.
+ * A group message that only tags everyone is the everyone type. A personal
+ * @mention in that same message is also a mention. A direct chat is only a
+ * direct message, even if the text says @everyone. A direct reply is both a
+ * direct message and a reply, so either switch alerts. One message still
+ * makes one sound and one popup.
  *
  * What wa-js 4.7.2 (resources/wppconnect-wa.js) actually exposes:
  * - New messages: WPP.on("chat.new_message"). Opening a chat replays older
@@ -33,8 +34,8 @@
   var READY_SLACK_MS = 5000;
   var SEEN_CAP = 500;
   var SETTINGS_COPY = {
-    pt: "Não avisa em @everyone",
-    en: "Does not alert on @everyone",
+    pt: "Mensagens de grupo que marcam todos.",
+    en: "Group messages that tag everyone.",
   };
   var SKIP_TYPE = {
     protocol: true,
@@ -115,7 +116,14 @@
     return String((msg && (msg.body || msg.caption)) || "");
   }
 
-  // @everyone, @all, and nonJidMentions bit 1 (MENTION_ALL) are not personal.
+  // @everyone, @all, and nonJidMentions bit 1 (MENTION_ALL) are a group tag.
+  // A direct chat is not an everyone alert, even when the text says @everyone.
+  function mentionsEveryone(msg, body, group) {
+    if (!group) return false;
+    if ((Number(msg && msg.nonJidMentions) & 1) === 1) return true;
+    return /(?<![\w@.+-])@(everyone|all)\b/i.test(body);
+  }
+
   function mentionsSelf(msg, selfIds, body) {
     var list = asList(msg && msg.mentionedJidList);
     for (var i = 0; i < list.length; i++) {
@@ -227,13 +235,16 @@
     var personal = mentionsSelf(msg, selfIds, body);
     var quote = quotesSelf(msg, selfIds);
     var group = isGroup(msg, chat);
-    var kind = "";
-    if (personal) kind = "mention";
-    else if (quote) kind = "quote";
-    else if (isDirect(chat) && !group) kind = "direct";
-    else return null;
+    var direct = isDirect(chat) && !group;
+    var everyone = mentionsEveryone(msg, body, group);
+    if (!personal && !quote && !direct && !everyone) return null;
+    var kind = personal ? "mention" : quote ? "quote" : direct ? "direct" : "everyone";
     return {
       kind: kind,
+      mentions: personal,
+      replies: quote,
+      direct: direct,
+      everyone: everyone,
       chatId: chat ? chat.serialized : "",
       senderId: senderOf(msg, chat, group),
       msgId: id,
@@ -333,6 +344,16 @@
     };
   }
 
+  function wantsAlert(hit, prefs) {
+    prefs = prefs || {};
+    if (!hit || !(prefs.popup || prefs.sound)) return false;
+    return !!((hit.mentions && prefs.mentions) || (hit.replies && prefs.replies) || (hit.direct && prefs.direct) || (hit.everyone && prefs.everyone));
+  }
+
+  function armed(prefs) {
+    return !!(prefs && (prefs.popup || prefs.sound) && (prefs.mentions || prefs.replies || prefs.direct || prefs.everyone));
+  }
+
   function stillUnread(chat, msg) {
     if (msg && (msg.type === "revoked" || msg.isRevoked)) return false;
     if (chat && Number(chat.unreadCount) === 0) return false;
@@ -347,6 +368,7 @@
       shouldSuppress: shouldSuppress,
       displayFrom: displayFrom,
       stillUnread: stillUnread,
+      wantsAlert: wantsAlert,
       SETTINGS_COPY: SETTINGS_COPY,
       REPLAY_MS: REPLAY_MS,
     };
@@ -354,7 +376,7 @@
   }
   if (!root.location || root.location.origin !== "https://web.whatsapp.com") return;
 
-  var prefs = { popup: false, sound: false };
+  var prefs = { mentions: false, replies: false, direct: false, everyone: false, popup: false, sound: false };
   var suppressed = [];
   var watching = false;
 
@@ -459,7 +481,7 @@
       now: function () { return Date.now(); },
       selfIds: function () { return selfIdsFrom(wpp); },
       emit: function (hit, msg) {
-        if (!prefs.popup && !prefs.sound) return;
+        if (!wantsAlert(hit, prefs)) return;
         var view = displayFrom(msg || {}, hit);
         remember(view);
         invoke("mention_event", {
@@ -470,7 +492,10 @@
           senderName: view.senderName,
           body: view.body,
           atMs: view.at,
-          kind: view.kind,
+          mentions: !!hit.mentions,
+          replies: !!hit.replies,
+          direct: !!hit.direct,
+          everyone: !!hit.everyone,
         }).catch(function () {});
       },
     });
@@ -516,9 +541,14 @@
   }
 
   root.__whatrustMentionPrefs = function (next) {
-    prefs.popup = !!(next && next.popup);
-    prefs.sound = !!(next && next.sound);
-    if (prefs.popup || prefs.sound) ensureWatch();
+    next = next || {};
+    prefs.mentions = !!next.mentions;
+    prefs.replies = !!next.replies;
+    prefs.direct = !!next.direct;
+    prefs.everyone = !!next.everyone;
+    prefs.popup = !!next.popup;
+    prefs.sound = !!next.sound;
+    if (armed(prefs)) ensureWatch();
   };
   if (root.__WHATRUST_MENTION) root.__whatrustMentionPrefs(root.__WHATRUST_MENTION);
 })();

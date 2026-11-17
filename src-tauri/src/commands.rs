@@ -226,6 +226,10 @@ pub fn set_settings(
     let requested_hermes = settings.standin_hermes_url.clone();
     let mut settings = settings.sanitized();
     let stored = crate::settings::load(&app);
+    if settings.mention_accounts.is_none() {
+        settings.mention_accounts = stored.mention_accounts.clone();
+    }
+    crate::settings::reconcile_mention_files(&app, &mut settings, &stored);
     // A newly chosen download folder must work now. An unchanged one is not
     // re-checked: if it has since gone away, downloads fall back to Downloads
     // (see downloads::configured_dir) and other settings must still save.
@@ -236,16 +240,6 @@ pub fn set_settings(
     }
     // The icon is only switched through choose_app_icon / reset_app_icon.
     settings.custom_icon = stored.custom_icon;
-    if settings
-        .mention_alert_sound_file
-        .as_deref()
-        .is_some_and(|name| !crate::mention_sound::is_present(&app, name))
-    {
-        settings.mention_alert_sound_file = None;
-    }
-    if settings.mention_alert_sound_file.is_none() && stored.mention_alert_sound_file.is_some() {
-        crate::mention_sound::clear_stored(&app);
-    }
     // Recorded from the chat after the notice, cleared by clear_chat_summary_consent.
     crate::settings::preserve_chat_summary_consent(&mut settings, &stored);
     crate::proxy::validate(&mut settings)?;
@@ -413,17 +407,21 @@ pub fn reset_app_icon(window: tauri::Webview, app: tauri::AppHandle) -> Result<(
     Ok(())
 }
 
-/// Copy a wav, mp3, ogg, m4a, aac, or flac file (up to 5 MB) and use it as the
-/// mention chime. `None` means the picker was cancelled.
+/// Copy a wav, mp3, ogg, m4a, aac, or flac file (up to 5 MB) and use it as this
+/// account's mention chime. `None` means the picker was cancelled.
 #[tauri::command]
 pub async fn choose_mention_sound(
     window: tauri::Webview,
     app: tauri::AppHandle,
+    account_id: String,
 ) -> Result<Option<String>, String> {
     if is_remote(&window) {
         return Err("forbidden".into());
     }
     lock::require_unlocked(&app)?;
+    if !crate::mention_sound::is_account_id(&account_id) {
+        return Err(trf("Conta não encontrada: {0}", &[&account_id]));
+    }
     use tauri_plugin_dialog::DialogExt;
     let Some(picked) = app
         .dialog()
@@ -436,34 +434,60 @@ pub async fn choose_mention_sound(
         return Ok(None);
     };
     let path = picked.into_path().map_err(|err| err.to_string())?;
-    let (name, bytes) = crate::mention_sound::validate_picked(&path)?;
-    crate::mention_sound::install(&app, &name, &bytes)?;
+    let (ext, bytes) = crate::mention_sound::validate_picked(&path)?;
+    let name = crate::mention_sound::stored_name(&account_id, &ext)
+        .ok_or_else(|| tr("O arquivo não é um áudio aceito.").to_string())?;
+    crate::mention_sound::install(&app, &account_id, &name, &bytes)?;
     let mut settings = crate::settings::load(&app);
-    settings.mention_alert_sound_file = Some(name.clone());
+    let map = settings
+        .mention_accounts
+        .get_or_insert_with(Default::default);
+    let prefs = map.entry(account_id).or_default();
+    prefs.sound_file = Some(name.clone());
     crate::settings::save(&app, &settings).map_err(|err| err.to_string())?;
     Ok(Some(name))
 }
 
 #[tauri::command]
-pub fn reset_mention_sound(window: tauri::Webview, app: tauri::AppHandle) -> Result<(), String> {
+pub fn reset_mention_sound(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+    account_id: String,
+) -> Result<(), String> {
     if is_remote(&window) {
         return Err("forbidden".into());
     }
     lock::require_unlocked(&app)?;
-    crate::mention_sound::clear_stored(&app);
+    if !crate::mention_sound::is_account_id(&account_id) {
+        return Err(trf("Conta não encontrada: {0}", &[&account_id]));
+    }
+    crate::mention_sound::clear_account(&app, &account_id);
     let mut settings = crate::settings::load(&app);
-    settings.mention_alert_sound_file = None;
+    if let Some(prefs) = settings
+        .mention_accounts
+        .as_mut()
+        .and_then(|map| map.get_mut(&account_id))
+    {
+        prefs.sound_file = None;
+    }
     crate::settings::save(&app, &settings).map_err(|err| err.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn preview_mention_sound(window: tauri::Webview, app: tauri::AppHandle) -> Result<(), String> {
+pub fn preview_mention_sound(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+    account_id: String,
+) -> Result<(), String> {
     if is_remote(&window) {
         return Err("forbidden".into());
     }
     lock::require_unlocked(&app)?;
-    crate::mention_sound::play(&app);
+    if !crate::mention_sound::is_account_id(&account_id) {
+        return Err(trf("Conta não encontrada: {0}", &[&account_id]));
+    }
+    crate::mention_sound::play(&app, &account_id);
     Ok(())
 }
 
@@ -658,9 +682,21 @@ pub async fn add_account(
     }
 
     let _guard = accounts::lock_mutations();
+    // Migrate the mention alert before this account exists, so a new account
+    // does not inherit another account's types or sound file.
+    let _ = crate::settings::load(&app);
     let mut f = accounts::load(&app);
     let acct = accounts::add(&mut f, name);
     accounts::save(&app, &f).map_err(|e| e.to_string())?;
+    {
+        let mut mention_settings = crate::settings::load(&app);
+        crate::settings::insert_mention_account(&mut mention_settings, &acct.id);
+        if let Err(err) = crate::settings::save(&app, &mention_settings) {
+            f.accounts.retain(|a| a.id != acct.id);
+            let _ = accounts::save(&app, &f);
+            return Err(err.to_string());
+        }
+    }
 
     // In menu-bar-only mode the window is created hidden and presented as a
     // panel right after, so no full-size window flashes.
@@ -675,6 +711,9 @@ pub async fn add_account(
                 &[&e, &rollback],
             )
         })?;
+        let mut mention_settings = crate::settings::load(&app);
+        crate::settings::remove_mention_account(&mut mention_settings, &acct.id);
+        let _ = crate::settings::save(&app, &mention_settings);
         return Err(e.to_string());
     }
     if crate::sessions::enabled() {
@@ -749,6 +788,12 @@ pub async fn remove_account(
     crate::todo::delete_account(&app, &removed.id);
     crate::voice::delete_account(&app, &removed.id);
     crate::mention::drop_account(&app, &removed_label);
+    crate::mention_sound::clear_account(&app, &removed.id);
+    {
+        let mut mention_settings = crate::settings::load(&app);
+        crate::settings::remove_mention_account(&mut mention_settings, &removed.id);
+        crate::settings::save(&app, &mention_settings).map_err(|err| err.to_string())?;
+    }
 
     // If the removed account was the active one, point at a surviving account
     // so toggle/show don't target a window that no longer exists. (On Windows

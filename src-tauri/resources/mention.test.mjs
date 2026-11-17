@@ -64,8 +64,12 @@ function kind(over, context) {
   return hit && hit.kind;
 }
 
-assert(api.SETTINGS_COPY.en === "Does not alert on @everyone", "the settings line is the agreed English copy");
-assert(api.SETTINGS_COPY.pt === "Não avisa em @everyone", "the settings source string is Portuguese");
+function flags(over, context) {
+  return api.classify(incoming(over), context || ctx()) || {};
+}
+
+assert(api.SETTINGS_COPY.en === "Group messages that tag everyone.", "the settings line is the agreed English copy");
+assert(api.SETTINGS_COPY.pt === "Mensagens de grupo que marcam todos.", "the settings source string is Portuguese");
 
 assert(kind({
   id: "false_999@g.us_ABC",
@@ -92,7 +96,20 @@ assert(kind({
   author: "444@c.us",
   isGroupMsg: true,
   body: "@everyone please read",
-}) === null, "@everyone alone stays quiet");
+}) === "everyone", "@everyone alone is its own type");
+assert(flags({
+  id: "false_999@g.us_ABC",
+  from: "999@g.us",
+  author: "444@c.us",
+  isGroupMsg: true,
+  body: "@everyone please read",
+}).everyone === true && flags({
+  id: "false_999@g.us_ABC",
+  from: "999@g.us",
+  author: "444@c.us",
+  isGroupMsg: true,
+  body: "@everyone please read",
+}).mentions !== true, "@everyone alone is not a personal mention");
 
 assert(kind({
   id: "false_999@g.us_ABC",
@@ -101,7 +118,7 @@ assert(kind({
   isGroupMsg: true,
   body: "@all",
   nonJidMentions: 1,
-}) === null, "@all alone stays quiet");
+}) === "everyone", "@all alone is the everyone type");
 
 assert(kind({
   id: "false_999@g.us_ABC",
@@ -111,6 +128,14 @@ assert(kind({
   body: "@everyone and you",
   mentionedJidList: [{ _serialized: "15551212@c.us" }],
 }) === "mention", "a personal mention still alerts inside an @everyone message");
+assert(flags({
+  id: "false_999@g.us_ABC",
+  from: "999@g.us",
+  author: "444@c.us",
+  isGroupMsg: true,
+  body: "@everyone and you",
+  mentionedJidList: [{ _serialized: "15551212@c.us" }],
+}).everyone === true, "a personal mention inside @everyone is also everyone");
 
 assert(kind({
   id: "false_999@g.us_LID",
@@ -162,6 +187,14 @@ assert(kind({
 assert(kind() === "direct", "a new direct message alerts");
 assert(kind({ t: Math.floor((ready + 1000) / 1000) }) === "direct", "a WhatsApp seconds timestamp counts as live");
 assert(kind({ body: "@everyone" }) === "direct", "a direct message still alerts when the text says @everyone");
+assert(flags({ body: "@everyone" }).everyone !== true, "a direct chat is not an everyone alert");
+assert(flags({
+  body: "replied to me",
+  quotedParticipant: "15551212@c.us",
+}).direct === true && flags({
+  body: "replied to me",
+  quotedParticipant: "15551212@c.us",
+}).replies === true, "a direct reply is both a direct message and a reply");
 assert(kind({
   body: "replied",
   quotedParticipant: "333@c.us",
@@ -177,7 +210,7 @@ assert(kind({
   isGroupMsg: true,
   body: "hello",
   nonJidMentions: 1,
-}) === null, "the everyone flag without a personal mention stays quiet");
+}) === "everyone", "the everyone flag without a personal mention is the everyone type");
 assert(kind({ t: ready - 30_000 }) === null, "a message from before the account caught up stays quiet");
 assert(kind({ t: ready - 2_000 }) === "direct", "a few seconds of clock slack still counts as live");
 assert(kind({ t: ready + 1000 }, ctx({ now: ready + api.REPLAY_MS + 2000 })) === null, "a chat-open replay older than two minutes stays quiet");
@@ -238,8 +271,8 @@ late.emit("chat.new_message", incoming({ t: ready - 10_000 }));
 late.emit("chat.new_message", incoming({ id: "false_999@g.us_ALL", from: "999@g.us", author: "444@c.us", isGroupMsg: true, body: "@everyone", t: clock }));
 late.emit("chat.new_message", incoming({ id: "false_15551212@c.us_NEW", t: clock }));
 late.emit("chat.new_message", incoming({ id: "false_15551212@c.us_NEW", t: clock }));
-assert(emitted.length === 1 && emitted[0].kind === "direct" && emitted[0].msgId === "false_15551212@c.us_NEW",
-  "after catch-up, only a new qualifying message is delivered once");
+assert(emitted.length === 2 && emitted[0].kind === "everyone" && emitted[1].kind === "direct" && emitted[1].msgId === "false_15551212@c.us_NEW",
+  "after catch-up, a new everyone tag and a new direct message are each delivered once");
 
 const already = fakeWpp(true);
 const readyHits = [];
@@ -268,6 +301,23 @@ assert(
   settingsI18n.includes(`"${api.SETTINGS_COPY.en}": "${api.SETTINGS_COPY.pt}"`),
   "Portuguese still has the @everyone line"
 );
+const alertOn = { mentions: true, replies: true, direct: true, everyone: false, popup: true, sound: true };
+const everyoneHit = flags({
+  id: "false_999@g.us_ABC",
+  from: "999@g.us",
+  author: "444@c.us",
+  isGroupMsg: true,
+  body: "@everyone please read",
+});
+assert(api.wantsAlert(everyoneHit, alertOn) === false, "everyone stays quiet until that switch is on");
+assert(api.wantsAlert(everyoneHit, Object.assign({}, alertOn, { everyone: true })) === true, "everyone alerts when that switch is on");
+assert(api.wantsAlert(everyoneHit, Object.assign({}, alertOn, { everyone: true, popup: false, sound: false })) === false,
+  "a matched type with both deliveries off does nothing");
+const directReply = flags({ body: "replied to me", quotedParticipant: "15551212@c.us" });
+assert(api.wantsAlert(directReply, { mentions: false, replies: true, direct: false, everyone: false, popup: true, sound: false }) === true,
+  "a direct reply alerts when only replies are on");
+assert(api.wantsAlert(directReply, { mentions: false, replies: false, direct: true, everyone: false, popup: false, sound: true }) === true,
+  "a direct reply alerts when only direct messages are on");
 const wav = readFileSync(join(here, "../../settings-ui/mention.wav"));
 const chime = readFileSync(join(here, "mention-chime.js"), "utf8");
 assert(chime.includes(wav.toString("base64")), "the page plays the bundled chime");

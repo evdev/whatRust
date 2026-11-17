@@ -1,10 +1,11 @@
-//! Reply popups for a personal mention, a reply to one of my messages, or a
-//! direct chat. The page classifies the message. This module decides the
-//! delivery from [`mention_alert_plan`], stacks at most four windows at the
-//! top-right, and asks that account's page to send a quote reply.
+//! Reply popups for a personal mention, a reply to one of my messages, a
+//! direct chat, or a group @everyone. The page reports which of those a
+//! message matched. This module applies that account's switches, stacks at
+//! most four windows at the top-right, and asks that account's page to send
+//! a quote reply.
 use crate::i18n::tr;
 use crate::lock;
-use crate::settings::{mention_alert_plan, MentionAlertPlan};
+use crate::settings::{mention_alert_plan, MentionAccountPrefs, MentionAlertPlan, MentionMatch};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -57,6 +58,10 @@ struct Card {
     at_ms: u64,
     sound: bool,
     account_name: String,
+    mentions: bool,
+    replies: bool,
+    direct: bool,
+    everyone: bool,
 }
 
 struct Held {
@@ -68,11 +73,14 @@ struct Held {
     body: String,
     at_ms: u64,
     account_name: String,
-    want_popup: bool,
-    want_sound: bool,
+    mentions: bool,
+    replies: bool,
+    direct: bool,
+    everyone: bool,
     queued: Instant,
 }
 
+#[derive(PartialEq, Eq)]
 enum Release {
     Drop,
     Chime,
@@ -89,25 +97,30 @@ pub struct CardView {
     sound: bool,
 }
 
-pub fn boot_script(app: &AppHandle) -> String {
-    let plan = mention_alert_plan(&crate::settings::load(app));
-    boot_script_from(plan.popup, plan.sound)
+pub fn boot_script(app: &AppHandle, label: &str) -> String {
+    let settings = crate::settings::load(app);
+    let id = crate::accounts::id_from_label(label).unwrap_or("default");
+    boot_script_from(&crate::settings::prefs_for(&settings, id))
 }
 
-pub fn boot_script_from(popup: bool, sound: bool) -> String {
-    format!("window.__WHATRUST_MENTION={{popup:{popup},sound:{sound}}};")
+pub fn boot_script_from(prefs: &MentionAccountPrefs) -> String {
+    format!(
+        "window.__WHATRUST_MENTION={{mentions:{},replies:{},direct:{},everyone:{},popup:{},sound:{}}};",
+        prefs.mentions, prefs.replies, prefs.direct, prefs.everyone, prefs.popup, prefs.sound
+    )
 }
 
 pub fn push_prefs(app: &AppHandle, settings: &crate::settings::Settings) {
-    let plan = mention_alert_plan(settings);
-    let script = format!(
-        "window.__whatrustMentionPrefs&&window.__whatrustMentionPrefs({{popup:{},sound:{}}});",
-        plan.popup, plan.sound
-    );
     for (label, view) in app.webviews() {
-        if label.starts_with("wa-") {
-            let _ = view.eval(&script);
-        }
+        let Some(id) = crate::accounts::id_from_label(&label) else {
+            continue;
+        };
+        let prefs = crate::settings::prefs_for(settings, id);
+        let script = format!(
+            "window.__whatrustMentionPrefs&&window.__whatrustMentionPrefs({{mentions:{},replies:{},direct:{},everyone:{},popup:{},sound:{}}});",
+            prefs.mentions, prefs.replies, prefs.direct, prefs.everyone, prefs.popup, prefs.sound
+        );
+        let _ = view.eval(&script);
     }
 }
 
@@ -389,19 +402,29 @@ fn hold_push(queue: &mut VecDeque<Held>, mut item: Held, now: Instant) {
     }
 }
 
-fn release_of(item: &Held, plan: MentionAlertPlan) -> Release {
+fn release_of(prefs: &MentionAccountPrefs, item: &Held) -> Release {
+    let plan = mention_alert_plan(prefs, item.matched());
     if plan == MentionAlertPlan::none() {
         return Release::Drop;
     }
-    if item.want_popup && plan.popup {
-        return Release::Popup {
-            sound: item.want_sound && plan.sound,
-        };
+    if plan.popup {
+        return Release::Popup { sound: plan.sound };
     }
-    if item.want_sound && plan.sound {
+    if plan.sound {
         return Release::Chime;
     }
     Release::Drop
+}
+
+impl Held {
+    fn matched(&self) -> MentionMatch {
+        MentionMatch {
+            mentions: self.mentions,
+            replies: self.replies,
+            direct: self.direct,
+            everyone: self.everyone,
+        }
+    }
 }
 
 fn hold_drop_account(queue: &mut VecDeque<Held>, account: &str) {
@@ -459,20 +482,22 @@ pub fn mention_event(
     sender_name: String,
     body: String,
     at_ms: u64,
-    kind: String,
+    mentions: bool,
+    replies: bool,
+    direct: bool,
+    everyone: bool,
 ) -> Result<(), String> {
     crate::integration::remote(&window)?;
-    if !matches!(kind.as_str(), "mention" | "quote" | "direct") {
+    if !mentions && !replies && !direct && !everyone {
         return Ok(());
     }
     if !plausible_id(&chat_id) || !plausible_id(&msg_id) {
         return Ok(());
     }
     let account = window.label().to_string();
-    let plan = mention_alert_plan(&crate::settings::load(&app));
-    if plan == MentionAlertPlan::none() {
-        return Ok(());
-    }
+    let account_id = account_id_from_label(&account);
+    let settings = crate::settings::load(&app);
+    let prefs = crate::settings::prefs_for(&settings, &account_id);
     let held = Held {
         account_label: account.clone(),
         chat_id,
@@ -482,10 +507,15 @@ pub fn mention_event(
         body: clip(&body, 500),
         at_ms: millis(at_ms),
         account_name: account_name(&app, &account),
-        want_popup: plan.popup,
-        want_sound: plan.sound,
+        mentions,
+        replies,
+        direct,
+        everyone,
         queued: Instant::now(),
     };
+    if release_of(&prefs, &held) == Release::Drop {
+        return Ok(());
+    }
     let state = popups(&app);
     {
         let mut inner = lock::guard(&state.inner);
@@ -508,16 +538,7 @@ pub fn mention_event(
             return Ok(());
         }
     }
-    if held.want_popup {
-        let sound = held.want_sound;
-        let label = stage(&app, held, sound);
-        if sound {
-            chime(&app);
-        }
-        spawn_present(app, vec![label]);
-    } else if held.want_sound {
-        chime(&app);
-    }
+    deliver(&app, &account_id, &prefs, held);
     let _ = sender_id;
     Ok(())
 }
@@ -791,8 +812,28 @@ fn millis(at_ms: u64) -> u64 {
     }
 }
 
-fn chime(app: &AppHandle) {
-    crate::mention_sound::play(app);
+fn chime(app: &AppHandle, account_id: &str) {
+    crate::mention_sound::play(app, account_id);
+}
+
+fn account_id_from_label(label: &str) -> String {
+    crate::accounts::id_from_label(label)
+        .unwrap_or("default")
+        .to_string()
+}
+
+fn deliver(app: &AppHandle, account_id: &str, prefs: &MentionAccountPrefs, held: Held) {
+    match release_of(prefs, &held) {
+        Release::Drop => {}
+        Release::Chime => chime(app, account_id),
+        Release::Popup { sound } => {
+            let label = stage(app, held, sound);
+            if sound {
+                chime(app, account_id);
+            }
+            spawn_present(app.clone(), vec![label]);
+        }
+    }
 }
 
 fn stage(app: &AppHandle, held: Held, sound: bool) -> String {
@@ -813,6 +854,10 @@ fn stage(app: &AppHandle, held: Held, sound: bool) -> String {
             at_ms: held.at_ms,
             sound,
             account_name: held.account_name,
+            mentions: held.mentions,
+            replies: held.replies,
+            direct: held.direct,
+            everyone: held.everyone,
         },
     );
     label
@@ -848,8 +893,10 @@ pub fn on_lock(app: &AppHandle) {
                     body: card.body,
                     at_ms: card.at_ms,
                     account_name: card.account_name,
-                    want_popup: true,
-                    want_sound: card.sound,
+                    mentions: card.mentions,
+                    replies: card.replies,
+                    direct: card.direct,
+                    everyone: card.everyone,
                     queued: Instant::now(),
                 });
             }
@@ -984,9 +1031,9 @@ fn pump(app: &AppHandle) {
     if !lock::is_unlocked(app) {
         return;
     }
-    let plan = mention_alert_plan(&crate::settings::load(app));
+    let settings = crate::settings::load(app);
     let mut show = Vec::new();
-    let mut chime_account = None;
+    let mut chimes = Vec::new();
     {
         let state = popups(app);
         let mut inner = lock::guard(&state.inner);
@@ -995,18 +1042,21 @@ fn pump(app: &AppHandle) {
         let slots = POPUP_MAX.saturating_sub(inner.order.len());
         let mut later = VecDeque::new();
         for item in pending {
-            match release_of(&item, plan) {
+            let account_id = account_id_from_label(&item.account_label);
+            let prefs = crate::settings::prefs_for(&settings, &account_id);
+            match release_of(&prefs, &item) {
                 Release::Drop => {}
                 Release::Chime => {
-                    if chime_account.is_none() {
-                        chime_account = Some(item.account_label);
+                    if !chimes.contains(&account_id) {
+                        chimes.push(account_id);
                     }
                 }
                 Release::Popup { sound } => {
                     if show.len() < slots {
-                        let mut item = item;
-                        item.want_sound = sound;
-                        show.push(item);
+                        if sound && !chimes.contains(&account_id) {
+                            chimes.push(account_id);
+                        }
+                        show.push((item, sound));
                     } else {
                         later.push_back(item);
                     }
@@ -1015,14 +1065,11 @@ fn pump(app: &AppHandle) {
         }
         inner.waiting = later;
     }
-    let popup_plays = show.iter().any(|item| item.want_sound);
-    if popup_plays || chime_account.is_some() {
-        chime(app);
+    for account_id in &chimes {
+        chime(app, account_id);
     }
-    let total = show.len();
     let mut labels = Vec::new();
-    for (index, item) in show.into_iter().rev().enumerate() {
-        let sound = item.want_sound && index + 1 == total;
+    for (item, sound) in show.into_iter().rev() {
         labels.push(stage(app, item, sound));
     }
     if !labels.is_empty() {
@@ -1229,7 +1276,7 @@ mod tests {
         boot_script_from, hold_push, popup_origin, prepare_reply, release_of, reply_text,
         send_script, Held, Release, FILE_MAX, POPUP_H, POPUP_W,
     };
-    use crate::settings::MentionAlertPlan;
+    use crate::settings::MentionAccountPrefs;
     use std::collections::VecDeque;
     use std::time::{Duration, Instant};
 
@@ -1265,10 +1312,19 @@ mod tests {
     }
 
     #[test]
-    fn the_boot_script_only_contains_the_two_flags() {
+    fn the_boot_script_names_each_switch() {
+        let prefs = MentionAccountPrefs {
+            mentions: true,
+            replies: false,
+            direct: true,
+            everyone: false,
+            sound: false,
+            popup: true,
+            sound_file: None,
+        };
         assert_eq!(
-            boot_script_from(true, false),
-            "window.__WHATRUST_MENTION={popup:true,sound:false};"
+            boot_script_from(&prefs),
+            "window.__WHATRUST_MENTION={mentions:true,replies:false,direct:true,everyone:false,popup:true,sound:false};"
         );
     }
 
@@ -1282,8 +1338,10 @@ mod tests {
             body: "hello".into(),
             at_ms: 0,
             account_name: String::new(),
-            want_popup: true,
-            want_sound: true,
+            mentions: true,
+            replies: false,
+            direct: false,
+            everyone: false,
             queued,
         }
     }
@@ -1339,23 +1397,24 @@ mod tests {
     #[test]
     fn unlocking_without_a_popup_only_chimes() {
         let item = sample("wa-default", "false_1@c.us_A", Instant::now());
-        let mut item = item;
-        item.want_popup = false;
+        let sound_only = MentionAccountPrefs {
+            mentions: true,
+            popup: false,
+            sound: true,
+            ..MentionAccountPrefs::default()
+        };
+        assert!(matches!(release_of(&sound_only, &item), Release::Chime));
         assert!(matches!(
-            release_of(
-                &item,
-                MentionAlertPlan {
-                    popup: false,
-                    sound: true,
-                    suppress_ordinary: false,
-                }
-            ),
-            Release::Chime
-        ));
-        assert!(matches!(
-            release_of(&item, MentionAlertPlan::none()),
+            release_of(&MentionAccountPrefs::default(), &item),
             Release::Drop
         ));
+        let quiet = MentionAccountPrefs {
+            mentions: true,
+            popup: false,
+            sound: false,
+            ..MentionAccountPrefs::default()
+        };
+        assert!(matches!(release_of(&quiet, &item), Release::Drop));
     }
 
     #[test]

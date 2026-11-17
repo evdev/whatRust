@@ -1,5 +1,7 @@
 use crate::i18n::trf;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -18,21 +20,22 @@ pub struct Settings {
     pub notify_when_focused: bool,
     pub notify_active_chat: bool,
     pub respect_muted: bool,
-    /// Distinct alert for a personal @mention, a reply to one of my messages,
-    /// or any new direct chat. Off until the user turns it on. @everyone alone
-    /// does not qualify, and status posts are not part of this alert.
-    /// `mention_alert_plan` is what a qualifying message does with the two
-    /// switches below. Both of those are ignored while this is off.
+    /// Older builds stored one mention alert for the whole app. These four
+    /// fields are read only while [`Settings::mention_accounts`] is absent,
+    /// then copied onto each account that already exists. @everyone stayed off.
     pub mention_alert: bool,
-    /// Distinct sound for a qualifying message. The settings page turns this
-    /// on when the master switch is turned on.
+    /// Distinct sound for a qualifying message in an older settings file.
     pub mention_alert_sound: bool,
-    /// Reply popup for a qualifying message. While this is on, that message
-    /// does not also raise the ordinary notification.
+    /// Reply popup for a qualifying message in an older settings file.
     pub mention_alert_popup: bool,
-    /// Basename of a copied alert sound in the config directory, for example
-    /// `mention-alert.mp3`. `None` plays the bundled chime.
+    /// Shared copied sound from an older settings file, for example
+    /// `mention-alert.mp3`. Migration copies it onto each existing account
+    /// and then clears this.
     pub mention_alert_sound_file: Option<String>,
+    /// Per-account mention alert. `None` means this file has not been migrated
+    /// from the four fields above. An empty map has been migrated and simply
+    /// has no accounts yet.
+    pub mention_accounts: Option<HashMap<String, MentionAccountPrefs>>,
     /// macOS only: the app lives in the menu bar, no Dock icon and no
     /// standard window. The open account stays connected while its panel is
     /// hidden; other accounts load when opened. Off by default. Ignored
@@ -165,6 +168,7 @@ impl Default for Settings {
             mention_alert_sound: true,
             mention_alert_popup: true,
             mention_alert_sound_file: None,
+            mention_accounts: None,
             menubar_only: false,
             single_window: false,
             hide_dock_icon: false,
@@ -214,14 +218,53 @@ impl Default for Settings {
     }
 }
 
-/// What a qualifying mention, reply, or direct message should do.
+/// One WhatsApp account's mention alert. Types choose which messages qualify.
+/// Sound and popup choose what a qualifying message does. A new account starts
+/// with every type off, so nothing alerts until the user opts in, and with
+/// sound and popup on so the first enabled type is heard and shown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MentionAccountPrefs {
+    pub mentions: bool,
+    pub replies: bool,
+    pub direct: bool,
+    pub everyone: bool,
+    pub sound: bool,
+    pub popup: bool,
+    /// `mention-alert.{accountId}.{ext}`, or `None` for this account's built-in.
+    pub sound_file: Option<String>,
+}
+
+impl Default for MentionAccountPrefs {
+    fn default() -> Self {
+        Self {
+            mentions: false,
+            replies: false,
+            direct: false,
+            everyone: false,
+            sound: true,
+            popup: true,
+            sound_file: None,
+        }
+    }
+}
+
+/// Which categories a live message matched. A message alerts when any matched
+/// category is enabled for that account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MentionMatch {
+    pub mentions: bool,
+    pub replies: bool,
+    pub direct: bool,
+    pub everyone: bool,
+}
+
+/// What a qualifying message should do.
 ///
-/// | master | popup | sound | result |
-/// | off    | *     | *     | nothing; the ordinary notification is unchanged |
-/// | on     | on    | on    | popup and sound; ordinary notification suppressed |
-/// | on     | on    | off   | silent popup; ordinary notification suppressed |
-/// | on     | off   | on    | sound only; ordinary notification unchanged |
-/// | on     | off   | off   | nothing; ordinary notification unchanged |
+/// A type that is off does not qualify. With no qualifying type, or with both
+/// delivery switches off, nothing happens and the ordinary notification is
+/// unchanged. Popup on suppresses that notification. Sound on without the
+/// popup plays the chime and leaves the ordinary notification alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MentionAlertPlan {
     pub popup: bool,
@@ -239,18 +282,43 @@ impl MentionAlertPlan {
     }
 }
 
-pub fn mention_alert_plan(s: &Settings) -> MentionAlertPlan {
-    if !s.mention_alert {
+pub fn prefs_for(settings: &Settings, account_id: &str) -> MentionAccountPrefs {
+    if let Some(map) = &settings.mention_accounts {
+        return map.get(account_id).cloned().unwrap_or_default();
+    }
+    legacy_mention_prefs(settings)
+}
+
+/// The global switches, applied as mentions, replies, and direct messages.
+/// @everyone stays off, which is what the old alert did.
+pub fn legacy_mention_prefs(settings: &Settings) -> MentionAccountPrefs {
+    MentionAccountPrefs {
+        mentions: settings.mention_alert,
+        replies: settings.mention_alert,
+        direct: settings.mention_alert,
+        everyone: false,
+        sound: settings.mention_alert_sound,
+        popup: settings.mention_alert_popup,
+        sound_file: settings.mention_alert_sound_file.clone(),
+    }
+}
+
+pub fn mention_alert_plan(prefs: &MentionAccountPrefs, matched: MentionMatch) -> MentionAlertPlan {
+    let enabled = (matched.mentions && prefs.mentions)
+        || (matched.replies && prefs.replies)
+        || (matched.direct && prefs.direct)
+        || (matched.everyone && prefs.everyone);
+    if !enabled {
         return MentionAlertPlan::none();
     }
-    if s.mention_alert_popup {
+    if prefs.popup {
         return MentionAlertPlan {
             popup: true,
-            sound: s.mention_alert_sound,
+            sound: prefs.sound,
             suppress_ordinary: true,
         };
     }
-    if s.mention_alert_sound {
+    if prefs.sound {
         return MentionAlertPlan {
             popup: false,
             sound: true,
@@ -258,6 +326,112 @@ pub fn mention_alert_plan(s: &Settings) -> MentionAlertPlan {
         };
     }
     MentionAlertPlan::none()
+}
+
+pub fn insert_mention_account(settings: &mut Settings, account_id: &str) {
+    if !crate::mention_sound::is_account_id(account_id) {
+        return;
+    }
+    let map = settings.mention_accounts.get_or_insert_with(HashMap::new);
+    map.insert(account_id.to_string(), MentionAccountPrefs::default());
+}
+
+pub fn remove_mention_account(settings: &mut Settings, account_id: &str) {
+    if let Some(map) = settings.mention_accounts.as_mut() {
+        map.remove(account_id);
+    }
+}
+
+/// Keep a sound pointer only when that account's file is still on disk.
+/// A form that does not name a file keeps the stored one: Reset deletes the
+/// file itself, and a settings page opened before migration must not wipe the
+/// copy that migration just wrote. This does not delete files.
+pub fn reconcile_mention_files(app: &tauri::AppHandle, incoming: &mut Settings, stored: &Settings) {
+    let Some(map) = incoming.mention_accounts.as_mut() else {
+        return;
+    };
+    for (id, prefs) in map.iter_mut() {
+        let stored_name = stored
+            .mention_accounts
+            .as_ref()
+            .and_then(|accounts| accounts.get(id))
+            .and_then(|prefs| prefs.sound_file.clone());
+        prefs.sound_file = resolved_sound_file(
+            prefs.sound_file.as_deref(),
+            stored_name.as_deref(),
+            id,
+            |name| crate::mention_sound::is_present(app, name),
+        );
+    }
+}
+
+fn sound_name_ok(name: &str, account_id: &str) -> bool {
+    crate::mention_sound::account_of_sound(name) == Some(account_id)
+}
+
+fn resolved_sound_file(
+    incoming: Option<&str>,
+    stored: Option<&str>,
+    account_id: &str,
+    present: impl Fn(&str) -> bool,
+) -> Option<String> {
+    if let Some(name) = incoming {
+        if sound_name_ok(name, account_id) && present(name) {
+            return Some(name.to_string());
+        }
+    }
+    // A missing or legacy name is not a request to clear the sound. Reset
+    // removes the file first, so a stored name that is still present is kept.
+    if let Some(name) = stored {
+        if sound_name_ok(name, account_id) && present(name) {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// Copy the old global alert onto every existing account, including a separate
+/// copy of a custom sound. Returns false when a copy failed and the original
+/// file is still the only copy; the caller must leave `mention_accounts` unset
+/// so the next load tries again. Safe to call only while that field is `None`.
+pub fn migrate_mention_accounts(app: &tauri::AppHandle, settings: &mut Settings) -> bool {
+    let ids: Vec<String> = crate::accounts::load(app)
+        .accounts
+        .into_iter()
+        .map(|account| account.id)
+        .filter(|id| crate::mention_sound::is_account_id(id))
+        .collect();
+    let legacy_file = settings.mention_alert_sound_file.clone();
+    let mut failed = false;
+    let mut copied = false;
+    let mut map = HashMap::new();
+    for id in &ids {
+        let mut prefs = legacy_mention_prefs(settings);
+        prefs.sound_file = None;
+        if let Some(name) = legacy_file.as_deref() {
+            match crate::mention_sound::copy_legacy(app, name, id) {
+                crate::mention_sound::CopyLegacy::Stored(stored) => {
+                    prefs.sound_file = Some(stored);
+                    copied = true;
+                }
+                crate::mention_sound::CopyLegacy::Missing => {}
+                crate::mention_sound::CopyLegacy::Failed => failed = true,
+            }
+        }
+        map.insert(id.clone(), prefs);
+    }
+    if failed {
+        crate::dlog::log(
+            "mention: the saved sound could not be copied; the original file was kept",
+        );
+        return false;
+    }
+    if copied {
+        crate::mention_sound::delete_legacy(app);
+    }
+    settings.mention_alert_sound_file = None;
+    settings.mention_accounts = Some(map);
+    true
 }
 
 /// A Flatpak build cannot see the host's `claude`, `grok`, or `codex` binaries.
@@ -515,7 +689,18 @@ impl Settings {
             .mention_alert_sound_file
             .take()
             .map(|name| name.trim().to_string())
-            .filter(|name| crate::mention_sound::is_stored_name(name));
+            .filter(|name| crate::mention_sound::is_legacy_name(name));
+        if let Some(map) = self.mention_accounts.as_mut() {
+            map.retain(|id, _| crate::mention_sound::is_account_id(id));
+            for (id, prefs) in map.iter_mut() {
+                let ok = prefs.sound_file.as_deref().is_some_and(|name| {
+                    crate::mention_sound::account_of_sound(name) == Some(id.as_str())
+                });
+                if !ok {
+                    prefs.sound_file = None;
+                }
+            }
+        }
         self.language = crate::i18n::sanitize_code(&self.language);
         self.fluidvoice_port = sanitize_port(self.fluidvoice_port);
         self.translate_target_lang = sanitize_label(&self.translate_target_lang, "English");
@@ -661,18 +846,46 @@ fn settings_path(app: &AppHandle) -> tauri::Result<PathBuf> {
     Ok(dir.join("settings.json"))
 }
 
+static MENTION_MIGRATE: Mutex<()> = Mutex::new(());
+
 pub fn load(app: &AppHandle) -> Settings {
     use crate::jsonfile::Loaded;
     let Ok(path) = settings_path(app) else {
         return Settings::default();
     };
     match crate::jsonfile::read::<Settings>(&path) {
-        Loaded::Ok(s) | Loaded::Recovered(s) => s.sanitized(),
+        Loaded::Ok(s) | Loaded::Recovered(s) => {
+            let mut settings = s.sanitized();
+            if settings.mention_accounts.is_none() {
+                let _guard = MENTION_MIGRATE
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                // Another caller may have finished the copy while we waited.
+                if let Some(fresh) = read_sanitized(&path) {
+                    if fresh.mention_accounts.is_some() {
+                        return fresh;
+                    }
+                    settings = fresh;
+                }
+                if migrate_mention_accounts(app, &mut settings) {
+                    let _ = save(app, &settings);
+                }
+            }
+            settings
+        }
         Loaded::Missing => Settings::default(),
         Loaded::Corrupt => {
             crate::jsonfile::preserve_corrupt(&path);
             Settings::default()
         }
+    }
+}
+
+fn read_sanitized(path: &std::path::Path) -> Option<Settings> {
+    use crate::jsonfile::Loaded;
+    match crate::jsonfile::read::<Settings>(path) {
+        Loaded::Ok(s) | Loaded::Recovered(s) => Some(s.sanitized()),
+        Loaded::Missing | Loaded::Corrupt => None,
     }
 }
 
@@ -828,7 +1041,8 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        mention_alert_plan, sanitize_zoom, step_zoom, MentionAlertPlan, Settings, ZoomAction,
+        legacy_mention_prefs, mention_alert_plan, resolved_sound_file, sanitize_zoom, step_zoom,
+        MentionAccountPrefs, MentionAlertPlan, MentionMatch, Settings, ZoomAction,
         DEFAULT_MODEL_OPENROUTER, FLUIDVOICE_PORT_DEFAULT, ZOOM_MAX, ZOOM_MIN, ZOOM_STEPS,
     };
 
@@ -888,20 +1102,51 @@ mod tests {
             good.sanitized().mention_alert_sound_file.as_deref(),
             Some("mention-alert.mp3")
         );
+        let per_account: Settings = serde_json::from_str(
+            r#"{"mention_accounts":{"default":{"sound_file":"mention-alert.default.mp3"},"acct-2":{"sound_file":"mention-alert.default.wav"},"nope":{"mentions":true}}}"#,
+        )
+        .unwrap();
+        let clean = per_account.sanitized();
+        let map = clean.mention_accounts.unwrap();
+        assert_eq!(
+            map["default"].sound_file.as_deref(),
+            Some("mention-alert.default.mp3")
+        );
+        assert!(map["acct-2"].sound_file.is_none());
+        assert!(!map.contains_key("nope"));
     }
 
     #[test]
     fn old_settings_leave_the_mention_alert_off() {
         let s: Settings = serde_json::from_str(r#"{"notifications":true}"#).unwrap();
+        assert!(s.mention_accounts.is_none());
         assert!(!s.mention_alert);
         assert!(s.mention_alert_sound && s.mention_alert_popup);
         assert!(s.mention_alert_sound_file.is_none());
-        assert_eq!(mention_alert_plan(&s), MentionAlertPlan::none());
+        let prefs = legacy_mention_prefs(&s);
+        assert!(!prefs.mentions && !prefs.replies && !prefs.direct && !prefs.everyone);
+        assert_eq!(
+            mention_alert_plan(
+                &prefs,
+                MentionMatch {
+                    mentions: true,
+                    replies: true,
+                    direct: true,
+                    everyone: true,
+                }
+            ),
+            MentionAlertPlan::none()
+        );
     }
 
     #[test]
     fn mention_alert_plan_follows_the_truth_table() {
-        // master, popup, sound, expected plan
+        let matched = MentionMatch {
+            mentions: true,
+            replies: false,
+            direct: false,
+            everyone: false,
+        };
         let cases = [
             (false, false, false, MentionAlertPlan::none()),
             (false, true, true, MentionAlertPlan::none()),
@@ -939,19 +1184,108 @@ mod tests {
             ),
             (true, false, false, MentionAlertPlan::none()),
         ];
-        for (master, popup, sound, expected) in cases {
-            let s = Settings {
-                mention_alert: master,
-                mention_alert_popup: popup,
-                mention_alert_sound: sound,
-                ..Settings::default()
+        for (mentions, popup, sound, expected) in cases {
+            let prefs = MentionAccountPrefs {
+                mentions,
+                popup,
+                sound,
+                ..MentionAccountPrefs::default()
             };
             assert_eq!(
-                mention_alert_plan(&s),
+                mention_alert_plan(&prefs, matched),
                 expected,
-                "master={master} popup={popup} sound={sound}"
+                "mentions={mentions} popup={popup} sound={sound}"
             );
         }
+        let everyone_off = MentionAccountPrefs {
+            mentions: false,
+            replies: false,
+            direct: false,
+            everyone: false,
+            sound: true,
+            popup: true,
+            sound_file: None,
+        };
+        assert_eq!(
+            mention_alert_plan(
+                &everyone_off,
+                MentionMatch {
+                    mentions: false,
+                    replies: false,
+                    direct: false,
+                    everyone: true,
+                }
+            ),
+            MentionAlertPlan::none()
+        );
+        let everyone_on = MentionAccountPrefs {
+            everyone: true,
+            ..everyone_off.clone()
+        };
+        assert!(
+            mention_alert_plan(
+                &everyone_on,
+                MentionMatch {
+                    mentions: false,
+                    replies: false,
+                    direct: false,
+                    everyone: true,
+                }
+            )
+            .popup
+        );
+        let either = MentionAccountPrefs {
+            replies: true,
+            ..MentionAccountPrefs::default()
+        };
+        assert!(
+            mention_alert_plan(
+                &either,
+                MentionMatch {
+                    mentions: false,
+                    replies: true,
+                    direct: true,
+                    everyone: false,
+                }
+            )
+            .popup
+        );
+    }
+
+    #[test]
+    fn a_stale_form_does_not_drop_a_sound_file_that_is_still_there() {
+        let present = |name: &str| name == "mention-alert.default.mp3";
+        assert_eq!(
+            resolved_sound_file(None, Some("mention-alert.default.mp3"), "default", present)
+                .as_deref(),
+            Some("mention-alert.default.mp3")
+        );
+        assert_eq!(
+            resolved_sound_file(
+                Some("mention-alert.acct-1.wav"),
+                Some("mention-alert.default.mp3"),
+                "acct-1",
+                |name| name == "mention-alert.acct-1.wav"
+            )
+            .as_deref(),
+            Some("mention-alert.acct-1.wav")
+        );
+        assert_eq!(
+            resolved_sound_file(
+                Some("mention-alert.mp3"),
+                Some("mention-alert.default.mp3"),
+                "default",
+                present
+            )
+            .as_deref(),
+            Some("mention-alert.default.mp3")
+        );
+        assert!(
+            resolved_sound_file(None, Some("mention-alert.default.mp3"), "default", |_| {
+                false
+            })
+            .is_none()
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -982,6 +1316,7 @@ mod tests {
         assert!(s.close_to_tray);
         assert!(s.notifications);
         assert!(!s.mention_alert);
+        assert!(s.mention_accounts.is_none());
         assert!(s.mention_alert_sound && s.mention_alert_popup);
         assert!(s.mention_alert_sound_file.is_none());
         // The menu-bar mode is opt-in.

@@ -1,6 +1,6 @@
 const invoke = window.__TAURI__.core.invoke;
 const LANGS = ["pt-BR", "en"];
-const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "mention_alert", "mention_alert_sound", "mention_alert_popup", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "standin_enabled"];
+const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "standin_enabled"];
 const STANDIN_BACKENDS = ["api", "claude_cli", "grok_cli", "codex_cli", "hermes", "grok_bot"];
 const AI_PROVIDERS = ["openrouter", "gemini", "anthropic"];
 const LIST_PROVIDERS = ["gemini", "anthropic"];
@@ -50,28 +50,74 @@ function syncMenuBarIconRow() {
     : MENU_ICON_SUBTITLE;
 }
 
-// Turning the master switch on checks sound and popup. While it is off, those
-// two stay disabled. The idle note is the both-off row of the delivery table.
-function syncMentionAlert(turnedOn) {
-  const master = document.getElementById("mention_alert");
+// One account's mention switches. Delivery stays enabled only while a type is
+// on. The sound file and the built-in chime belong to the selected account.
+const MENTION_TYPES = ["mention_mentions", "mention_replies", "mention_direct", "mention_everyone"];
+
+function readMentionForm() {
+  return window.mentionAlertForm.normalizePrefs({
+    mentions: document.getElementById("mention_mentions").checked,
+    replies: document.getElementById("mention_replies").checked,
+    direct: document.getElementById("mention_direct").checked,
+    everyone: document.getElementById("mention_everyone").checked,
+    sound: document.getElementById("mention_alert_sound").checked,
+    popup: document.getElementById("mention_alert_popup").checked,
+    sound_file: mentionSoundFile,
+  });
+}
+
+function applyMentionChrome(view) {
   const sound = document.getElementById("mention_alert_sound");
   const popup = document.getElementById("mention_alert_popup");
-  const form = window.mentionAlertForm.applyMentionAlertToggle({
-    mention_alert: master.checked,
-    mention_alert_sound: sound.checked,
-    mention_alert_popup: popup.checked,
-  }, turnedOn);
-  master.checked = form.state.mention_alert;
-  sound.checked = form.state.mention_alert_sound;
-  popup.checked = form.state.mention_alert_popup;
-  sound.disabled = !form.soundEnabled;
-  popup.disabled = !form.popupEnabled;
-  document.getElementById("mention_alert_idle").hidden = !form.idle;
-  const fileRow = document.getElementById("mention_alert_sound_file_row");
-  fileRow.hidden = !master.checked || !sound.checked;
-  document.getElementById("choose_mention_sound").disabled = !sound.checked;
-  document.getElementById("preview_mention_sound").disabled = !sound.checked;
-  document.getElementById("reset_mention_sound").disabled = !sound.checked || !mentionSoundFile;
+  sound.disabled = !view.soundEnabled;
+  popup.disabled = !view.popupEnabled;
+  const idle = document.getElementById("mention_alert_idle");
+  idle.hidden = !view.idle && !view.typesOff;
+  idle.textContent = view.typesOff
+    ? "With every type off, this alert does nothing."
+    : "With the sound and the popup off, this alert does nothing.";
+  document.getElementById("mention_alert_sound_file_row").hidden = !view.fileVisible;
+  const soundOn = sound.checked && !sound.disabled;
+  document.getElementById("choose_mention_sound").disabled = !soundOn;
+  document.getElementById("preview_mention_sound").disabled = !soundOn;
+  document.getElementById("reset_mention_sound").disabled = !soundOn || !mentionSoundFile;
+  showMentionSound();
+}
+
+function writeMentionForm(prefs) {
+  const view = window.mentionAlertForm.viewMentionAccount(prefs);
+  document.getElementById("mention_mentions").checked = view.prefs.mentions;
+  document.getElementById("mention_replies").checked = view.prefs.replies;
+  document.getElementById("mention_direct").checked = view.prefs.direct;
+  document.getElementById("mention_everyone").checked = view.prefs.everyone;
+  document.getElementById("mention_alert_sound").checked = view.prefs.sound;
+  document.getElementById("mention_alert_popup").checked = view.prefs.popup;
+  mentionSoundFile = view.prefs.sound_file;
+  applyMentionChrome(view);
+}
+
+function stashMentionForm() {
+  if (!mentionAccountId) return;
+  mentionAccounts[mentionAccountId] = readMentionForm();
+}
+
+function pruneMentionAccounts() {
+  if (!mentionAccountList.length) return;
+  const ids = new Set(mentionAccountList.map((account) => account.id));
+  for (const id of Object.keys(mentionAccounts)) {
+    if (!ids.has(id)) delete mentionAccounts[id];
+  }
+}
+
+function prefsForMention(id) {
+  if (mentionAccounts[id]) return mentionAccounts[id];
+  if (mentionLegacy) return window.mentionAlertForm.normalizePrefs(mentionLegacy);
+  return window.mentionAlertForm.blankPrefs();
+}
+
+function syncMentionAlert() {
+  stashMentionForm();
+  applyMentionChrome(window.mentionAlertForm.viewMentionAccount(readMentionForm()));
 }
 
 // settings.json holds a zoom factor, not a preset name, and the zoom shortcuts
@@ -99,12 +145,23 @@ function selectNearestZoom(value) {
 // because save() rebuilds the whole settings object from the page.
 let downloadDir = null;
 let mentionSoundFile = null;
+let mentionAccounts = {};
+let mentionAccountId = null;
+let mentionAccountList = [];
+let mentionLegacy = null;
+let mentionSettingsReady = false;
 
 function showMentionSound() {
   const sub = document.getElementById("mention_alert_sound_file_subtitle");
-  sub.textContent = mentionSoundFile ? "Custom sound" : "Built-in sound";
-  sub.title = mentionSoundFile || "";
-  const soundOn = document.getElementById("mention_alert_sound").checked;
+  if (mentionSoundFile) {
+    sub.textContent = "Custom sound";
+    sub.title = mentionSoundFile;
+  } else {
+    sub.textContent = window.mentionAlertForm.builtinName(mentionAccountId || "default");
+    sub.title = "";
+  }
+  const sound = document.getElementById("mention_alert_sound");
+  const soundOn = sound.checked && !sound.disabled;
   document.getElementById("reset_mention_sound").disabled = !soundOn || !mentionSoundFile;
 }
 
@@ -162,19 +219,23 @@ async function resetIcon() {
 }
 
 async function chooseMentionSound() {
+  if (!mentionAccountId) return;
   try {
-    const name = await invoke("choose_mention_sound");
+    const name = await invoke("choose_mention_sound", { accountId: mentionAccountId });
     if (!name) return;
     mentionSoundFile = name;
+    stashMentionForm();
     showMentionSound();
     flash("Changes saved ✓", 1500);
   } catch (e) { flash(String(e), 6000); }
 }
 
 async function resetMentionSound() {
+  if (!mentionAccountId) return;
   try {
-    await invoke("reset_mention_sound");
+    await invoke("reset_mention_sound", { accountId: mentionAccountId });
     mentionSoundFile = null;
+    stashMentionForm();
     showMentionSound();
     flash("Changes saved ✓", 1500);
   } catch (e) { flash(String(e), 6000); }
@@ -289,12 +350,50 @@ async function load() {
   menuBarIconChecked = document.getElementById("menu_bar_icon").checked;
   syncMenuBarIconRow();
   downloadDir = s.download_dir || null;
-  mentionSoundFile = s.mention_alert_sound_file || null;
   showDownloadDir();
-  showMentionSound();
+  loadMentionAccounts(s);
   showIcon(!!s.custom_icon);
   loadProxy(s);
-  syncMentionAlert(false);
+}
+
+function loadMentionAccounts(s) {
+  mentionAccounts = {};
+  if (s.mention_accounts && typeof s.mention_accounts === "object") {
+    mentionLegacy = null;
+    for (const [id, prefs] of Object.entries(s.mention_accounts)) {
+      mentionAccounts[id] = window.mentionAlertForm.normalizePrefs(prefs);
+    }
+  } else {
+    mentionLegacy = window.mentionAlertForm.legacyPrefs(s);
+  }
+  mentionSettingsReady = true;
+  renderMentionAccountSelect(false);
+}
+
+function renderMentionAccountSelect(keepForm) {
+  if (!mentionSettingsReady) return;
+  const sel = document.getElementById("mention_account");
+  if (!sel) return;
+  if (keepForm) stashMentionForm();
+  pruneMentionAccounts();
+  const previous = mentionAccountId;
+  sel.replaceChildren();
+  for (const account of mentionAccountList) {
+    const opt = document.createElement("option");
+    opt.value = account.id;
+    opt.textContent = account.name;
+    sel.appendChild(opt);
+  }
+  if (!mentionAccountList.length) {
+    mentionAccountId = null;
+    return;
+  }
+  const keep = mentionAccountList.some((account) => account.id === previous)
+    ? previous
+    : mentionAccountList[0].id;
+  mentionAccountId = keep;
+  sel.value = keep;
+  writeMentionForm(prefsForMention(keep));
 }
 
 // --- Proxy (issue #52) ---
@@ -386,7 +485,14 @@ async function save() {
   s.standin_agent_timeout_secs = parseInt(document.getElementById("standin_agent_timeout_secs").value, 10) || 150;
   s.standin_agent_runs_per_hour = parseInt(document.getElementById("standin_agent_runs_per_hour").value, 10) || 20;
   s.download_dir = downloadDir;
-  s.mention_alert_sound_file = mentionSoundFile;
+  if (mentionSettingsReady) {
+    stashMentionForm();
+    pruneMentionAccounts();
+    for (const account of mentionAccountList) {
+      if (!mentionAccounts[account.id]) mentionAccounts[account.id] = prefsForMention(account.id);
+    }
+    s.mention_accounts = mentionAccounts;
+  }
   if (proxySupported) {
     s.proxy_mode = document.getElementById("proxy_mode").value;
     s.proxy_host = document.getElementById("proxy_host").value.trim();
@@ -403,6 +509,7 @@ async function save() {
     }
     const warn = await invoke("set_settings", { settings: s });
     const saved = await invoke("get_settings");
+    loadMentionAccounts(saved);
     proxySaved = { proxy_mode: saved.proxy_mode, proxy_host: saved.proxy_host, proxy_port: saved.proxy_port };
     document.getElementById("proxy_host").value = saved.proxy_host;
     document.getElementById("standin_hermes_url").value = saved.standin_hermes_url || "";
@@ -513,8 +620,9 @@ function renderAccounts(accounts) {
 
 async function loadAccounts() {
   try {
-    const accounts = await invoke("list_accounts");
-    renderAccounts(accounts);
+    mentionAccountList = await invoke("list_accounts");
+    renderAccounts(mentionAccountList);
+    renderMentionAccountSelect(true);
   } catch (e) {
     document.getElementById('accounts-note').textContent = t('Could not load the accounts: {0}', [String(e)]);
   }
@@ -534,11 +642,21 @@ window.addEventListener("DOMContentLoaded", () => {
   // The macOS rows stay hidden until load() knows the platform.
   document.getElementById("menubar_only").addEventListener("change", syncMenuBarIconRow);
   document.getElementById("hide_dock_icon").addEventListener("change", syncMenuBarIconRow);
-  document.getElementById("mention_alert").addEventListener("change", () => {
-    syncMentionAlert(document.getElementById("mention_alert").checked);
+  document.getElementById("mention_account").addEventListener("change", () => {
+    const next = document.getElementById("mention_account").value;
+    if (!next || next === mentionAccountId) return;
+    // Keep the account on screen in memory. Save writes every account; saving
+    // here would also persist unrelated half-edited settings and could fail
+    // on them, which would look like the account switch itself failed.
+    if (mentionAccountId) mentionAccounts[mentionAccountId] = readMentionForm();
+    mentionAccountId = next;
+    writeMentionForm(prefsForMention(next));
   });
-  document.getElementById("mention_alert_sound").addEventListener("change", () => syncMentionAlert(false));
-  document.getElementById("mention_alert_popup").addEventListener("change", () => syncMentionAlert(false));
+  for (const id of MENTION_TYPES) {
+    document.getElementById(id).addEventListener("change", syncMentionAlert);
+  }
+  document.getElementById("mention_alert_sound").addEventListener("change", syncMentionAlert);
+  document.getElementById("mention_alert_popup").addEventListener("change", syncMentionAlert);
   load();
   loadAccounts();
   loadLock();
@@ -574,7 +692,8 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("choose_mention_sound").addEventListener("click", chooseMentionSound);
   document.getElementById("reset_mention_sound").addEventListener("click", resetMentionSound);
   document.getElementById("preview_mention_sound").addEventListener("click", () => {
-    invoke("preview_mention_sound").catch((error) => flash(String(error), 6000));
+    if (!mentionAccountId) return;
+    invoke("preview_mention_sound", { accountId: mentionAccountId }).catch((error) => flash(String(error), 6000));
   });
   // Zoom saves on change rather than on Save: picking a size you cannot see the
   // effect of is guesswork, and the webview applies it immediately.

@@ -174,7 +174,7 @@ macro_rules! account_webview {
             .initialization_script(include_str!("../resources/todo.js"))
             .initialization_script(include_str!("../resources/autoreply.js"))
             .initialization_script(include_str!("../resources/summary.js"))
-            .initialization_script(crate::mention::boot_script($app))
+            .initialization_script(crate::mention::boot_script($app, &$label))
             .initialization_script(include_str!("../resources/mention-chime.js"))
             .initialization_script(include_str!("../resources/mention.js"))
             // Drag-and-drop is done by capturing the OS drop in Rust and streaming the file
