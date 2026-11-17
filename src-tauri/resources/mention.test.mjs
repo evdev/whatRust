@@ -25,6 +25,7 @@ const shown = api.displayFrom({
   t: 1_763_000_000,
 }, { kind: "direct", chatId: "1@c.us", senderId: "1@c.us", msgId: "false_1@c.us_A" });
 assert(shown.senderName === "Ada" && shown.chatName === "Family" && shown.body === "hello", "the popup gets the sender, chat, and text");
+assert(shown.voice === false && shown.seconds === 0, "a text message is not a voice note");
 assert(shown.at === 1_763_000_000_000, "a seconds timestamp is shown in milliseconds");
 
 const thumb = "/9j/" + "A".repeat(90);
@@ -68,6 +69,15 @@ const unsaved = api.displayFrom({
   body: "hey",
 }, { kind: "direct", chatId: "15550000@c.us", senderId: "15550000@c.us", msgId: "false_15550000@c.us_C" });
 assert(unsaved.senderName === "+15550000" && !unsaved.senderName.includes("@"), "a contact with no name is a phone number, not a jid");
+
+const note = api.displayFrom({
+  type: "ptt",
+  duration: "14",
+  body: "/9j/" + "B".repeat(90),
+  notifyName: "Ada",
+  chat: { formattedTitle: "Family" },
+}, { kind: "direct", chatId: "1@c.us", senderId: "1@c.us", msgId: "false_1@c.us_V" });
+assert(note.voice === true && note.seconds === 14 && note.body === "" && note.preview === "", "a voice note is playable instead of a block of text");
 assert(api.stillUnread({ unreadCount: 2 }, null) === true, "an unread chat is still waiting");
 assert(api.stillUnread({ unreadCount: 0 }, null) === false, "a chat read on the phone is not shown after unlock");
 assert(api.stillUnread({ unreadCount: 3 }, { type: "revoked" }) === false, "a revoked message is closed");
@@ -356,6 +366,36 @@ assert(kind({ fromMe: true, type: "ptt", body: "" }) === null, "an outgoing voic
 assert(kind({ id: { fromMe: true, _serialized: "false_15551212@c.us_OUT" }, type: "ptt" }) === null, "an outgoing key stays quiet");
 assert(kind({ fromMe: function () { return true; } }) === null, "a fromMe method that returns true stays quiet");
 assert(kind({ fromMe: function () { return false; } }) === "direct", "a fromMe method that returns false still alerts");
+
+function outgoing(over) {
+  return Object.assign({
+    id: "true_15551212@c.us_OUT",
+    fromMe: true,
+    to: "15551212@c.us",
+    type: "chat",
+    body: "on my way",
+    t: now,
+  }, over || {});
+}
+assert(api.ownChat(outgoing(), ctx()) === "15551212@c.us", "a live outgoing text names the chat");
+assert(api.ownChat(outgoing({
+  id: "true_999@g.us_VOICE",
+  to: "999@g.us",
+  type: "ptt",
+  body: "",
+}), ctx()) === "999@g.us", "a live outgoing voice note names the group");
+assert(api.ownChat(outgoing({ fromMe: false, id: "true_15551212@c.us_PHONE" }), ctx()) === "15551212@c.us",
+  "a message synced from another device is an answer");
+assert(api.ownChat(incoming(), ctx()) === null, "an incoming message is not an answer");
+assert(api.ownChat(outgoing({ type: "ciphertext" }), ctx()) === null, "a ciphertext stub is not an answer yet");
+assert(api.ownChat(outgoing({ t: ready - 30_000 }), ctx()) === null, "an outgoing message from before catch-up is not an answer");
+assert(api.ownChat(outgoing({ t: now - api.REPLAY_MS - 1000 }), ctx()) === null, "an old outgoing replay is not an answer");
+assert(api.ownChat(outgoing({ id: "true_news@newsletter_N", to: "news@newsletter" }), ctx()) === null, "an outgoing newsletter is not an answer");
+assert(api.ownChat(outgoing({
+  id: "true_status@broadcast_S",
+  to: "status@broadcast",
+  isStatusV3: true,
+}), ctx()) === null, "an outgoing status is not an answer");
 assert(kind({ type: "ciphertext" }) === null, "an undecrypted message stays quiet");
 assert(kind({
   id: "false_999@g.us_BIT",
@@ -438,6 +478,44 @@ api.attach(already, {
 });
 already.emit("chat.new_message", incoming({ id: "false_15551212@c.us_NOW", t: clock }));
 assert(readyHits.join() === "direct", "an account that is already caught up listens immediately");
+
+const answered = fakeWpp(true);
+const settled = [];
+const answerAlerts = [];
+clock = now;
+api.attach(answered, {
+  now: () => clock,
+  selfIds: () => self,
+  emit: (hit) => answerAlerts.push(hit.kind),
+  settle: (chatId, at) => settled.push([chatId, at]),
+});
+const reply = outgoing({ id: "true_15551212@c.us_REPLY", t: clock });
+answered.emit("chat.new_message", reply);
+answered.emit("chat.new_message", reply);
+answered.emit("chat.new_message", outgoing({
+  id: "true_999@g.us_VOICE",
+  to: "999@g.us",
+  type: "ptt",
+  body: "",
+  t: clock,
+}));
+answered.emit("chat.new_message", incoming({ id: "false_15551212@c.us_STILL", t: clock }));
+answered.emit("chat.new_message", outgoing({ id: "true_15551212@c.us_LATER", type: "ciphertext", t: clock }));
+answered.emit("chat.new_message", outgoing({ id: "true_15551212@c.us_LATER", type: "chat", t: clock }));
+answered.emit("chat.new_message", outgoing({ id: "true_15551212@c.us_OLD", t: clock - api.REPLAY_MS - 1000 }));
+answered.emit("chat.new_message", outgoing({
+  id: "true_status@broadcast_S",
+  to: "status@broadcast",
+  isStatusV3: true,
+  t: clock,
+}));
+answered.emit("chat.new_message", outgoing({ id: "true_news@newsletter_N", to: "news@newsletter", t: clock }));
+assert(settled.length === 3
+  && settled[0][0] === "15551212@c.us" && settled[0][1] === clock
+  && settled[1][0] === "999@g.us" && settled[1][1] === clock
+  && settled[2][0] === "15551212@c.us" && settled[2][1] === clock,
+  "a live outgoing text or voice note settles that chat once, after ciphertext");
+assert(answerAlerts.join() === "direct", "an outgoing message does not alert, and an incoming one still does");
 
 const bundle = readFileSync(join(here, "wppconnect-wa.js"), "utf8");
 assert(bundle.includes("t.sendTextMessage=async function"), "wa-js can send a text message");

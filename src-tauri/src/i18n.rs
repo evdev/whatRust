@@ -247,6 +247,7 @@ static EN_TABLE: &[(&str, &str)] = &[
     ("Não foi possível enviar.", "Could not send."),
     ("O áudio tem mais de 2 MB.", "The voice note is larger than 2 MB."),
     ("O áudio é longo demais.", "The voice note is too long."),
+    ("Não foi possível reproduzir o áudio.", "Could not play the voice note."),
     ("Não foi possível preparar o áudio.", "The voice note could not be prepared."),
     ("O arquivo tem mais de 8 MB.", "The file is larger than 8 MB."),
     ("O WhatsApp ainda está abrindo. Tente de novo.", "WhatsApp is still opening. Try again."),

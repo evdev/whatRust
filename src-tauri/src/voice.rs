@@ -505,6 +505,13 @@ fn prepare_store(app: &AppHandle) {
     }
 }
 
+pub async fn lookup_for(app: &AppHandle, account: &str, id: String) -> Result<VoiceView, String> {
+    if !valid_message_id(&id) {
+        return Err("bad_id".into());
+    }
+    lookup_stored(app, account, id).await
+}
+
 /// A saved note, including a translation refresh. `missing` means there is no transcript yet.
 async fn lookup_stored(app: &AppHandle, account: &str, id: String) -> Result<VoiceView, String> {
     let settings = settings::load(app);

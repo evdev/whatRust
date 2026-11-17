@@ -19,6 +19,18 @@
         </button>
         <button id="close" type="button" aria-label="Close"></button>
       </header>
+      <div id="heard" hidden>
+        <div id="heard-player">
+          <button id="heard-play" type="button" aria-label="Play the voice note">
+            <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+            <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>
+          </button>
+          <span id="heard-progress"><i></i></span>
+          <span id="heard-duration"></span>
+        </div>
+        <p id="heard-transcript" hidden></p>
+        <audio id="heard-audio" hidden preload="none"></audio>
+      </div>
       <button id="body" type="button">
         <img id="incoming" alt="" hidden />
         <span id="body-text"></span>

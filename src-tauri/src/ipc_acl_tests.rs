@@ -61,6 +61,7 @@ const PAGE_COMMANDS: &[&str] = &[
     "mention_settled",
     "mention_filter",
     "mention_media",
+    "mention_heard",
 ];
 /// Commands only the local settings window may use.
 const SETTINGS_COMMANDS: &[&str] = &[
@@ -316,6 +317,8 @@ fn local_windows_keep_exactly_their_own_commands() {
     for cmd in [
         "mention_reply",
         "mention_card",
+        "mention_listen",
+        "mention_transcript",
         "mention_open",
         "mention_dismiss",
     ] {
@@ -330,5 +333,7 @@ fn local_windows_keep_exactly_their_own_commands() {
     }
     assert!(!allowed(&app, "mention-3", local, "mention_event"));
     assert!(!allowed(&app, "mention-3", local, "mention_media"));
+    assert!(!allowed(&app, "mention-3", local, "mention_heard"));
+    assert!(allowed(&app, "wa-default", PAGE, "mention_heard"));
     assert!(!allowed(&app, "settings", local, "mention_reply"));
 }

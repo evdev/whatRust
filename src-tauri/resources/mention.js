@@ -26,6 +26,10 @@
  *   WPP.chat.sendTextMessage(chatId, text, { quotedMsg: msgId }). The
  *   default send options set markIsRead, so that send also marks the chat
  *   read. WPP.chat.markIsRead(chatId) is the explicit form.
+ * - A live message from me in that chat closes its popups. chat.new_message
+ *   carries both a reply typed in this window and one synced from another
+ *   device. Opening the chat replays older messages; only a send at or
+ *   after the alert counts. Reading the chat does not close it.
  * - Status posts are out of this feature. A status@broadcast chat, an
  *   isStatusV3 message, and any other broadcast stay quiet.
  */
@@ -302,6 +306,23 @@
     };
   }
 
+  // A message this account just sent. The chat id is where the popup should
+  // close. A ciphertext stub is skipped so the decrypted copy can still close
+  // it. History replayed on open fails the same live check as an alert.
+  function ownChat(msg, ctx) {
+    if (!msg) return null;
+    ctx = ctx || {};
+    var id = messageId(msg);
+    if (!id || !fromMe(msg, id)) return null;
+    var type = String(field(msg, "type") || "").toLowerCase();
+    if (SKIP_TYPE[type]) return null;
+    if (!isLive(atMs(msg), ctx.readyAt, ctx.now)) return null;
+    var chat = chatOf(msg);
+    if (!chat || chat.host === "newsletter" || chat.host === "broadcast") return null;
+    if (isStatus(msg, chat)) return null;
+    return chat.serialized;
+  }
+
   function selfIdsFrom(wpp) {
     var conn = wpp && wpp.conn;
     if (!conn) return [];
@@ -319,7 +340,8 @@
 
   // Subscribe only once the account has caught up. readyAt is that moment,
   // so history replayed before it, and later replays older than two minutes,
-  // never classify as live. The same message id is emitted once.
+  // never classify as live. The same message id is emitted once. A live
+  // message from me settles that chat instead of alerting.
   function attach(wpp, hooks) {
     if (!wpp || typeof wpp.on !== "function" || !hooks) return false;
     if (typeof hooks.now !== "function" || typeof hooks.emit !== "function" || typeof hooks.selfIds !== "function") {
@@ -332,14 +354,25 @@
       var readyAt = Number(hooks.now()) || 0;
       var seen = Object.create(null);
       var order = [];
+      function remember(id) {
+        if (!id || seen[id]) return false;
+        seen[id] = true;
+        order.push(id);
+        if (order.length > SEEN_CAP) delete seen[order.shift()];
+        return true;
+      }
       wpp.on("chat.new_message", function (msg) {
+        var moment = hooks.now();
+        var own = ownChat(msg, { readyAt: readyAt, now: moment });
+        if (own) {
+          if (!remember(messageId(msg))) return;
+          if (typeof hooks.settle === "function") hooks.settle(own, atMs(msg));
+          return;
+        }
         var ids = [];
         try { ids = hooks.selfIds() || []; } catch (e) { ids = []; }
-        var hit = classify(msg, { selfIds: ids, readyAt: readyAt, now: hooks.now() });
-        if (!hit || seen[hit.msgId]) return;
-        seen[hit.msgId] = true;
-        order.push(hit.msgId);
-        if (order.length > SEEN_CAP) delete seen[order.shift()];
+        var hit = classify(msg, { selfIds: ids, readyAt: readyAt, now: moment });
+        if (!hit || !remember(hit.msgId)) return;
         hooks.emit(hit, msg);
       });
     }
@@ -513,14 +546,36 @@
     });
   }
 
+  function isVoice(msg) {
+    var type = String(field(msg, "type") || "").toLowerCase();
+    return type === "ptt" || type === "audio";
+  }
+
+  function voiceSeconds(msg) {
+    var raw = Number(field(msg, "duration"));
+    if (!isFinite(raw) || raw <= 0) raw = Number(field(field(msg, "mediaData"), "duration"));
+    if (!isFinite(raw) || raw <= 0) return 0;
+    if (raw > 1000) raw = raw / 1000;
+    return Math.max(0, Math.min(3600, Math.round(raw)));
+  }
+
   function mediaView(msg) {
+    if (isVoice(msg)) {
+      var caption = humanText(field(msg, "caption"));
+      return {
+        text: nameMentions(msg, caption).slice(0, 500),
+        preview: "",
+        voice: true,
+        seconds: voiceSeconds(msg),
+      };
+    }
     var media = field(msg, "mediaData");
     var preview = dataUrl(field(msg, "body"))
       || dataUrl(field(msg, "thumbnail"))
       || dataUrl(field(media, "preview"))
       || dataUrl(field(media, "thumbnail"));
     var text = humanText(field(msg, "caption")) || humanText(field(msg, "body"));
-    return { text: nameMentions(msg, text).slice(0, 500), preview: preview };
+    return { text: nameMentions(msg, text).slice(0, 500), preview: preview, voice: false, seconds: 0 };
   }
 
   function displayFrom(msg, hit) {
@@ -534,6 +589,8 @@
       senderName: personName(msg, hit && hit.senderId).slice(0, 120),
       body: media.text,
       preview: media.preview,
+      voice: media.voice,
+      seconds: media.seconds,
       at: atMs(msg),
     };
   }
@@ -557,6 +614,7 @@
   if (root.__WHATRUST_TEST) {
     root.__whatrustMentionApi = {
       classify: classify,
+      ownChat: ownChat,
       attach: attach,
       selfIdsFrom: selfIdsFrom,
       shouldSuppress: shouldSuppress,
@@ -686,6 +744,39 @@
     });
   };
 
+  function bytesToBase64(bytes) {
+    var binary = "";
+    var step = 0x2000;
+    for (var i = 0; i < bytes.length; i += step) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+    }
+    return btoa(binary);
+  }
+
+  // The popup asks for the note. WhatsApp already has the file; this only
+  // downloads it and hands the bytes back. Eight megabytes is the cap.
+  root.__whatrustMentionListen = function (msgId, label) {
+    function fail() {
+      invoke("mention_heard", { label: label, mime: "", data: "" }).catch(function () {});
+    }
+    var wpp = root.WPP;
+    if (!wpp || !wpp.chat || typeof wpp.chat.downloadMedia !== "function") {
+      fail();
+      return;
+    }
+    Promise.resolve(wpp.chat.downloadMedia(msgId)).then(function (blob) {
+      if (!blob || typeof blob.arrayBuffer !== "function") throw new Error("bad_audio");
+      var mime = blob.type || "";
+      return blob.arrayBuffer().then(function (buffer) {
+        return { mime: mime, buffer: buffer };
+      });
+    }).then(function (got) {
+      var bytes = new Uint8Array(got.buffer);
+      if (!bytes.length || bytes.length > 8 * 1024 * 1024) throw new Error("bad_audio");
+      return invoke("mention_heard", { label: label, mime: got.mime, data: bytesToBase64(bytes) });
+    }).catch(function () { fail(); });
+  };
+
   root.__whatrustMentionOpen = function (chatId) {
     var wpp = root.WPP;
     if (!wpp || !wpp.chat || typeof wpp.chat.openChatBottom !== "function") return;
@@ -702,6 +793,10 @@
     watching = attach(wpp, {
       now: function () { return Date.now(); },
       selfIds: function () { return selfIdsFrom(wpp); },
+      settle: function (chatId, at) {
+        if (!chatId) return;
+        invoke("mention_settled", { chatId: chatId, msgId: "", atMs: at || 0 }).catch(function () {});
+      },
       emit: function (hit, msg) {
         if (!wantsAlert(hit, prefs)) return;
         var view = displayFrom(msg || {}, hit);
@@ -714,6 +809,8 @@
           senderName: view.senderName,
           body: view.body,
           preview: view.preview,
+          voice: !!view.voice,
+          seconds: view.seconds || 0,
           atMs: view.at,
           mentions: !!hit.mentions,
           replies: !!hit.replies,
@@ -722,8 +819,10 @@
         }).catch(function () {});
       },
     });
-    // A visible popup stays while this chat is on screen. A revoked message
-    // does not. Read-on-the-phone is checked only for alerts parked by the lock.
+    // A visible popup stays while this chat is only opened or read. A message
+    // sent in it closes the popup, including one that arrives from another
+    // device. A revoked message closes too. Read-on-the-phone is checked only
+    // for alerts parked by the lock.
     if (watching && !ensureWatch.settled) {
       ensureWatch.settled = true;
       try {
@@ -731,7 +830,7 @@
           var id = payload && (payload.refId || payload.id);
           var text = typeof id === "string" ? id : widText(id);
           if (!text) return;
-          invoke("mention_settled", { chatId: "", msgId: text }).catch(function () {});
+          invoke("mention_settled", { chatId: "", msgId: text, atMs: 0 }).catch(function () {});
         });
       } catch (e) {
         ensureWatch.settled = false;

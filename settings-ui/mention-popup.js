@@ -39,7 +39,68 @@ async function load() {
     picture.hidden = true;
     picture.removeAttribute("src");
   }
-  text.textContent = card.body || (card.preview ? "" : "New message");
+  text.textContent = card.body || (card.preview || card.voice ? "" : "New message");
+  if (card.voice) showHeard(card);
+  if (card.voice && !card.body && !card.preview) document.getElementById("body").hidden = true;
+}
+
+let heardUrl = "";
+let heardLoading = false;
+let heardSeconds = 0;
+let transcriptTries = 0;
+let transcriptPlaceholder = false;
+
+function showHeard(card) {
+  heardSeconds = Number(card.seconds) || 0;
+  document.getElementById("heard").hidden = false;
+  document.getElementById("heard-duration").textContent = clockText(heardSeconds);
+  watchTranscript();
+}
+
+function paintHeard() {
+  const audio = document.getElementById("heard-audio");
+  const decoded = Number.isFinite(audio.duration) && audio.duration ? audio.duration : 0;
+  const duration = decoded || heardSeconds;
+  const ratio = duration ? Math.min(1, (audio.currentTime || 0) / duration) : 0;
+  document.querySelector("#heard-progress i").style.width = (ratio * 100) + "%";
+  const at = !decoded || (audio.paused && audio.currentTime < 0.2) ? duration : audio.currentTime;
+  document.getElementById("heard-duration").textContent = clockText(at);
+}
+
+function setTranscript(text, placeholder) {
+  const node = document.getElementById("heard-transcript");
+  transcriptPlaceholder = placeholder;
+  node.textContent = text;
+  node.hidden = false;
+}
+
+async function watchTranscript() {
+  let view;
+  try { view = await invoke("mention_transcript"); }
+  catch { return; }
+  const node = document.getElementById("heard-transcript");
+  if (!view || view.status === "disabled") {
+    if (transcriptPlaceholder || !node.textContent) node.hidden = true;
+    return;
+  }
+  if (view.status === "ready") {
+    const text = String(view.text || "").trim();
+    const translation = String(view.translation || "").trim();
+    setTranscript(
+      text ? (translation ? text + "\n" + translation : text) : "No speech recognized.",
+      false,
+    );
+    return;
+  }
+  // Missing means FluidVoice has not claimed the note yet. That can outlast
+  // the first few lookups, so keep asking until it is ready or the wait ends.
+  if (transcriptPlaceholder || !node.textContent) setTranscript("Transcribing…", true);
+  if (transcriptTries < 20) {
+    transcriptTries += 1;
+    setTimeout(watchTranscript, 2000);
+    return;
+  }
+  if (transcriptPlaceholder) node.hidden = true;
 }
 
 async function openChat() {
@@ -555,6 +616,75 @@ preview.addEventListener("ended", () => {
   play.classList.remove("playing");
   play.setAttribute("aria-label", "Play the voice note");
   paintPlayback();
+});
+
+function base64ToBytes(data) {
+  const binary = atob(data || "");
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+document.getElementById("heard-play").addEventListener("click", async () => {
+  const audio = document.getElementById("heard-audio");
+  const play = document.getElementById("heard-play");
+  if (audio.getAttribute("src") && !audio.paused) {
+    audio.pause();
+    play.classList.remove("playing");
+    play.setAttribute("aria-label", "Play the voice note");
+    paintHeard();
+    return;
+  }
+  if (!audio.getAttribute("src")) {
+    if (heardLoading) return;
+    heardLoading = true;
+    play.disabled = true;
+    showError("");
+    try {
+      const media = await invoke("mention_listen");
+      const bytes = base64ToBytes(media.data || "");
+      if (!bytes.length) throw new Error("Could not play the voice note.");
+      if (heardUrl) URL.revokeObjectURL(heardUrl);
+      heardUrl = URL.createObjectURL(new Blob([bytes], { type: media.mime || "audio/wav" }));
+      audio.src = heardUrl;
+    } catch (error) {
+      const message = String((error && error.message) || error || "");
+      showError(message.replace(/^Error:\s*/, "") || "Could not play the voice note.");
+      heardLoading = false;
+      play.disabled = false;
+      return;
+    }
+    heardLoading = false;
+    play.disabled = false;
+  }
+  try {
+    await audio.play();
+  } catch (error) {
+    showError("Could not play the voice note.");
+    return;
+  }
+  play.classList.add("playing");
+  play.setAttribute("aria-label", "Pause the voice note");
+  paintHeard();
+});
+document.getElementById("heard-progress").addEventListener("click", (event) => {
+  const audio = document.getElementById("heard-audio");
+  const bar = event.currentTarget;
+  if (!Number.isFinite(audio.duration) || !audio.duration) return;
+  const rect = bar.getBoundingClientRect();
+  const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+  audio.currentTime = ratio * audio.duration;
+  paintHeard();
+});
+const heardAudio = document.getElementById("heard-audio");
+heardAudio.addEventListener("timeupdate", paintHeard);
+heardAudio.addEventListener("loadedmetadata", paintHeard);
+heardAudio.addEventListener("ended", () => {
+  heardAudio.currentTime = 0;
+  const play = document.getElementById("heard-play");
+  play.classList.remove("playing");
+  play.setAttribute("aria-label", "Play the voice note");
+  paintHeard();
 });
 
 document.getElementById("open").addEventListener("click", openChat);

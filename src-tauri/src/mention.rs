@@ -25,11 +25,14 @@ const FILE_MAX: usize = 8 * 1024 * 1024;
 const VOICE_MAX: usize = 2 * 1024 * 1024;
 /// A few minutes of 16 kHz mono PCM, before it is encoded to a small Ogg file.
 const VOICE_WAV_MAX: usize = 8 * 1024 * 1024;
+/// An incoming voice note, still compressed, before it is turned into WAV.
+const LISTEN_MAX: usize = 8 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct Popups {
     inner: Mutex<Inner>,
     pending: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Result<(), String>>>>,
+    audio: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Result<Heard, String>>>>,
     filters: Mutex<HashMap<String, FilterWait>>,
     media: Mutex<HashMap<String, OutgoingMedia>>,
 }
@@ -58,6 +61,8 @@ struct Card {
     sender_name: String,
     body: String,
     preview: String,
+    voice: bool,
+    seconds: u32,
     at_ms: u64,
     sound: bool,
     account_name: String,
@@ -75,6 +80,8 @@ struct Held {
     sender_name: String,
     body: String,
     preview: String,
+    voice: bool,
+    seconds: u32,
     at_ms: u64,
     account_name: String,
     mentions: bool,
@@ -97,9 +104,17 @@ pub struct CardView {
     sender_name: String,
     body: String,
     preview: String,
+    voice: bool,
+    seconds: u32,
     at_ms: u64,
     account_name: String,
     sound: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct Heard {
+    mime: String,
+    data: String,
 }
 
 pub fn boot_script(app: &AppHandle, label: &str) -> String {
@@ -437,7 +452,11 @@ fn shown_body(value: &str) -> String {
         && compact
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='));
-    if blob { String::new() } else { text }
+    if blob {
+        String::new()
+    } else {
+        text
+    }
 }
 
 fn shown_preview(value: &str) -> String {
@@ -506,8 +525,20 @@ fn hold_drop_account(queue: &mut VecDeque<Held>, account: &str) {
     queue.retain(|held| held.account_label != account);
 }
 
-fn hold_drop_chat(queue: &mut VecDeque<Held>, account: &str, chat: &str) {
-    queue.retain(|held| !(held.account_label == account && held.chat_id == chat));
+/// `sent_at` of 0 drops every parked alert in the chat. A real send time
+/// keeps an alert that arrived after that send.
+fn hold_drop_chat(queue: &mut VecDeque<Held>, account: &str, chat: &str, sent_at: u64) {
+    queue.retain(|held| {
+        !(held.account_label == account
+            && held.chat_id == chat
+            && answered_by(held.at_ms, sent_at))
+    });
+}
+
+/// An alert is answered when this account sent in that chat at or after it.
+/// A missing send time answers every alert in the chat.
+fn answered_by(alert_at: u64, sent_at: u64) -> bool {
+    sent_at == 0 || alert_at <= sent_at
 }
 
 fn hold_drop_msg(queue: &mut VecDeque<Held>, account: &str, msg: &str) {
@@ -528,6 +559,44 @@ fn send_script(chat_id: &str, msg_id: &str, text: &str, popup: &str, kind: &str)
 fn open_script(chat_id: &str) -> String {
     let chat = serde_json::to_string(chat_id).unwrap_or_else(|_| "\"\"".into());
     format!("window.__whatrustMentionOpen&&window.__whatrustMentionOpen({chat})")
+}
+
+fn listen_script(msg_id: &str, label: &str) -> String {
+    let msg = serde_json::to_string(msg_id).unwrap_or_else(|_| "\"\"".into());
+    let label = serde_json::to_string(label).unwrap_or_else(|_| "\"\"".into());
+    format!("window.__whatrustMentionListen&&window.__whatrustMentionListen({msg},{label})")
+}
+
+fn ensure_script(msg_id: &str) -> String {
+    let msg = serde_json::to_string(msg_id).unwrap_or_else(|_| "\"\"".into());
+    format!("window.__whatrustVoiceEnsure&&window.__whatrustVoiceEnsure({msg})")
+}
+
+fn playable(bytes: &[u8]) -> Result<(String, Vec<u8>), String> {
+    let refuse = || tr("Não foi possível reproduzir o áudio.").into_owned();
+    if bytes.starts_with(b"OggS") {
+        let wav = crate::voice_ogg::wav_from_ogg(bytes).map_err(|err| {
+            crate::dlog::log(&format!("mention: voice decode {}", err.code()));
+            if err.code() == "too_long" {
+                tr("O áudio é longo demais.").into_owned()
+            } else {
+                refuse()
+            }
+        })?;
+        return Ok(("audio/wav".into(), wav));
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE" {
+        return Ok(("audio/wav".into(), bytes.to_vec()));
+    }
+    if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
+        return Ok(("audio/mp4".into(), bytes.to_vec()));
+    }
+    if bytes.starts_with(b"ID3")
+        || (bytes.len() > 1 && bytes[0] == 0xff && (bytes[1] & 0xe0) == 0xe0)
+    {
+        return Ok(("audio/mpeg".into(), bytes.to_vec()));
+    }
+    Err(refuse())
 }
 
 fn popups(app: &AppHandle) -> tauri::State<'_, Popups> {
@@ -557,6 +626,8 @@ pub fn mention_event(
     sender_name: String,
     body: String,
     preview: String,
+    voice: bool,
+    seconds: u32,
     at_ms: u64,
     mentions: bool,
     replies: bool,
@@ -582,6 +653,8 @@ pub fn mention_event(
         sender_name: shown_name(&sender_name),
         body: shown_body(&body),
         preview: shown_preview(&preview),
+        voice,
+        seconds: seconds.min(3600),
         at_ms: millis(at_ms),
         account_name: account_name(&app, &account),
         mentions,
@@ -634,10 +707,135 @@ pub fn mention_card(window: tauri::Webview, app: AppHandle) -> Result<CardView, 
         sender_name: card.sender_name.clone(),
         body: card.body.clone(),
         preview: card.preview.clone(),
+        voice: card.voice,
+        seconds: card.seconds,
         at_ms: card.at_ms,
         account_name: card.account_name.clone(),
         sound: card.sound,
     })
+}
+
+#[tauri::command]
+pub async fn mention_listen(window: tauri::Webview, app: AppHandle) -> Result<Heard, String> {
+    if !local_popup(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    let label = window.label().to_string();
+    let (account, msg_id) = {
+        let state = popups(&app);
+        let inner = lock::guard(&state.inner);
+        let card = inner.cards.get(&label).ok_or("closed")?;
+        if !card.voice {
+            return Err(tr("Não foi possível reproduzir o áudio.").into_owned());
+        }
+        (card.account_label.clone(), card.msg_id.clone())
+    };
+    {
+        let state = popups(&app);
+        if lock::guard(&state.audio).contains_key(&label) {
+            return Err(tr("Não foi possível reproduzir o áudio.").into_owned());
+        }
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let state = popups(&app);
+        lock::guard(&state.audio).insert(label.clone(), tx);
+    }
+    if let Err(err) = ask_for_audio(&app, &account, &msg_id, &label).await {
+        let state = popups(&app);
+        lock::guard(&state.audio).remove(&label);
+        return Err(err);
+    }
+    match tokio::time::timeout(Duration::from_secs(25), rx).await {
+        Ok(Ok(result)) => result,
+        _ => {
+            let state = popups(&app);
+            lock::guard(&state.audio).remove(&label);
+            Err(tr("Não foi possível reproduzir o áudio.").into_owned())
+        }
+    }
+}
+
+#[tauri::command]
+pub fn mention_heard(
+    window: tauri::Webview,
+    app: AppHandle,
+    label: String,
+    mime: String,
+    data: String,
+) -> Result<(), String> {
+    crate::integration::remote(&window)?;
+    let state = popups(&app);
+    let Some(tx) = lock::guard(&state.audio).remove(&label) else {
+        return Ok(());
+    };
+    let account = {
+        let inner = lock::guard(&state.inner);
+        inner
+            .cards
+            .get(&label)
+            .map(|card| card.account_label.clone())
+    };
+    let finish = |result: Result<Heard, String>| {
+        let _ = tx.send(result);
+    };
+    if account.as_deref() != Some(window.label()) {
+        finish(Err(tr("Não foi possível reproduzir o áudio.").into_owned()));
+        return Ok(());
+    }
+    let _ = mime;
+    if data.is_empty() || data.len() > LISTEN_MAX / 3 * 4 + 8 {
+        finish(Err(tr("Não foi possível reproduzir o áudio.").into_owned()));
+        return Ok(());
+    }
+    let bytes = match decode_base64(&data) {
+        Ok(bytes) if bytes.len() <= LISTEN_MAX => bytes,
+        _ => {
+            finish(Err(tr("Não foi possível reproduzir o áudio.").into_owned()));
+            return Ok(());
+        }
+    };
+    finish(playable(&bytes).map(|(mime, bytes)| Heard {
+        mime,
+        data: crate::window::base64_encode(&bytes),
+    }));
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn mention_transcript(
+    window: tauri::Webview,
+    app: AppHandle,
+) -> Result<crate::voice::VoiceView, String> {
+    if !local_popup(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    let label = window.label().to_string();
+    let (account_label, msg_id, voice) = {
+        let state = popups(&app);
+        let inner = lock::guard(&state.inner);
+        let card = inner.cards.get(&label).ok_or("closed")?;
+        (card.account_label.clone(), card.msg_id.clone(), card.voice)
+    };
+    if !voice {
+        return Ok(crate::voice::VoiceView {
+            id: msg_id,
+            status: "disabled".into(),
+            text: String::new(),
+            translation: None,
+            notice: None,
+        });
+    }
+    let account = account_id_from_label(&account_label);
+    let view = crate::voice::lookup_for(&app, &account, msg_id.clone()).await?;
+    if view.status == "missing" {
+        if let Some(page) = app.get_webview(&account_label) {
+            let _ = page.eval(ensure_script(&msg_id));
+        }
+    }
+    Ok(view)
 }
 
 #[tauri::command]
@@ -836,13 +1034,17 @@ pub fn mention_dismiss(window: tauri::Webview, app: AppHandle) -> Result<(), Str
     Ok(())
 }
 
-/// The page reports a chat was read (`msg_id` empty) or one message was revoked.
+/// The page reports one message revoked (`msg_id` set), or a message this
+/// account sent in `chat_id` at `at_ms`. A send closes popups for that chat
+/// that are not newer than the send. `at_ms` of 0 drops the whole chat, which
+/// is the path with no send time. An empty chat and message drops the account.
 #[tauri::command]
 pub fn mention_settled(
     window: tauri::Webview,
     app: AppHandle,
     chat_id: String,
     msg_id: String,
+    at_ms: u64,
 ) -> Result<(), String> {
     crate::integration::remote(&window)?;
     let account = window.label().to_string();
@@ -852,7 +1054,7 @@ pub fn mention_settled(
     if !msg_id.is_empty() && !plausible_id(&msg_id) {
         return Ok(());
     }
-    settle(&app, &account, &chat_id, &msg_id);
+    settle(&app, &account, &chat_id, &msg_id, millis(at_ms));
     Ok(())
 }
 
@@ -930,6 +1132,8 @@ fn stage(app: &AppHandle, held: Held, sound: bool) -> String {
             sender_name: held.sender_name,
             body: held.body,
             preview: held.preview,
+            voice: held.voice,
+            seconds: held.seconds,
             at_ms: held.at_ms,
             sound,
             account_name: held.account_name,
@@ -971,6 +1175,8 @@ pub fn on_lock(app: &AppHandle) {
                     sender_name: card.sender_name,
                     body: card.body,
                     preview: card.preview,
+                    voice: card.voice,
+                    seconds: card.seconds,
                     at_ms: card.at_ms,
                     account_name: card.account_name,
                     mentions: card.mentions,
@@ -988,6 +1194,10 @@ pub fn on_lock(app: &AppHandle) {
         let _ = tx.send(Err(tr("Não foi possível enviar.").into_owned()));
     }
     lock::guard(&state.filters).clear();
+    let audio = std::mem::take(&mut *lock::guard(&state.audio));
+    for (_, tx) in audio {
+        let _ = tx.send(Err(tr("Não foi possível reproduzir o áudio.").into_owned()));
+    }
     for held in parked.into_iter().rev() {
         let mut inner = lock::guard(&state.inner);
         hold_push(&mut inner.waiting, held, Instant::now());
@@ -1010,17 +1220,17 @@ pub fn on_unlock(app: &AppHandle) {
 }
 
 pub fn drop_account(app: &AppHandle, label: &str) {
-    settle(app, label, "", "");
+    settle(app, label, "", "", 0);
 }
 
-fn settle(app: &AppHandle, account: &str, chat_id: &str, msg_id: &str) {
+fn settle(app: &AppHandle, account: &str, chat_id: &str, msg_id: &str, sent_at: u64) {
     let labels = {
         let state = popups(app);
         let mut inner = lock::guard(&state.inner);
         if msg_id.is_empty() && chat_id.is_empty() {
             hold_drop_account(&mut inner.waiting, account);
         } else if msg_id.is_empty() {
-            hold_drop_chat(&mut inner.waiting, account, chat_id);
+            hold_drop_chat(&mut inner.waiting, account, chat_id, sent_at);
         } else {
             hold_drop_msg(&mut inner.waiting, account, msg_id);
         }
@@ -1032,7 +1242,7 @@ fn settle(app: &AppHandle, account: &str, chat_id: &str, msg_id: &str) {
                     && if msg_id.is_empty() && chat_id.is_empty() {
                         true
                     } else if msg_id.is_empty() {
-                        card.chat_id == chat_id
+                        card.chat_id == chat_id && answered_by(card.at_ms, sent_at)
                     } else {
                         card.msg_id == msg_id
                     }
@@ -1199,6 +1409,27 @@ fn fail_pending(app: &AppHandle, label: &str) {
     }
 }
 
+fn fail_audio(app: &AppHandle, label: &str) {
+    let state = popups(app);
+    let tx = lock::guard(&state.audio).remove(label);
+    if let Some(tx) = tx {
+        let _ = tx.send(Err(tr("Não foi possível reproduzir o áudio.").into_owned()));
+    }
+}
+
+async fn ask_for_audio(
+    app: &AppHandle,
+    account: &str,
+    msg_id: &str,
+    label: &str,
+) -> Result<(), String> {
+    let Some(view) = app.get_webview(account) else {
+        return Err(tr("O WhatsApp ainda está abrindo. Tente de novo.").into_owned());
+    };
+    view.eval(listen_script(msg_id, label))
+        .map_err(|_| tr("Não foi possível reproduzir o áudio.").to_string())
+}
+
 fn present(app: &AppHandle, label: &str) {
     evict_overflow(app);
     if app.get_webview_window(label).is_some() {
@@ -1287,6 +1518,7 @@ fn forget(app: &AppHandle, label: &str, fill: bool) {
     inner.order.retain(|item| item != label);
     drop(inner);
     fail_pending(app, label);
+    fail_audio(app, label);
     let state = popups(app);
     lock::guard(&state.media).remove(label);
     layout(app);
@@ -1354,7 +1586,8 @@ fn reveal_account(app: &AppHandle, label: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        boot_script_from, hold_push, popup_origin, prepare_reply, release_of, reply_text,
+        answered_by, boot_script_from, hold_drop_chat, hold_push, popup_origin, prepare_reply,
+        release_of, reply_text,
         send_script, shown_body, shown_name, shown_preview, Held, Release, FILE_MAX, POPUP_H,
         POPUP_W,
     };
@@ -1431,6 +1664,8 @@ mod tests {
             sender_name: "Ada".into(),
             body: "hello".into(),
             preview: String::new(),
+            voice: false,
+            seconds: 0,
             at_ms: 0,
             account_name: String::new(),
             mentions: true,
@@ -1469,6 +1704,35 @@ mod tests {
                 .count()
                 == 1
         );
+    }
+
+    #[test]
+    fn a_reply_closes_alerts_from_that_moment_or_earlier() {
+        assert!(answered_by(1_000, 1_000));
+        assert!(answered_by(999, 1_000));
+        assert!(!answered_by(1_001, 1_000));
+        assert!(answered_by(9_000, 0));
+        let now = Instant::now();
+        let mut older = sample("wa-default", "false_1@g.us_old", now);
+        older.at_ms = 1_000;
+        let mut same = sample("wa-default", "false_1@g.us_same", now);
+        same.at_ms = 2_000;
+        let mut newer = sample("wa-default", "false_1@g.us_new", now);
+        newer.at_ms = 3_000;
+        let mut other = sample("wa-default", "false_2@g.us_other", now);
+        other.chat_id = "2@g.us".into();
+        other.at_ms = 1_000;
+        let mut queue = VecDeque::new();
+        queue.push_back(older);
+        queue.push_back(same);
+        queue.push_back(newer);
+        queue.push_back(other);
+        hold_drop_chat(&mut queue, "wa-default", "1@g.us", 2_000);
+        let left: Vec<_> = queue.iter().map(|held| held.msg_id.as_str()).collect();
+        assert_eq!(left, ["false_1@g.us_new", "false_2@g.us_other"]);
+        hold_drop_chat(&mut queue, "wa-default", "1@g.us", 0);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].chat_id, "2@g.us");
     }
 
     #[test]

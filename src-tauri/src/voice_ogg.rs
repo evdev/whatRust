@@ -5,7 +5,8 @@
 //! webview can produce, usually MP4 on macOS, and converts that to WAV before
 //! it gets here. This module encodes the WAV and muxes a minimal Ogg stream.
 
-use opus_rs::{Application, OpusEncoder};
+use opus_rs::{Application, OpusDecoder, OpusEncoder};
+use std::mem::MaybeUninit;
 
 const RATE: u32 = 16_000;
 const FRAME: usize = 320;
@@ -18,6 +19,7 @@ pub enum VoiceError {
     NotPcm,
     Empty,
     Encode,
+    TooLong,
 }
 
 impl VoiceError {
@@ -26,6 +28,7 @@ impl VoiceError {
             Self::NotPcm => "not_pcm",
             Self::Empty => "empty",
             Self::Encode => "encode",
+            Self::TooLong => "too_long",
         }
     }
 }
@@ -69,8 +72,92 @@ pub fn ogg_opus_from_wav(wav: &[u8]) -> Result<Vec<u8>, VoiceError> {
     Ok(out)
 }
 
+/// Decode an Ogg Opus voice note to 16 kHz mono WAV. The popup's webview plays
+/// WAV; it does not play the Ogg Opus file WhatsApp stores.
+pub fn wav_from_ogg(data: &[u8]) -> Result<Vec<u8>, VoiceError> {
+    let packets = ogg_packets(data)?;
+    let mut audio = Vec::new();
+    let mut head = false;
+    for packet in packets {
+        if packet.starts_with(b"OpusHead") {
+            head = true;
+            continue;
+        }
+        if packet.starts_with(b"OpusTags") || packet.len() <= 1 {
+            continue;
+        }
+        audio.push(packet);
+    }
+    if !head || audio.is_empty() {
+        return Err(VoiceError::NotPcm);
+    }
+    let mut slot = Box::new(MaybeUninit::<OpusDecoder>::uninit());
+    let decoder =
+        OpusDecoder::init(slot.as_mut(), RATE as i32, 1).map_err(|_| VoiceError::Encode)?;
+    let mut pcm = vec![0f32; 2_880];
+    let mut samples = Vec::new();
+    for packet in &audio {
+        // A comment or padding packet in the middle of a note is not fatal.
+        let Ok(n) = decoder.decode(packet, pcm.len(), &mut pcm) else {
+            continue;
+        };
+        let n = n.min(pcm.len());
+        if samples.len().saturating_add(n) > RATE as usize * 60 * 6 {
+            return Err(VoiceError::TooLong);
+        }
+        for sample in &pcm[..n] {
+            let clipped = sample.clamp(-1.0, 1.0);
+            samples.push((clipped * i16::MAX as f32) as i16);
+        }
+    }
+    if samples.is_empty() {
+        return Err(VoiceError::Empty);
+    }
+    Ok(pcm_wav(&samples, RATE, 1))
+}
+
+fn ogg_packets(data: &[u8]) -> Result<Vec<Vec<u8>>, VoiceError> {
+    let mut packets = Vec::new();
+    let mut partial = Vec::new();
+    let mut i = 0usize;
+    while i + 27 <= data.len() {
+        if &data[i..i + 4] != b"OggS" {
+            return Err(VoiceError::NotPcm);
+        }
+        let segs = data[i + 26] as usize;
+        let table_end = i + 27 + segs;
+        if table_end > data.len() {
+            return Err(VoiceError::NotPcm);
+        }
+        let table = &data[i + 27..table_end];
+        let payload: usize = table.iter().map(|n| *n as usize).sum();
+        let end = table_end + payload;
+        if end > data.len() {
+            return Err(VoiceError::NotPcm);
+        }
+        let mut offset = table_end;
+        for &lace in table {
+            let n = lace as usize;
+            partial.extend_from_slice(&data[offset..offset + n]);
+            offset += n;
+            if lace < 255 {
+                packets.push(std::mem::take(&mut partial));
+            }
+        }
+        i = end;
+    }
+    // A packet that ran off the last page is truncated. A few trailing bytes
+    // after a finished page show up on some voice notes and are not audio.
+    if !partial.is_empty() {
+        return Err(VoiceError::NotPcm);
+    }
+    if i < data.len() && data[i..].starts_with(b"OggS") {
+        return Err(VoiceError::NotPcm);
+    }
+    Ok(packets)
+}
+
 /// 16-bit little-endian PCM in a plain RIFF WAVE container.
-#[cfg(test)]
 pub(crate) fn pcm_wav(samples: &[i16], rate: u32, channels: u16) -> Vec<u8> {
     let channels = channels.max(1);
     let data_bytes = samples.len() * 2;
@@ -298,6 +385,16 @@ mod tests {
             energy += pcm[..n].iter().map(|sample| sample * sample).sum::<f32>();
         }
         assert!(energy > 0.01, "decoded energy {energy}");
+        let wav = wav_from_ogg(&ogg).unwrap();
+        assert!(wav.starts_with(b"RIFF"));
+        assert!(wav.len() > 44);
+        let mut padded = ogg.clone();
+        padded.extend_from_slice(&[0, 0, 0, 0]);
+        assert!(wav_from_ogg(&padded).unwrap().starts_with(b"RIFF"));
+        assert_eq!(
+            wav_from_ogg(&ogg[..ogg.len() - 1]).unwrap_err(),
+            VoiceError::NotPcm
+        );
     }
 
     #[test]

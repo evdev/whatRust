@@ -55,7 +55,8 @@
     "allow-mention-sent",
     "allow-mention-settled",
     "allow-mention-filter",
-    "allow-mention-media"
+    "allow-mention-media",
+    "allow-mention-heard"
   ],
   "webviews": [
     "wa-*"

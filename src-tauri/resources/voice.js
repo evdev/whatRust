@@ -727,6 +727,32 @@
     videoQueue.add(id);
   };
 
+  var prefsReady = false;
+
+  root.__whatrustVoiceEnsure = function (id) {
+    if (!isMessageId(id)) return;
+    var tries = 0;
+    function kick() {
+      if (prefs.enabled) {
+        var view = known[id];
+        // A note that failed before its media was ready has to be able to
+        // start again when the popup asks. consider() otherwise keeps the error.
+        if (view && view.status === "error") {
+          delete known[id];
+          delete retryAt[id];
+          queue.forget(id);
+        }
+        consider(id);
+        return;
+      }
+      if (!prefsReady && tries < 20) {
+        tries += 1;
+        setTimeout(kick, 400);
+      }
+    }
+    whenReady(kick);
+  };
+
   root.__whatrustVoiceRetry = function (id) {
     var view = known[id];
     var target = view && view.media === "video" ? videoQueue : queue;
@@ -1002,6 +1028,7 @@
   }
 
   root.__whatrustVoicePrefs = function (next) {
+    prefsReady = true;
     released.length = 0;
     if (next && typeof next === "object") {
       prefs = {
