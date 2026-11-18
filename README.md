@@ -184,8 +184,8 @@ Installs the AppImage to `~/.local/bin` on Linux (with an application-menu entry
 
 **Windows (this fork)** — download the installer for your PC:
 
-- [Windows ARM64 setup](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.6.13_arm64-setup.exe) — Snapdragon and other ARM64 PCs
-- [Windows x64 setup](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.6.13_x64-setup.exe) — Intel and AMD PCs
+- [Windows ARM64 setup](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.6.14_arm64-setup.exe) — Snapdragon and other ARM64 PCs
+- [Windows x64 setup](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.6.14_x64-setup.exe) — Intel and AMD PCs
 
 Or let PowerShell choose the architecture and verify its SHA-256 before opening
 the setup program:

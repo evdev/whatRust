@@ -6,7 +6,9 @@ $env:TEMP = Join-Path $env:TEMP 'whatrust-bootstrap-test'
 New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
 $source = Get-Content (Join-Path $sourceDir 'install.ps1') -Raw
 foreach ($testArch in @('arm64', 'x64')) {
-  $script:expectedFile = "whatRust_0.6.13_${testArch}-setup.exe"
+  $installer = @(Get-ChildItem -LiteralPath (Join-Path $sourceDir 'installers') -Filter "*_${testArch}-setup.exe")
+  if ($installer.Count -ne 1) { throw "Expected one installer for $testArch" }
+  $script:expectedFile = $installer[0].Name
   $script:started = $false
   function Invoke-WebRequest {
     param($Uri, $OutFile, [switch]$UseBasicParsing)
