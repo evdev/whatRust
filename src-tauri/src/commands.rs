@@ -43,6 +43,18 @@ pub fn notify(
     crate::notify::from_page(&app, window.label(), &title, &body, icon.as_deref(), epoch);
 }
 
+/// Synchronize the account page privacy setting with native notification delivery.
+#[tauri::command]
+pub fn set_notification_privacy(window: tauri::Webview, app: tauri::AppHandle, masked: bool) {
+    if crate::integration::remote(&window).is_ok() {
+        app.state::<crate::notify::Recent>()
+            .set_privacy(window.label(), masked);
+        if masked {
+            crate::mention::drop_account(&app, window.label());
+        }
+    }
+}
+
 /// The sender's picture for a notification WebView2 raised itself (Windows
 /// native path). bridge.js converts WhatsApp's `blob:`/`https:` icon to a small
 /// PNG, which Rust cannot fetch, and sends it here; it is paired with the held
@@ -172,6 +184,11 @@ pub struct SettingsView {
     /// The tiling window manager this Linux session runs (Hyprland, Sway,
     /// ...), shown next to the title-bar setting; `None` elsewhere.
     pub tiling_wm: Option<String>,
+    /// Linux: this run renders in software (Settings → Rendering, or an old GPU).
+    pub software_rendering: bool,
+    /// Linux: the GPU is too old for WebKit's GPU compositor, so `auto` already
+    /// renders in software.
+    pub legacy_gpu: bool,
     /// The proxy URL the running webviews were created with (`""` = none). When
     /// it differs from the saved settings, a restart is pending.
     pub proxy_in_use: String,
@@ -206,6 +223,14 @@ pub fn get_settings(window: tauri::Webview, app: tauri::AppHandle) -> Result<Set
         geniex_transcription: cfg!(all(windows, target_arch = "aarch64")),
         menubar_supported: crate::menubar::supported(),
         tiling_wm: crate::decorations::tiling_wm(),
+        #[cfg(target_os = "linux")]
+        software_rendering: crate::gpu::software_rendering_active(),
+        #[cfg(not(target_os = "linux"))]
+        software_rendering: false,
+        #[cfg(target_os = "linux")]
+        legacy_gpu: crate::gpu::legacy_gpu_detected(),
+        #[cfg(not(target_os = "linux"))]
+        legacy_gpu: false,
         proxy_in_use: crate::proxy::in_use(),
         proxy_supported: crate::proxy::engine_supported(),
         single_window_active: crate::sessions::enabled(),
@@ -394,6 +419,67 @@ pub async fn choose_app_icon(
     Ok(true)
 }
 
+/// Store a profile photo for an account. The settings page sends a small square
+/// PNG it made from the user's PNG/JPEG; it is validated again here.
+#[tauri::command]
+pub fn set_account_photo(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+    id: String,
+    png: Vec<u8>,
+) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    let _guard = accounts::lock_mutations();
+    if !accounts::load(&app).accounts.iter().any(|a| a.id == id) {
+        return Err("unknown account".into());
+    }
+    crate::accountphoto::set(&app, &id, &png)?;
+    crate::appicon::apply_account(&app, &id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_account_photo(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    crate::accountphoto::clear(&app, &id);
+    crate::appicon::apply_account(&app, &id);
+    Ok(())
+}
+
+/// Open `https://github.com/<login>` in the browser (About page credits). The
+/// address is built here from a validated login, never taken from the page.
+#[tauri::command]
+pub fn open_contributor(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+    login: String,
+) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    let valid = !login.is_empty()
+        && login.len() <= 39
+        && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if !valid {
+        return Err("invalid login".into());
+    }
+    let url =
+        tauri::Url::parse(&format!("https://github.com/{login}")).map_err(|e| e.to_string())?;
+    crate::opener::open_url(&app, url);
+    Ok(())
+}
+
 /// Go back to the built-in icon and delete the stored copy.
 #[tauri::command]
 pub fn reset_app_icon(window: tauri::Webview, app: tauri::AppHandle) -> Result<(), String> {
@@ -520,6 +606,8 @@ pub struct AccountView {
     pub open: bool,
     pub is_default: bool,
     pub detached: bool,
+    /// Profile photo as a `data:` URL, when the user picked one.
+    pub photo: Option<String>,
 }
 
 fn account_views(app: &tauri::AppHandle) -> Vec<AccountView> {
@@ -540,6 +628,7 @@ fn account_views(app: &tauri::AppHandle) -> Vec<AccountView> {
                     .get_webview(&accounts::window_label(&a.id))
                     .is_some_and(|v| v.window().label().starts_with("detached-")),
             is_default: accounts::startup_account(&f).is_some_and(|startup| startup.id == a.id),
+            photo: crate::accountphoto::data_url(app, &a.id),
         })
         .collect();
     views.sort_by_key(|v| v.order);
@@ -743,6 +832,7 @@ pub async fn add_account(
         open: true,
         is_default,
         detached: false,
+        photo: None,
     })
 }
 
@@ -801,6 +891,7 @@ pub async fn remove_account(
         crate::settings::remove_mention_account(&mut mention_settings, &removed.id);
         crate::settings::save(&app, &mention_settings).map_err(|err| err.to_string())?;
     }
+    crate::accountphoto::clear(&app, &removed.id);
 
     // If the removed account was the active one, point at a surviving account
     // so toggle/show don't target a window that no longer exists. (On Windows

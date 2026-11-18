@@ -142,6 +142,14 @@ pub struct Settings {
     /// fallback buttons do nothing useful; `show` / `hide` force it.
     /// Ignored on macOS and Windows. See `decorations`.
     pub title_bar: String,
+    /// Linux: `auto` uses the GPU, except on GPUs too old for WebKit's GPU
+    /// compositor; `software` always renders in software (issue #87). Read at
+    /// startup, so a change applies after a restart. See `gpu`.
+    pub rendering: String,
+    /// Hide WhatsApp's "get the Windows/Mac app" prompts (issue #83). Read when
+    /// an account page is created, so a change applies after a restart. On by
+    /// default: both people in the issue asked for it.
+    pub hide_app_banner: bool,
 }
 
 pub const FLUIDVOICE_PORT_DEFAULT: u16 = 47_733;
@@ -213,6 +221,8 @@ impl Default for Settings {
             auto_update_install: true,
             chat_summary_consent: false,
             title_bar: crate::decorations::AUTO.to_string(),
+            rendering: RENDERING_AUTO.to_string(),
+            hide_app_banner: true,
         }
     }
 }
@@ -496,6 +506,18 @@ pub fn sanitize_agent_runs(value: u16) -> u16 {
     }
 }
 
+/// Settings → Rendering values (Linux; see `gpu`).
+pub const RENDERING_AUTO: &str = "auto";
+pub const RENDERING_SOFTWARE: &str = "software";
+
+/// Unknown rendering values fall back to `auto`.
+pub fn sanitize_rendering(value: &str) -> String {
+    match value {
+        RENDERING_SOFTWARE => value.to_string(),
+        _ => RENDERING_AUTO.to_string(),
+    }
+}
+
 /// Do two accelerator strings name the same key combination? Compared after
 /// parsing, so "CmdOrCtrl+Shift+B" and "Shift+CmdOrCtrl+B" match. Unparseable
 /// strings never match (registration reports those separately).
@@ -772,6 +794,7 @@ impl Settings {
         self.standin_agent_runs_per_hour = sanitize_agent_runs(self.standin_agent_runs_per_hour);
         self.download_dir = self.download_dir.filter(|d| !d.trim().is_empty());
         self.title_bar = crate::decorations::sanitize(&self.title_bar);
+        self.rendering = sanitize_rendering(&self.rendering);
         // Menu-bar-only mode needs WKWebView's inactive-scheduling policy
         // (macOS 14+). Dropping the flag here means a settings file or an
         // older build can never leave the app in a mode it cannot sustain.

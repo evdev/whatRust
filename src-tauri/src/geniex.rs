@@ -315,7 +315,9 @@ fn chunk_end(pcm: &[u8], start: usize) -> usize {
     let mut best_energy = u64::MAX;
     for at in (from..=to).step_by(STEP) {
         let energy: u64 = pcm[at..at + STEP]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|s| i16::from_le_bytes([s[0], s[1]]).unsigned_abs() as u64)
             .sum();
         if energy < best_energy

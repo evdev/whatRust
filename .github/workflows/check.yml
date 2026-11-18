@@ -136,6 +136,16 @@ jobs:
         if: matrix.js
         run: node src-tauri/resources/notifications.test.mjs
 
+      - name: privacy blur tests
+        run: node --test src-tauri/resources/privacy.test.mjs
+      - name: app-banner hook tests
+        run: node --test src-tauri/resources/upsell.test.mjs
+
+      # Linux video attach (WebKitGTK): blob media preload, canplaythrough,
+      # parking detached videos, refusing a video given to <img>.
+      - name: media.js tests
+        run: node src-tauri/resources/media.test.mjs
+
       - name: release-notes renderer tests (HTML in a release body stays text)
         if: matrix.js
         run: node settings-ui/notes.test.mjs

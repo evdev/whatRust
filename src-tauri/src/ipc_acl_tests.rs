@@ -20,6 +20,7 @@ const PAGE: &str = "https://web.whatsapp.com/";
 const PAGE_COMMANDS: &[&str] = &[
     "notify",
     "notification_icon",
+    "set_notification_privacy",
     "set_unread",
     "dlog",
     "open_download",
@@ -75,6 +76,9 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "choose_mention_sound",
     "reset_mention_sound",
     "preview_mention_sound",
+    "set_account_photo",
+    "remove_account_photo",
+    "open_contributor",
     "restart_app",
     "list_accounts",
     "add_account",

@@ -5,7 +5,7 @@
 identifier = "allow-whatsapp-bridge"
 description = "Forward notifications, unread titles and diagnostics from WhatsApp account windows."
 commands.allow = [
-  "notify", "notification_icon", "set_unread", "dlog", "switcher_accounts", "switch_account", "reload_account_page", "zoom_step",
+  "notify", "notification_icon", "set_notification_privacy", "set_unread", "dlog", "switcher_accounts", "switch_account", "reload_account_page", "zoom_step",
   "voice_prefs", "voice_lookup", "transcribe_voice", "transcribe_video", "summarize_voice", "voice_transcripts",
   "chat_summary_consent", "summarize_chat", "chat_summary_save", "chat_summaries", "chat_summary_delete",
   "todo_list", "todo_add", "todo_update", "todo_toggle_done", "todo_delete",
@@ -20,7 +20,7 @@ identifier = "allow-settings-commands"
 description = "Manage settings and accounts from the bundled settings window."
 commands.allow = [
   "get_settings", "set_settings", "open_settings", "pick_download_dir", "choose_app_icon",
-  "reset_app_icon", "list_accounts",
+  "reset_app_icon", "set_account_photo", "remove_account_photo", "open_contributor", "list_accounts",
   "add_account", "remove_account", "rename_account", "open_account", "set_default_account",
   "get_lock_status", "set_app_lock_password", "change_app_lock_password",
   "disable_app_lock", "set_app_lock_options", "set_biometric_enabled", "lock_app",

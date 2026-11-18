@@ -1,6 +1,6 @@
 const invoke = window.__TAURI__.core.invoke;
 const LANGS = ["pt-BR", "en"];
-const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "standin_enabled"];
+const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "standin_enabled", "hide_app_banner"];
 const STANDIN_BACKENDS = ["api", "claude_cli", "grok_cli", "codex_cli", "hermes", "grok_bot"];
 const AI_PROVIDERS = ["openrouter", "gemini", "anthropic"];
 const LIST_PROVIDERS = ["gemini", "anthropic"];
@@ -267,6 +267,13 @@ async function load() {
   document.getElementById("title_bar_subtitle").textContent = s.tiling_wm
     ? t("Detected: {0}. In automatic mode the bar is hidden.", [s.tiling_wm])
     : "Tiling window managers such as Hyprland don't use a title bar.";
+  // Rendering (Linux, issue #87): software rendering for GPUs too old for
+  // WebKit's GPU compositor. Read at startup, so changes apply after a restart.
+  document.getElementById("rendering_row").hidden = s.platform !== "linux";
+  document.getElementById("rendering").value = s.rendering === "software" ? "software" : "auto";
+  document.getElementById("rendering_subtitle").textContent = s.legacy_gpu
+    ? t("Old graphics card detected: Automatic already renders without the GPU.")
+    : "Use Compatible if the window stays blank on an old graphics card. Applies after restarting whatRust.";
   if (/Win/.test(navigator.platform || navigator.userAgent)) {
     const startupRow = document.getElementById("start_minimized").closest("label");
     startupRow.querySelector(".row-title").textContent = "Start minimized with Windows";
@@ -296,8 +303,8 @@ async function load() {
   } else {
     swNote.textContent = SINGLE_WINDOW_SUBTITLE;
   }
-  document.getElementById("hotkey").value = s.hotkey || "CmdOrCtrl+Shift+W";
-  document.getElementById("blur_hotkey").value = s.blur_hotkey || "CmdOrCtrl+Shift+B";
+  document.getElementById("hotkey").value = window.HotkeyFmt.toDisplay(s.hotkey || "CmdOrCtrl+Shift+W");
+  document.getElementById("blur_hotkey").value = window.HotkeyFmt.toDisplay(s.blur_hotkey || "CmdOrCtrl+Shift+B");
   selectNearestZoom(Number.isFinite(s.zoom) ? s.zoom : ZOOM_DEFAULT);
   const lang = LANGS.includes(s.language) ? s.language : "en";
   document.getElementById("language").value = lang;
@@ -453,11 +460,12 @@ async function save() {
     const el = document.getElementById(f);
     if (el) s[f] = el.checked;
   }
-  const hk = document.getElementById("hotkey").value.trim();
+  const hk = window.HotkeyFmt.fromDisplay(document.getElementById("hotkey").value.trim());
   s.hotkey = hk || "CmdOrCtrl+Shift+W";
-  s.blur_hotkey = document.getElementById("blur_hotkey").value.trim() || "CmdOrCtrl+Shift+B";
+  s.blur_hotkey = window.HotkeyFmt.fromDisplay(document.getElementById("blur_hotkey").value.trim()) || "CmdOrCtrl+Shift+B";
   s.zoom = parseFloat(document.getElementById("zoom").value) || ZOOM_DEFAULT;
   s.title_bar = document.getElementById("title_bar").value || "auto";
+  s.rendering = document.getElementById("rendering").value || "auto";
   s.language = document.getElementById("language").value;
   commitModelFields();
   s.fluidvoice_port = parseInt(document.getElementById("fluidvoice_port").value, 10) || 47733;
@@ -575,6 +583,8 @@ function accountMenu(a, accounts, anchor) {
     ["Open account", () => accountAction(() => invoke("open_account", {id:a.id}))],
     ...( /Win/.test(navigator.platform || navigator.userAgent) ? [[a.detached ? "Return to the main window" : "Open in a separate window", () => accountAction(() => invoke(a.detached?"attach_account":"detach_account",{id:a.id}))]] : []),
     ["Use on startup",()=>accountAction(()=>invoke("set_default_account",{id:a.id}))],
+    ["Change photo",()=>pickAccountPhoto(a.id)],
+    ...(a.photo?[["Remove photo",()=>accountAction(()=>invoke("remove_account_photo",{id:a.id}))]]:[]),
     ["Rename",async()=>{const name=await Dlg.prompt("",{title:"Rename account",value:a.name,okLabel:"Rename",requiredMessage:"Enter a name."});if(name!==null&&name!==a.name)await accountAction(()=>invoke("rename_account",{id:a.id,name}));}],
   ];
   const index=accounts.findIndex(x=>x.id===a.id);
@@ -612,6 +622,38 @@ function accountMenu(a, accounts, anchor) {
   document.body.appendChild(menu);menu.showPopover();menu.dataset.open="true";anchor.setAttribute("aria-expanded","true");place();menu.querySelector("button").focus();
 
 }
+const PHOTO_MAX_BYTES = 5 * 1024 * 1024, PHOTO_SIZE = 96;
+
+// Pick a PNG/JPEG, crop it to a centred square, scale it to 96x96 and hand the
+// PNG bytes to the backend (which validates and stores them per account).
+function pickAccountPhoto(id) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/png,image/jpeg";
+  input.onchange = async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const note = document.getElementById("accounts-note");
+    if (file.size > PHOTO_MAX_BYTES) { note.textContent = t("The image is larger than 5 MB."); return; }
+    await accountAction(async () => {
+      let png;
+      try {
+        const bmp = await createImageBitmap(file);
+        const side = Math.min(bmp.width, bmp.height);
+        const canvas = document.createElement("canvas");
+        canvas.width = canvas.height = PHOTO_SIZE;
+        canvas.getContext("2d").drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, PHOTO_SIZE, PHOTO_SIZE);
+        const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
+        png = Array.from(new Uint8Array(await blob.arrayBuffer()));
+      } catch (e) {
+        throw new Error(t("The image could not be read."));
+      }
+      await invoke("set_account_photo", { id, png });
+    });
+  };
+  input.click();
+}
+
 function renderAccounts(accounts) {
   const list=document.getElementById("accounts-list"),startup=document.getElementById("startup_account");
   if(document.getElementById("account-actions")?.dataset.open==="true")return;
@@ -619,7 +661,7 @@ function renderAccounts(accounts) {
   for(const a of accounts){
     const option=document.createElement("option");option.value=a.id;option.textContent=a.name;option.selected=a.is_default;startup.appendChild(option);
     const row=document.createElement("div");row.className="account-row";
-    const avatar=document.createElement("span");avatar.className="account-avatar";avatar.setAttribute("aria-hidden","true");avatar.textContent=a.name.trim().split(/\s+/).slice(0,2).map(x=>x[0]).join("").toUpperCase();
+    const avatar=document.createElement("span");avatar.className="account-avatar";avatar.setAttribute("aria-hidden","true");if(a.photo){const img=document.createElement("img");img.src=a.photo;img.alt="";avatar.classList.add("has-photo");avatar.appendChild(img);}else avatar.textContent=a.name.trim().split(/\s+/).slice(0,2).map(x=>x[0]).join("").toUpperCase();
     const open=document.createElement("button");open.type="button";open.className="account-open";open.setAttribute("aria-label",t("Open {0}",[a.name]));
     const name=document.createElement("span");name.className="acct-name";name.textContent=a.name;
     const info=document.createElement("span");info.className="acct-subtitle";info.textContent=a.detached?"In a separate window":a.is_default?"Account on startup":"WhatsApp";open.append(name,info);open.onclick=()=>accountAction(()=>invoke("open_account",{id:a.id}));
@@ -636,6 +678,26 @@ async function loadAccounts() {
     renderMentionAccountSelect(true);
   } catch (e) {
     document.getElementById('accounts-note').textContent = t('Could not load the accounts: {0}', [String(e)]);
+  }
+}
+
+// Code contributors, credited on the About page. Links open in the browser
+// through the backend, which builds the github.com address itself.
+const CONTRIBUTORS = ["karem505", "matheuscardosoj", "janbridley", "maerlin", "LILQK", "vrieza", "t43riz"];
+function renderContributors() {
+  const list = document.getElementById("contributors");
+  if (!list) return;
+  for (const login of CONTRIBUTORS) {
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    a.href = "https://github.com/" + login;
+    a.textContent = login;
+    a.addEventListener("click", (e) => {
+      e.preventDefault();
+      invoke("open_contributor", { login }).catch(() => {});
+    });
+    li.appendChild(a);
+    list.appendChild(li);
   }
 }
 
@@ -687,6 +749,7 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
   document.getElementById("add_account").addEventListener("click", addAccount);
+  renderContributors();
   document.getElementById('startup_account').addEventListener('change', event => {
     const id = event.target.value;
     accountAction(() => invoke('set_default_account', { id }));
@@ -710,6 +773,7 @@ window.addEventListener("DOMContentLoaded", () => {
   // effect of is guesswork, and the webview applies it immediately.
   document.getElementById("zoom").addEventListener("change", save);
   document.getElementById("title_bar").addEventListener("change", save);
+  document.getElementById("rendering").addEventListener("change", save);
   // The zoom shortcuts change it from the WhatsApp window; catch up on return.
   window.addEventListener("focus", () => {
     invoke("get_settings").then((s) => {
@@ -1367,7 +1431,7 @@ function onRecordKeydown(e) {
     setHotkeyHint("Include Ctrl, Alt or Shift.");
     return;
   }
-  document.getElementById(recordInputId).value = accel;
+  document.getElementById(recordInputId).value = window.HotkeyFmt.toDisplay(accel);
   setHotkeyHint("");
   stopRecording(false);
 }

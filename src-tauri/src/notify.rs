@@ -45,6 +45,7 @@ struct Inner {
     coverage: HashMap<String, VecDeque<(String, Instant)>>,
     seen: HashMap<(String, String), Instant>,
     native: HashSet<String>,
+    privacy: HashMap<String, bool>,
     records: VecDeque<Notice>,
     #[cfg(windows)]
     toasts: HashMap<String, windows::UI::Notifications::ToastNotification>,
@@ -56,6 +57,20 @@ pub fn event_id() -> String {
 const DEDUP: Duration = Duration::from_secs(60);
 pub const FALLBACK_WAIT: Duration = Duration::from_secs(3);
 impl Recent {
+    pub fn set_privacy(&self, label: &str, masked: bool) {
+        crate::lock::guard(&self.inner)
+            .privacy
+            .insert(label.to_owned(), masked);
+    }
+
+    pub fn privacy_masked(&self, label: &str) -> bool {
+        crate::lock::guard(&self.inner)
+            .privacy
+            .get(label)
+            .copied()
+            .unwrap_or(true)
+    }
+
     pub fn epoch(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
@@ -326,6 +341,8 @@ pub fn from_event(
         return;
     }
     r.record(label, &id, source, "pending", None);
+    let masked = source != Source::Test && r.privacy_masked(label);
+    let (title, body, icon) = redact_notice(masked, title, body, icon);
     let title: String = title.chars().take(256).collect();
     let body: String = body.chars().take(4096).collect();
     let title = attributed_title(app, label, &title);
@@ -355,6 +372,31 @@ pub fn from_event(
         r.finish(label, &id, identity, b.show().is_ok());
     }
 }
+fn redact_notice<'a>(
+    masked: bool,
+    title: &'a str,
+    body: &'a str,
+    icon: Option<&'a str>,
+) -> (
+    std::borrow::Cow<'a, str>,
+    std::borrow::Cow<'a, str>,
+    Option<&'a str>,
+) {
+    if masked {
+        (
+            std::borrow::Cow::Borrowed("WhatsApp"),
+            tr("Nova mensagem"),
+            None,
+        )
+    } else {
+        (
+            std::borrow::Cow::Borrowed(title),
+            std::borrow::Cow::Borrowed(body),
+            icon,
+        )
+    }
+}
+
 fn attributed_title(app: &AppHandle, label: &str, title: &str) -> String {
     let f = crate::accounts::load(app);
     if f.accounts.len() > 1 {
@@ -830,6 +872,30 @@ fn windows_toast(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn privacy_redacts_native_notification_content() {
+        let (title, body, icon) = redact_notice(true, "Alice", "Private text", Some("picture"));
+        assert_eq!(title, "WhatsApp");
+        assert_eq!(body, tr("Nova mensagem"));
+        assert_eq!(icon, None);
+        let (title, body, icon) = redact_notice(false, "Alice", "Private text", Some("picture"));
+        assert_eq!(
+            (title.as_ref(), body.as_ref(), icon),
+            ("Alice", "Private text", Some("picture"))
+        );
+    }
+
+    #[test]
+    fn privacy_is_account_scoped_and_fails_closed_until_initialized() {
+        let recent = Recent::default();
+        assert!(recent.privacy_masked("wa-a"));
+        recent.set_privacy("wa-a", false);
+        assert!(!recent.privacy_masked("wa-a"));
+        assert!(recent.privacy_masked("wa-b"));
+        recent.set_privacy("wa-a", true);
+        assert!(recent.privacy_masked("wa-a"));
+    }
+
     #[test]
     fn notification_xml_cannot_be_broken_by_message_content() {
         assert_eq!(escape_xml("<&\"'\0"), "&lt;&amp;&quot;&apos;");

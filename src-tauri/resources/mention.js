@@ -896,6 +896,7 @@
       },
       emit: function (hit, msg) {
         if (!wantsAlert(hit, prefs)) return;
+        if (root.__whatrustPrivacy && root.__whatrustPrivacy.masksNotifications()) return;
         var view = displayFrom(msg || {}, hit);
         remember(view);
         invoke("mention_event", {

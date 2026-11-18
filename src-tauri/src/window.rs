@@ -60,6 +60,18 @@ fn safari_ua(macos_major: u64) -> String {
 }
 
 const BRIDGE_JS: &str = include_str!("../resources/bridge.js");
+/// Hides WhatsApp's "get the desktop app" prompts (issue #83, upsell.js).
+const UPSELL_JS: &str = include_str!("../resources/upsell.js");
+/// Opens (or closes) the privacy blur panel in an account page (privacy.js).
+#[cfg(windows)]
+pub(crate) const PRIVACY_PANEL_JS: &str =
+    "window.__whatrustPrivacy&&window.__whatrustPrivacy.panel()";
+/// Linux only: makes attaching a video work on WebKitGTK (see the file header).
+const MEDIA_JS: &str = if cfg!(target_os = "linux") {
+    include_str!("../resources/media.js")
+} else {
+    ""
+};
 
 /// WebView2 arguments that keep a minimized or hidden WhatsApp page on its
 /// normal timer cadence. Chromium otherwise clamps timers to one a second,
@@ -156,6 +168,7 @@ macro_rules! account_webview {
             })
             .initialization_script(include_str!("../resources/integration.js"))
             .initialization_script(BRIDGE_JS)
+            .initialization_script(MEDIA_JS)
             .initialization_script(include_str!("../resources/privacy.js"))
             // WA-JS (Apache-2.0) reads WhatsApp's own media loader so a voice
             // note can be transcribed without pressing play. voice.js renders
@@ -178,6 +191,11 @@ macro_rules! account_webview {
             .initialization_script(crate::mention::boot_script($app, &$label))
             .initialization_script(include_str!("../resources/mention-chime.js"))
             .initialization_script(include_str!("../resources/mention.js"))
+            .initialization_script(if crate::settings::load($app).hide_app_banner {
+                UPSELL_JS
+            } else {
+                ""
+            })
             // Drag-and-drop is done by capturing the OS drop in Rust and streaming the file
             // into the page (see `register_drop_handler` + bridge.js `__whatrustDropFeed`).
             // We deliberately KEEP Tauri's drag-drop handler enabled (except on Windows, see
@@ -329,7 +347,7 @@ pub(crate) fn build_account_window(
     crate::proxy::check_platform(&crate::settings::load(app))?;
 
     let url = "https://web.whatsapp.com/".parse().expect("valid url");
-    let icon = crate::appicon::current(app);
+    let icon = crate::appicon::for_account(app, &account.id);
 
     let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
         .title(format!("whatRust — {}", account.name))
@@ -1283,6 +1301,10 @@ fn register_focus_listener(app: &AppHandle, win: &WebviewWindow) {
             if let Some(active) = app_handle.try_state::<ActiveAccount>() {
                 *crate::lock::guard(&active) = label.clone();
             }
+            #[cfg(windows)]
+            if let Some(w) = app_handle.get_webview_window(&label) {
+                focus_webview_windows(&w);
+            }
         }
         // Menu-bar mode: losing focus dismisses a presented panel; the
         // webview keeps running while hidden (see `background_throttling`).
@@ -1291,6 +1313,23 @@ fn register_focus_listener(app: &AppHandle, win: &WebviewWindow) {
             crate::menubar::on_focus_lost(&app_handle, &label);
         }
         _ => {}
+    });
+}
+
+/// Windows (issue #85): activating the window with Alt+Tab focuses the
+/// top-level window but not WebView2's child window, so the composer shows a
+/// caret yet keys go nowhere until a click. Hand keyboard focus to the webview;
+/// WebView2 then restores focus to the element that had it in the page.
+#[cfg(windows)]
+fn focus_webview_windows(win: &WebviewWindow) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC;
+    let _ = win.with_webview(|webview| {
+        // SAFETY: with_webview runs on the UI thread that owns the controller.
+        let _ = unsafe {
+            webview
+                .controller()
+                .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)
+        };
     });
 }
 
@@ -1687,7 +1726,12 @@ fn enable_media_windows(webview: tauri::webview::PlatformWebview, app: AppHandle
         COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
         COREWEBVIEW2_PERMISSION_STATE_DENY,
     };
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+        COREWEBVIEW2_PHYSICAL_KEY_STATUS,
+    };
     use webview2_com::{NotificationReceivedEventHandler, PermissionRequestedEventHandler};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
     use windows_core::Interface;
 
     // SAFETY: with_webview runs on the UI thread where the WebView2 controller lives;
@@ -1723,6 +1767,43 @@ fn enable_media_windows(webview: tauri::webview::PlatformWebview, app: AppHandle
         ));
         let mut token: i64 = 0;
         let _ = core.add_PermissionRequested(&handler, &mut token);
+
+        // Issue #80: Ctrl+Shift+P is a WebView2 browser accelerator ("print with
+        // the system dialog"). WebView2 handles it before the page, so the
+        // privacy panel's own keydown listener never saw it on Windows and the
+        // print dialog opened instead. Claim the combination here and open the
+        // panel ourselves; every other accelerator keeps its normal behaviour.
+        let keys_app = app.clone();
+        let keys_label = label.clone();
+        let keys = webview2_com::AcceleratorKeyPressedEventHandler::create(Box::new(
+            move |_controller, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut kind = COREWEBVIEW2_KEY_EVENT_KIND::default();
+                args.KeyEventKind(&mut kind)?;
+                let mut vk = 0u32;
+                args.VirtualKey(&mut vk)?;
+                let held = |k: u16| GetKeyState(k as i32) < 0;
+                if kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+                    && vk == u32::from(b'P')
+                    && held(VK_CONTROL.0)
+                    && held(VK_SHIFT.0)
+                    && !held(VK_MENU.0)
+                {
+                    args.SetHandled(true)?;
+                    let mut status = COREWEBVIEW2_PHYSICAL_KEY_STATUS::default();
+                    args.PhysicalKeyStatus(&mut status)?;
+                    // A held key repeats; toggle once per press.
+                    if !status.WasKeyDown.as_bool() {
+                        if let Some(v) = keys_app.get_webview(&keys_label) {
+                            let _ = v.eval(PRIVACY_PANEL_JS);
+                        }
+                    }
+                }
+                Ok(())
+            },
+        ));
+        let mut keys_token: i64 = 0;
+        let _ = controller.add_AcceleratorKeyPressed(&keys, &mut keys_token);
 
         // NotificationReceived needs ICoreWebView2_24 (WebView2 runtime 1.0.2895+).
         let Ok(core24) = core.cast::<ICoreWebView2_24>() else {
@@ -2156,6 +2237,7 @@ mod tests {
         toggle_decision, DropSkips, StreamAbort, ToggleAct, CHUNKS_PER_EVAL, DROP_CHUNK_BYTES,
         DROP_MSG_CHUNK_SUFFIX_PARTS, MAX_DROP_FILES, WEBVIEW2_SYNC_ARGS,
     };
+    use crate::i18n::{tr, trf};
 
     #[test]
     fn hidden_page_timer_features_are_the_ones_that_stop_sync() {
@@ -2368,8 +2450,17 @@ mod tests {
         assert_eq!(skips.total(), 2);
         // The toast summary names both reasons, never file names.
         let s = summarize_skips(&skips);
-        assert!(s.contains("pastas"), "{s}");
-        assert!(s.contains("sem permissão de leitura"), "{s}");
+        assert!(
+            s.contains(&trf("pastas ou arquivos especiais: {0}", &[&1])),
+            "{s}"
+        );
+        assert!(
+            s.contains(&trf(
+                "{0} {1} sem permissão de leitura",
+                &[&1, &tr("arquivo")]
+            )),
+            "{s}"
+        );
         assert!(!s.contains("ok.mp4"), "{s}");
     }
 
@@ -2476,7 +2567,8 @@ mod tests {
             too_large: 1,
             ..Default::default()
         });
-        assert_eq!(s, "Não anexados: 1 arquivo acima do limite de 500 MB.");
+        let detail = trf("{0} {1} acima do limite de 500 MB", &[&1, &tr("arquivo")]);
+        assert_eq!(s, trf("Não anexados: {0}.", &[&detail]));
     }
 
     #[test]

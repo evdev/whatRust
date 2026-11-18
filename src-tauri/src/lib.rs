@@ -1,3 +1,4 @@
+mod accountphoto;
 mod accounts;
 mod agents;
 mod appicon;
@@ -95,6 +96,10 @@ pub fn run() {
     // laptops). A value the user set is respected. See `gpu`.
     #[cfg(target_os = "linux")]
     gpu::apply_webkit_renderer_env();
+    // Linux: hardware-decoded video frames come out black on a canvas in
+    // WebKitGTK, which breaks WhatsApp's video thumbnails; decode in software.
+    #[cfg(target_os = "linux")]
+    gpu::apply_gstreamer_env();
 
     let smoke_mode =
         cfg!(debug_assertions) && std::env::var("WHATRUST_SMOKE").as_deref() == Ok("1");
@@ -102,6 +107,12 @@ pub fn run() {
     if smoke_mode {
         context.config_mut().identifier = "com.karem.whatrust.smoke".into();
     }
+    // Linux (issue #87): software rendering on GPUs too old for WebKit's GPU
+    // compositor (blank window after login), or when Settings → Rendering asks
+    // for it. Needs the identifier to find settings.json; still before any
+    // webview exists.
+    #[cfg(target_os = "linux")]
+    gpu::apply_software_rendering(&context.config().identifier);
     let mut builder = tauri::Builder::default();
 
     // single-instance MUST be registered first.
@@ -249,6 +260,7 @@ pub fn run() {
             integration::open_notification_settings,
             commands::notify,
             commands::notification_icon,
+            commands::set_notification_privacy,
             commands::set_unread,
             commands::dlog,
             commands::open_download,
@@ -265,6 +277,9 @@ pub fn run() {
             commands::choose_mention_sound,
             commands::reset_mention_sound,
             commands::preview_mention_sound,
+            commands::set_account_photo,
+            commands::remove_account_photo,
+            commands::open_contributor,
             commands::reset_app_icon,
             commands::list_accounts,
             commands::add_account,

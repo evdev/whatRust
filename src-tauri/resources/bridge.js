@@ -652,6 +652,16 @@
     }
   } catch (e) {}
 
+  // Privacy blur (privacy.js) decides what a notification may show while the
+  // blur is on; without it, or on any error, the notification is unchanged.
+  function privacyMask(title, options) {
+    try {
+      var p = window.__whatrustPrivacy;
+      if (p && typeof p.mask === "function") return p.mask(title, options);
+    } catch (e) {}
+    return { title: title, options: options };
+  }
+
   // 2) Notification override — forward to a native OS notification via Rust.
   try {
     var OriginalNotification = window.Notification;
@@ -671,6 +681,8 @@
         this.close = function () {};
         return;
       }
+      var masked = privacyMask(title, options);
+      title = masked.title; options = masked.options;
       if (window.__whatrustPreferNative && typeof OriginalNotification === "function" && OriginalNotification.permission === "granted") {
         try {
           notePath("native Notification()");
@@ -748,7 +760,8 @@
       // resolve without that event, so the page-side registration uses our
       // own service directly, even when the constructor uses native delivery.
       SWR.prototype.showNotification = function (title, options) {
-        options = options || {};
+        var masked = privacyMask(title, options);
+        title = masked.title; options = masked.options || {};
         notePath("page registration.showNotification()");
         // Route through nativeNotify so the service-worker path shares the same de-dup
         // window as window.Notification (an alert that fires on both paths shows once).

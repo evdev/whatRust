@@ -415,11 +415,11 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, ()> {
         }
     }
     let bytes = input.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(());
     }
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    for chunk in bytes.chunks_exact(4) {
+    for chunk in bytes.as_chunks::<4>().0 {
         let (a, b, c, d) = (chunk[0], chunk[1], chunk[2], chunk[3]);
         if a == b'=' || b == b'=' || (c == b'=' && d != b'=') {
             return Err(());
@@ -752,6 +752,12 @@ pub fn mention_event(
     everyone: bool,
 ) -> Result<(), String> {
     crate::integration::remote(&window)?;
+    if app
+        .state::<crate::notify::Recent>()
+        .privacy_masked(window.label())
+    {
+        return Ok(());
+    }
     if !mentions && !replies && !direct && !everyone {
         return Ok(());
     }
@@ -1282,6 +1288,12 @@ fn account_id_from_label(label: &str) -> String {
 }
 
 fn deliver(app: &AppHandle, account_id: &str, prefs: &MentionAccountPrefs, held: Held) {
+    if app
+        .state::<crate::notify::Recent>()
+        .privacy_masked(&held.account_label)
+    {
+        return;
+    }
     match release_of(prefs, &held) {
         Release::Drop => {}
         Release::Chime => chime(app, account_id),
@@ -1512,6 +1524,12 @@ fn pump(app: &AppHandle) {
         let slots = POPUP_MAX.saturating_sub(inner.order.len());
         let mut later = VecDeque::new();
         for item in pending {
+            if app
+                .state::<crate::notify::Recent>()
+                .privacy_masked(&item.account_label)
+            {
+                continue;
+            }
             let account_id = account_id_from_label(&item.account_label);
             let prefs = crate::settings::prefs_for(&settings, &account_id);
             match release_of(&prefs, &item) {
@@ -1540,6 +1558,12 @@ fn pump(app: &AppHandle) {
     }
     let mut labels = Vec::new();
     for (item, sound) in show.into_iter().rev() {
+        if app
+            .state::<crate::notify::Recent>()
+            .privacy_masked(&item.account_label)
+        {
+            continue;
+        }
         labels.push(stage(app, item, sound));
     }
     if !labels.is_empty() {

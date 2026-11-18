@@ -38,6 +38,7 @@ jobs:
       VERSION: ${{ inputs.version }}
       ARCH_TOKEN: ${{ matrix.token }}
       PE_MACHINE: ${{ matrix.machine }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Download and install the release
         id: install
@@ -46,7 +47,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $rel = if ($env:VERSION) { "tags/$env:VERSION" } else { 'latest' }
-          $resp = Invoke-WebRequest "https://api.github.com/repos/${{ github.repository }}/releases/$rel" -Headers @{ 'User-Agent' = 'whatrust-smoke'; Accept = 'application/vnd.github+json' } -SkipHttpErrorCheck
+          $resp = Invoke-WebRequest "https://api.github.com/repos/${{ github.repository }}/releases/$rel" -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'whatrust-smoke'; Accept = 'application/vnd.github+json' } -SkipHttpErrorCheck
           if ($resp.StatusCode -eq 404 -and -not $env:VERSION) {
             "No published release on ${{ github.repository }}; skipping smoke."
             "skip=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8NoBOM
@@ -156,6 +157,35 @@ jobs:
           Start-Sleep 25
           Shot 'after-deeplink'
           "whatRust processes: $(@(Get-Process whatRust -ErrorAction SilentlyContinue).Count) (single instance expected: 1)"
+          # Privacy blur panel (issue #80): focus the page, press Ctrl+Shift+P and
+          # screenshot. The panel is a dark box in the bottom-right corner.
+          Add-Type @'
+          using System; using System.Runtime.InteropServices;
+          public static class K { [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, int f, int e); }
+          '@
+          function Combo([byte[]]$mods, [byte]$key) {
+            foreach ($m in $mods) { [K]::keybd_event($m, 0, 0, 0) }
+            [K]::keybd_event($key, 0, 0, 0); [K]::keybd_event($key, 0, 2, 0)
+            [array]::Reverse($mods); foreach ($m in $mods) { [K]::keybd_event($m, 0, 2, 0) }
+          }
+          [U]::SetForegroundWindow($app.MainWindowHandle) | Out-Null
+          [U]::SetCursorPos($r.L + 500, $r.T + 420) | Out-Null
+          [U]::mouse_event(2, 0, 0, 0, 0); [U]::mouse_event(4, 0, 0, 0, 0)
+          Start-Sleep 2
+          Combo @(0x11, 0x10) 0x50   # Ctrl+Shift+P
+          Start-Sleep 3
+          Shot 'privacy-panel-shortcut'
+          Combo @() 0x1B             # Esc closes it again
+          Start-Sleep 1
+          # The same panel from the window menu: whatRust -> Privacy blur...
+          [U]::SetCursorPos($r.L + 35, $r.T + 38) | Out-Null
+          [U]::mouse_event(2, 0, 0, 0, 0); [U]::mouse_event(4, 0, 0, 0, 0)
+          Start-Sleep 1
+          Shot 'window-menu'
+          foreach ($i in 1..4) { Combo @() 0x28 }   # Down x4 -> the privacy item
+          Combo @() 0x0D                            # Enter
+          Start-Sleep 2
+          Shot 'privacy-panel-menu'
 
       - name: App log
         if: always() && steps.install.outputs.skip != 'true' && (matrix.token != 'arm64' || github.event_name == 'workflow_dispatch')

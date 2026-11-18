@@ -10,6 +10,7 @@
   "permissions": [
     "allow-notify",
     "allow-notification-icon",
+    "allow-set-notification-privacy",
     "allow-set-unread",
     "allow-dlog",
     "allow-open-download",

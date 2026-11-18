@@ -226,7 +226,7 @@ fn wav_pcm(data: &[u8]) -> Result<(u32, usize, &[u8]), VoiceError> {
 }
 
 fn downmix(pcm: &[u8], channels: usize) -> Result<Vec<i16>, VoiceError> {
-    if channels == 0 || pcm.len() % (channels * 2) != 0 {
+    if channels == 0 || !pcm.len().is_multiple_of(channels * 2) {
         return Err(VoiceError::NotPcm);
     }
     let frames = pcm.len() / (channels * 2);
