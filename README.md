@@ -1,356 +1,128 @@
 <p align="center">
-  <img src="src-tauri/icons/128x128.png" width="96" alt="whatRust app icon — a lightweight WhatsApp Web desktop client">
+  <img src="src-tauri/icons/128x128.png" width="96" alt="whatRust app icon">
 </p>
 
-# whatRust — Lightweight WhatsApp Web Desktop Client (Rust + Tauri)
+# whatRust
 
-<p align="center"><a href="https://github.com/sponsors/karem505"><img src="https://img.shields.io/badge/Sponsor%20this%20project-ea4aaa?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor this project on GitHub Sponsors" height="40"></a></p>
+whatRust is a desktop app for WhatsApp Web, built with Rust and Tauri. It uses your system's webview and keeps each WhatsApp account signed in separately. This fork adds tools for catching up on chats, keeping track of replies, and answering directly from an alert.
 
-<p align="center"><b>Sponsorship goal: 10 monthly sponsors.</b> That funds one fixed day every month for whatRust releases and bug fixes on Linux, Windows and macOS.<br>
-<a href="https://github.com/sponsors/karem505"><img src="https://img.shields.io/github/sponsors/karem505?label=sponsors%20so%20far&style=for-the-badge&color=ea4aaa&logo=githubsponsors&logoColor=white" alt="Number of GitHub sponsors"></a></p>
+[Install whatRust](#install-whatrust) · [What this fork adds](#what-this-fork-adds) · [What stays on your computer](#what-stays-on-your-computer) · [Build from source](#build-from-source)
 
-**whatRust is a free, open-source, lightweight desktop client for WhatsApp Web that runs on Linux, Windows, and macOS — a lean, native alternative to the official Electron-based WhatsApp Desktop app, built with Rust and Tauri v2. It runs multiple WhatsApp accounts at once, each in its own window with a fully isolated login.**
+## Install whatRust
 
-![Latest release](https://img.shields.io/github/v/release/karem505/whatRust?label=release)
-![License: MIT](https://img.shields.io/github/license/karem505/whatRust)
-![Platforms: Linux, Windows, macOS](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS-informational)
-![Built with Rust and Tauri v2](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri%20v2-orange)
-![GitHub stars](https://img.shields.io/github/stars/karem505/whatRust?style=social)
+These **0.6.14** installers are built from this fork. Pick the one for your computer.
 
-> **Unofficial, independent project** — not affiliated with, endorsed by, or sponsored by WhatsApp or Meta. whatRust simply loads the official `web.whatsapp.com` interface in a native system webview.
+| Your computer | Download |
+| --- | --- |
+| Windows 10 or 11, Intel or AMD | [Windows x64 installer](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.6.14_x64-setup.exe) |
+| Windows 10 or 11, ARM64 | [Windows ARM64 installer](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.6.14_arm64-setup.exe) |
+| Mac with Apple Silicon | [macOS disk image](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.6.14_aarch64.dmg) |
 
-> Also by the same author: [Rusty Inbox](https://aboelmakarem.pro/apps/rusty-inbox), a fast, open-source Rust email client for Linux, Windows and macOS.
+[SHA-256 checksums](installers/SHA256SUMS)
 
-## Contents
+**Windows.** Run the installer over your existing copy to upgrade. You can also run this in PowerShell to let the script choose the installer for your CPU and verify its checksum before opening it.
 
-- [What is whatRust?](#what-is-whatrust)
-- [Video and screenshots](#video-and-screenshots)
-- [Why whatRust? A lean, native WhatsApp Desktop alternative](#why-whatrust-a-lean-native-whatsapp-desktop-alternative)
-- [Features](#features)
-- [Run multiple WhatsApp accounts](#run-multiple-whatsapp-accounts)
-- [Lock the app (optional)](#lock-the-app-optional)
-- [whatRust vs the official WhatsApp Desktop (Electron)](#whatrust-vs-the-official-whatsapp-desktop-electron)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Getting started](#getting-started)
-- [FAQ](#faq)
-- [Limitations](#limitations)
-- [Contributing](#contributing)
-- [Disclaimer](#disclaimer)
-- [License](#license)
-
-## What is whatRust?
-
-whatRust is an open-source **WhatsApp Web desktop client** for Linux, Windows, and macOS. It wraps the official `web.whatsapp.com` in your operating system's native webview and adds the desktop conveniences a browser tab can't — a system tray, native notifications, persistent login, global shortcuts, and microphone/camera access for voice messages and calls.
-
-It is an **unofficial, open-source WhatsApp client** and a practical **WhatsApp Desktop alternative** for people who want a fast, native app with minimal overhead instead of the heavier Electron-based official build. It is not affiliated with WhatsApp or Meta.
-
-## Video and screenshots
-
-[![whatRust video: WhatsApp on your desktop, without the bloat (67 s)](docs/media/video-poster.jpg)](https://aboelmakarem.pro/apps/whatrust)
-
-**[Watch the 67-second video](docs/media/whatrust-video.mp4)** (also on the [whatRust page](https://aboelmakarem.pro/apps/whatrust)). It is a real recording with a real account; the chats are hidden by whatRust's own privacy blur.
-
-| | |
-|---|---|
-| ![whatRust running WhatsApp Web with the privacy blur on](docs/media/main.jpg) | ![Privacy blur panel: choose what gets blurred](docs/media/privacy-blur.jpg) |
-| WhatsApp Web with the privacy blur on | Privacy blur panel (Ctrl+Shift+P) |
-| ![Adding a second account in its own window](docs/media/accounts.jpg) | ![Settings: appearance, shortcuts, updates](docs/media/settings.jpg) |
-| A second account, in its own window | Settings: appearance, shortcuts, updates |
-
-## Why whatRust? A lean, native WhatsApp Desktop alternative
-
-**whatRust's native app shell is small — typically around 90 MB** — because it reuses the webview that already ships with your OS instead of bundling its own browser engine the way Electron apps do. That gives it a much lighter baseline than the official Electron-based WhatsApp Desktop, which ships an entire Chromium runtime on top of the same WhatsApp Web page.
-
-The official WhatsApp Desktop app is built on Electron, which packs an entire Chromium browser inside every app. whatRust instead renders WhatsApp Web through the OS-native webview — **WebKitGTK** on Linux, **WebView2** on Windows, and **WKWebView** on macOS — via [Tauri v2](https://tauri.app). The result is a fast, native WhatsApp desktop app with a small footprint of its own.
-
-> **A fair caveat on total memory:** your overall RAM use is dominated by **WhatsApp Web itself** and grows with how many chats, groups, and media you keep open — commonly a few hundred MB up to ~1 GB for busy accounts. That cost is roughly the same in any browser-based client (whatRust, the official app, or a plain Chrome tab); whatRust's advantage is the lean native shell, not lighter web content.
-
-## Features
-
-- **Multiple WhatsApp accounts** — run several numbers at once, each in its own window with a fully isolated login (add, rename, and remove accounts)
-- **Optional app lock** — password (Argon2id) or biometric (Windows Hello / Touch ID / Linux polkit); locks on launch, on demand, on hide-to-tray, or after idle
-- **System tray** icon with **close-to-tray** and an **unread message badge**
-- **Native OS notifications** for new messages
-- **To-do list** — open it from the button under the account switcher (it sits on the left rail only when that switcher is not on screen). In a message's own menu, choose **Add to To-Do**, set a reminder, and jump back to the chat. The list is stored on this computer, separately for each account. Reminders only fire while whatRust is running; ones that come due while it is closed are shown the next time it opens.
-- **Stand-in** — in one individual chat, turn on a reply that writes as you while you are away. It can read the chat WhatsApp Web has loaded and search it. Two markdown files, one for you and one for that chat, start with basic instructions and stay optional. It pauses when you send a message yourself, and it stays silent and notifies you when it is unsure. The text of that chat is sent to the AI provider in Settings, or to Claude Code, Grok, or Codex already signed in on this computer. Flatpak builds can use only the API key.
-- **Display size** — a Smaller / Small / Default / Big page zoom in Settings, so the chat list stops crowding out the conversation on a high-DPI screen
-- **Custom download folder** — pick where downloads are saved in Settings → Appearance, or reset to the system Downloads folder. A folder that disappears or stops being writable falls back to Downloads. On Windows the Save As dialog opens in that folder. In the Flatpak the folder is chosen through the desktop portal (needs `xdg-desktop-portal`)
-- **Custom app icon** — choose a square PNG (32–1024 px, up to 5 MB) as the app icon in Settings → Appearance: Dock icon on macOS (the unread badge still shows on top), window and taskbar icons on Windows, window icon on Linux X11 (Wayland compositors use the `.desktop` icon, so it does not change there). The tray / menu-bar icon stays as is, and the icon is app-wide, not per account
-- **Persistent login** — scan the QR code once, stay signed in across restarts
-- **Voice messages** everywhere, plus **voice & video calls** on macOS (WhatsApp Web doesn't offer calls on Windows, and whatRust's Linux builds can't place calls — see the FAQ)
-- **Drag and drop files and images** — drop a photo, video, or document straight onto a chat to attach it
-- **Links open in your browser** — web, email, and phone links in chats go to your default apps; WhatsApp links (`wa.me`, group invites) stay in the app
-- **Opens `whatsapp://` links** — "Open app" / click-to-chat buttons on websites open the chat in whatRust (registered by the installers, the `.deb`, the Flatpak, and the one-line AppImage install)
-- **Download feedback** — a small toast confirms each download with **Open** and **Show in folder** buttons (programs and installers are only ever shown in their folder, never run)
-- **Launch at startup** (auto-start), optional
-- **Global keyboard shortcut** to show/hide the window (default `Ctrl/Cmd+Shift+W`; record your own by pressing the keys in Settings). On **Wayland**, bind `whatrust --toggle` to a system shortcut instead — see the FAQ.
-- **Proxy** — route all account traffic through a SOCKS5 or HTTP proxy (Settings → Network; see the FAQ)
-- **Automatic updates** — whatRust checks GitHub for a newer release shortly after start and every 6 hours, tells you, and installs it after checking its SHA-256 (Settings → Updates; see the FAQ). Turn it off in Settings → Updates
-- **Single instance** — relaunching focuses the running window; `whatrust --toggle` from a second launch shows/hides it
-- **Remembers window size and position**
-- **One-line install** on every platform
-- **Cross-platform**: Linux, Windows, and macOS from one Rust + Tauri codebase
-
-## Run multiple WhatsApp accounts
-
-whatRust runs **multiple WhatsApp accounts**, each with a **completely isolated session** (separate cookies, local storage, and IndexedDB), so you can stay signed in to several numbers without them interfering.
-
-- **Add an account** in **Settings → Accounts** with the **+ Add** button, then scan the new QR code; you can **rename** or **remove** accounts there too.
-- Each account keeps its **own login**. Only accounts you open are loaded, so the others do not each hold a browser process. Opening a second account leaves the first one open. Closing an account window releases that account. With one account open, closing the window keeps it connected in the tray. The tray shows a **combined unread count** and a one-click switcher for every account.
-- Your **first (default) account keeps its existing login** when you upgrade — no need to re-scan.
-
-> **macOS note:** running **multiple accounts requires macOS 14 (Sonoma) or later**, where the system webview supports isolated data stores. On macOS 12–13 whatRust runs a single account. Linux and Windows have no such limit.
-
-## Lock the app (optional)
-
-whatRust can require a password — or a fingerprint / Windows Hello / Touch ID where your
-OS supports it — before showing your chats. Enable it under **Settings → Security**.
-
-- **Password** works on every platform (Argon2id, stored locally).
-- **Biometric** is an optional shortcut: Windows Hello on Windows, Touch ID on any Mac
-  that has it, and the system fingerprint dialog on Linux where polkit/`pam_fprintd` is
-  configured (native `.deb` install only; AppImage and Flatpak use the password).
-- Lock **on launch**, **on demand** (tray → *Lock now*), **when hidden to the tray**, or
-  **after an idle timeout** — each toggleable in Settings.
-- Forgot your password? **Reset** from the lock screen logs out all accounts and clears
-  the lock (you'll re-scan the QR). There is no backdoor.
-
-> **What the lock does and doesn't do:** it controls who can open whatRust's windows. It
-> does **not** encrypt your data on disk — your WhatsApp session stays readable to other
-> software running as your user, locked or not (the same posture as Signal Desktop). For
-> at-rest protection, use full-disk encryption (FileVault / BitLocker / LUKS).
-
-## whatRust vs the official WhatsApp Desktop (Electron)
-
-| Feature | whatRust | Official WhatsApp Desktop (Electron) |
-|---|---|---|
-| App-shell memory overhead | Lean native shell (~90 MB), no bundled browser | Heavier — bundles a full Chromium + Node runtime |
-| Total RAM (with WhatsApp Web loaded) | Dominated by WhatsApp Web (similar across clients) | Dominated by WhatsApp Web **+** Electron runtime |
-| Rendering engine | OS-native webview (WebKitGTK / WebView2 / WKWebView) | Bundled Chromium (Electron) |
-| Built with | Rust + Tauri v2 | Electron (Chromium + Node.js) |
-| Open source | ✅ Yes | ❌ No |
-| Native Linux app | ✅ Yes | ⚠️ Limited |
-| Windows / macOS | ✅ Yes | ✅ Yes |
-| System tray + close to tray | ✅ Yes | ⚠️ Partial |
-| Unread message badge | ✅ Yes | ✅ Yes |
-| Native notifications | ✅ Yes | ✅ Yes |
-| Voice messages (mic/camera) | ✅ Yes | ✅ Yes |
-| Voice & video calls | ⚠️ macOS only (see the FAQ) | ✅ Yes |
-| Multiple accounts (isolated sessions) | ✅ Yes | ❌ No |
-| Optional app lock (password + biometric) | ✅ Yes | ❌ No |
-| Global show/hide shortcut | ✅ Yes | ❌ No |
-| Launch at startup | ✅ Yes | ✅ Yes |
-| Affiliated with Meta | ❌ No (unofficial) | ✅ Yes |
-
-## Requirements
-
-| OS | Webview engine | Notes |
-|---|---|---|
-| **Linux** | WebKitGTK | Requires WebKitGTK **≥ 2.46.1** (older versions hang WhatsApp's QR login). AppImage may need `libfuse2`. |
-| **Windows 10/11** | WebView2 | x64 and ARM64. Uses the Evergreen WebView2 runtime (preinstalled on Windows 11, including ARM64). |
-| **macOS** | WKWebView | macOS 12.1+ (SharedArrayBuffer for video upload needs Safari/WebKit 15.2; running **multiple accounts** needs macOS 14+); the current build is Apple Silicon (arm64). |
-
-## Installation
-
-The Windows installers and the macOS disk image below are built from **this fork**.
-The Linux one-line installers in the next sections point to the upstream project,
-so they do not include this fork's changes; build this checkout from source on
-Linux if you need the customized version.
-
-**Linux Flatpak (x86_64 or ARM64)** — one line:
-```bash
-curl -fsSL https://raw.githubusercontent.com/karem505/whatRust/master/install-flatpak.sh | sh
+```powershell
+irm https://raw.githubusercontent.com/evdev/whatRust/master/install.ps1 | iex
 ```
-The Flatpak uses the GNOME runtime from Flathub, while the whatRust bundle itself is
-published with each [GitHub release](https://github.com/karem505/whatRust/releases/latest).
-It keeps its own sandboxed WhatsApp login, separate from a `.deb` or AppImage install.
 
-> **Flatpak doesn't open?** If `flatpak run io.github.karem505.whatRust` prints `bwrap: Can't find source path /run/user/…/doc/by-app/…`, the Flatpak document portal has lost its mount (this affects every Flatpak app, not just whatRust). Run `systemctl --user restart xdg-document-portal` and open it again; the installer does this check for you.
+The wizard offers to install the transcription tools. You can skip that step and set them up later in **Settings → Transcription**. It keeps any tools and models you've already installed. For a silent install, use `/S`. Add `/TRANSCRIBE` if you want the optional tools installed too.
 
-**Linux AppImage / macOS** — one line:
-```bash
-curl -fsSL https://raw.githubusercontent.com/karem505/whatRust/master/install.sh | sh
-```
-Installs the AppImage to `~/.local/bin` on Linux (with an application-menu entry), or the `.dmg` app into `/Applications` on macOS (Apple Silicon). The script also clears macOS's download quarantine flag, which the unsigned build needs.
-
-> **macOS: "whatRust is damaged and can't be opened"?** The app isn't damaged. The build is not signed with an Apple Developer ID, so macOS blocks it when it was downloaded with a browser (the `.dmg` from the release page). Drag whatRust into Applications, then run this once in Terminal and open it again:
->
-> ```bash
-> xattr -dr com.apple.quarantine /Applications/whatRust.app
-> ```
->
-> Installing with the `install.sh` line above avoids this. Updates installed by whatRust itself are not affected.
-
-**macOS (this fork, Apple Silicon)** — [whatRust 0.6.14 disk image](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.6.14_aarch64.dmg).
-Open it and drag whatRust into Applications, then clear the download quarantine once:
+**macOS.** Open the disk image and drag whatRust into Applications. The app is unsigned. If macOS says the downloaded app is damaged, run the following in Terminal for this copy of whatRust, then open it again.
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/whatRust.app
 ```
 
-**Windows (this fork)** — download the installer for your PC:
+**Linux.** Build this fork from source for the features described below. The original project publishes Linux Flatpak, AppImage, and `.deb` downloads. [Upstream releases](https://github.com/karem505/whatRust/releases/latest)
 
-- [Windows ARM64 setup](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.6.14_arm64-setup.exe) — Snapdragon and other ARM64 PCs
-- [Windows x64 setup](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.6.14_x64-setup.exe) — Intel and AMD PCs
+When whatRust opens, scan the QR code from **WhatsApp → Linked Devices → Link a Device** on your phone. The app keeps the login for next time.
 
-Or let PowerShell choose the architecture and verify its SHA-256 before opening
-the setup program:
-```powershell
-irm https://raw.githubusercontent.com/evdev/whatRust/master/install.ps1 | iex
-```
-The NSIS setup program itself is x86 and installs the native x64 or ARM64 app.
-Its optional **Install transcription tools** choice is selected by default:
-on ARM64 it installs Qualcomm GenieX CLI and downloads Qwen3-ASR 0.6B Q8
-(about 1.2 GiB total, and a supported Snapdragon NPU is required). On x64 it
-installs FluidVoice; open FluidVoice afterward, download a speech model, and
-enable its local API. Existing installations and models are kept. If you skip
-this step or it fails, use Settings → Transcription to set it up later.
-The Windows beta uses its own local API on port 47610; whatRust reads its local
-API token from FluidVoice's settings. Existing default-port settings continue to
-work automatically.
-Silent setup (`/S`) skips transcription downloads unless `/TRANSCRIBE` is
-explicitly supplied.
+## What this fork adds
 
-**Upstream manual downloads** — the [upstream release](https://github.com/karem505/whatRust/releases/latest) has `.flatpak`, `.AppImage`/`.deb`, `.dmg`, `.exe`, and `.msi` files, but does not include this fork's customizations.
+### See the message and reply from the alert
 
-<details>
-<summary><b>Build from source</b> (Rust + Cargo + Tauri CLI)</summary>
+Open **Settings → Notifications**, choose an account, and turn on alerts for the events you care about: a personal mention, a reply to one of your messages, a direct message, or a group `@everyone` tag. You can choose the sound and reply popup separately for each account, and use a custom sound. These alerts work in muted chats and while whatRust is in the foreground.
+
+The popup shows who wrote, the message, and a photo preview when available. You can play an incoming voice note, read its transcript when transcription is enabled, or reply with text, a file, a photo, or a recorded voice note. **Open Chat** takes you to the conversation for that account. The popup replaces the ordinary notification for that message. Repeat reports of the same photo are filtered, and different photos still get their own alerts.
+
+### Transcribe voice notes and videos
+
+In **Settings → Transcription**, turn on **Transcribe voice notes** to see the words under each note. Enable **Transcribe videos** to add a **Transcribe** button to supported videos. whatRust transcribes the audio locally and keeps the transcripts on this computer, separately for each account.
+
+- **Windows x64:** Open FluidVoice, download a speech model, and enable its local API. Then click **Test connection** in whatRust. whatRust detects the Windows beta on port `47610` and reads its token from FluidVoice's settings, so the older default port setting can stay as it is.
+- **Windows ARM64:** Use **GenieX CLI** and download **Qwen3-ASR 0.6B Q8** from the Transcription settings. This requires a supported Snapdragon NPU and about 1.1 GiB for the model.
+- **Other builds that use FluidVoice:** Run FluidVoice with its local API enabled. The default port is `47733`.
+
+If you want a translation or a short summary of a transcript, select OpenRouter, Gemini, or Anthropic in the same settings and save an API key. You can choose separate models for translation and summaries. When you change the translation language, provider, or model, whatRust refreshes translations already on screen. Once you summarize a transcript, you can turn it into a to-do.
+
+### Catch up on a chat
+
+Open the chat header menu and choose **Create summary**. Pick **Last hour**, **Last 4 hours**, **Today**, or **Last 3 days**. The result appears under the newest message it covers. It includes existing voice note and video transcripts where available, and tells you when older messages were unavailable or the range had to be shortened.
+
+The summary is a local card you can copy, refresh, or delete. Cancelling a refresh keeps the previous summary. whatRust asks before sending chat text to the provider the first time. You can revoke access in **Settings → Transcription → Chat summaries**.
+
+### Keep track of who owes a reply
+
+Right-click a message and choose **Add to To-Do**, **Waiting on them**, or **I owe a reply**. To-dos can have due dates, reminders, priorities, and repeats. Reply watches live in the separate **Replies** view. They can clear when the expected person sends a later message in that chat, and you can also clear them yourself.
+
+Open **To-Do** or **Replies** near the account switcher to see what's outstanding and jump back to the message. Each account has its own lists. Reminders can fire while whatRust is in the tray. If the app was closed when a reminder came due, you'll see it next time you open the app.
+
+### Let the stand-in answer while you're away
+
+Turn on **Allow stand-in** in **Settings → Stand-in**, then enable it from the header of an individual chat. Each chat starts off. You can write general instructions for how you like to reply and add notes for that particular conversation.
+
+The stand-in can search available chat history and transcripts. It pauses when you reply yourself and can stay quiet and alert you when it isn't sure what to say. You can set a reply delay and hourly limit. Messages it sends are marked in the conversation. If WhatsApp rejects a send, the app shows an error and leaves the incoming message unanswered. When the app starts, it checks for recent replies before answering anything that came in while it was opening.
+
+Use the saved provider API key, a signed-in Claude Code, Grok, or Codex CLI, a Hermes service on your private network, or Grok Bot. The CLI options require a native install. Hermes and Grok Bot have per-chat tool access settings. whatRust sends the reply through the linked WhatsApp session. The stand-in runs only while whatRust is open and the computer is awake.
+
+### Accounts, language, and everyday use
+
+- **Accounts.** Add, rename, reorder, remove, or pick the account that opens first in **Settings → Accounts**. Accounts have separate logins and load as you open them. Opening another account leaves the first connected. Windows uses an account switcher, and you can use separate windows where supported. Multiple accounts on macOS require macOS 14 or later. Removing an account also removes its saved summaries, transcripts, to-dos, and stand-in files.
+- **English by default.** Settings and the whatRust interface open in English by default. Brazilian Portuguese is available under **Settings → Appearance → Language**, and an existing choice is kept. The language for transcript translation is separate.
+- **Source device.** The icon next to a message's timestamp can suggest Apple, Android, or a computer when the message ID gives a clue. You can turn it off under **Settings → Appearance**.
+- **Fewer interruptions.** Connection recovery can reload WhatsApp when **Reconnect** gets stuck. The app keeps opened accounts connected while hidden in the tray. On macOS, whatRust can import an existing WebKit key once to avoid repeated login keychain prompts.
+
+## What stays on your computer
+
+Transcription audio is processed locally. The resulting transcripts, saved summaries, to-dos, reply watches, and stand-in instructions are stored on this computer. A saved chat summary is a card inside whatRust and won't appear on your phone or in the conversation.
+
+Translation sends the transcript text to your chosen provider. Summarizing a chat sends the text for the selected range, including other people's messages and any available transcripts in that range. The stand-in sends the context it uses to the backend you choose. A signed-in CLI uses its own account, and a connected agent may retain chat context or use tools according to its settings. Only enable these features in chats whose content you're comfortable sharing with that service.
+
+## Desktop features and platform notes
+
+- The tray shows the combined unread count. You can keep whatRust in the tray when you close its window, launch it at startup, and show or hide it with **Ctrl/Cmd+Shift+W**. On Wayland, set a desktop shortcut for `whatrust --toggle`. For Flatpak, use `flatpak run io.github.karem505.whatRust --toggle`.
+- **Settings → Security** offers a password and, where supported, biometric unlock. You can lock on launch, on demand, when hiding to the tray, or after idle time. App lock protects access to the window. Use your operating system's disk encryption to protect data on disk.
+- Drag files into a conversation to attach them. Download notices offer **Open** or **Show in folder**, and you can choose your download folder, app icon, and interface size in Settings. Ordinary web links open in your browser, and `whatsapp://` links can open a chat in whatRust.
+- **Settings → Network** supports HTTP and SOCKS5 proxies. Restart after changing the proxy. Proxies that require credentials need a local relay.
+- Voice messages are supported. Calling support in whatRust is limited to macOS. Press **Ctrl/Cmd+Shift+P** to open the privacy blur controls before sharing your screen.
+- **Settings → Updates** checks this fork's GitHub releases and verifies release downloads against their published checksums. You can also upgrade a checked-in build by running the installer linked above.
+
+whatRust uses WebView2 on Windows, WKWebView on macOS, and WebKitGTK on Linux. The Linux build needs WebKitGTK 2.46.1 or newer for WhatsApp's QR login. The macOS build targets Apple Silicon and requires macOS 12.1 or newer.
+
+## Video and screenshots
+
+The upstream demo shows the app layout, account windows, and privacy blur. [Watch the demo](docs/media/whatrust-video.mp4)
+
+| WhatsApp with privacy blur | Privacy blur controls |
+| --- | --- |
+| ![WhatsApp Web in whatRust with chats blurred](docs/media/main.jpg) | ![Controls for choosing what to blur](docs/media/privacy-blur.jpg) |
+
+## Build from source
+
+Clone this fork and install the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your operating system. For Linux, the project's build dependencies are listed in the [check workflow](.github/workflows/check.yml).
 
 ```bash
-# Linux build dependencies (Ubuntu/Debian)
-sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libhunspell-dev patchelf
-
+git clone https://github.com/evdev/whatRust.git
+cd whatRust
 cargo install tauri-cli --version "^2.0" --locked
-
-cargo tauri dev      # run in development
-cargo tauri build    # build installers for the current OS
-cd src-tauri && cargo test   # run the unit tests
+cargo tauri dev
 ```
-</details>
 
-## Getting started
+Run `cargo tauri build` to package the app. See the [installer notes](installers/README.md) for how this fork publishes its downloads.
 
-1. Launch whatRust. The WhatsApp Web QR screen appears.
-2. On your phone, open **WhatsApp → Linked Devices → Link a Device** and scan the QR code.
-3. You're in. Login persists, so you won't need to scan again next launch.
-4. Closing the window hides whatRust to the tray (toggle this in Settings). Use the tray icon or the global shortcut to bring it back.
+## Credits and license
 
-## FAQ
+This is a fork of [karem505/whatRust](https://github.com/karem505/whatRust). You can [support the original developer](https://github.com/sponsors/karem505) or [report an issue with this fork](https://github.com/evdev/whatRust/issues).
 
-### What is whatRust?
-whatRust is a free, open-source, lightweight WhatsApp Web desktop client built with Rust and Tauri v2 for Linux, Windows, and macOS.
-
-### Is whatRust an official WhatsApp app?
-No. whatRust is unofficial and independent — not affiliated with WhatsApp or Meta. It loads the official `web.whatsapp.com` in a native webview.
-
-### How is whatRust different from the official WhatsApp Desktop app?
-whatRust uses your OS's native webview instead of bundling a Chromium engine (as Electron does), which makes it considerably lighter. See the [comparison table](#whatrust-vs-the-official-whatsapp-desktop-electron).
-
-### How much RAM does whatRust use?
-whatRust's own native shell is small — around 90 MB. Your **total** memory use is mostly WhatsApp Web's own footprint and scales with how many chats and how much media you keep open — commonly a few hundred MB up to ~1 GB for busy accounts, similar to WhatsApp Web in a browser tab.
-
-### Is whatRust lighter than the official WhatsApp Desktop app?
-Its native shell is lighter because it doesn't bundle a Chromium browser engine the way the Electron-based official app does, so it has less baseline overhead. The WhatsApp Web content itself uses a similar amount in either app.
-
-### Which operating systems does whatRust support?
-Linux (WebKitGTK), Windows 10/11 x64 and ARM64 (WebView2), and macOS 12.1+ (WKWebView). Windows ARM64 installers are published alongside each release, a few minutes after the other files.
-
-### Can I use a proxy (SOCKS5 or HTTP)?
-
-Yes. Open **Settings → Network**, pick **SOCKS5** or **HTTP**, enter the host and port, save, and restart whatRust (the settings page has a **Restart now** button). Every account's WhatsApp page then goes through that proxy. The default is **Off**.
-
-- Proxies that need a **username and password are not supported** — the system webview engines (WebView2, WKWebView, WebKitGTK) don't accept credentials through this route, so whatRust rejects `user:pass@` rather than half-working. Use a local relay (e.g. a SOCKS5 forwarder on `127.0.0.1`) that handles the login for you.
-- macOS needs **macOS 14 or later** for the proxy; on older versions the setting is disabled.
-- If the saved proxy is ever invalid, whatRust blocks the connection instead of silently going direct.
-- The update check and update download (see below) use the same proxy. If the saved proxy is invalid they fail instead of connecting directly. Links you open go to your default browser, which uses its own proxy settings.
-
-### Does whatRust update itself? What does it send?
-
-Yes, by default. A minute after start and then every 6 hours, whatRust asks `api.github.com` for the latest published release of `evdev/whatRust` (one anonymous request that sends only a `whatRust/<version>` User-Agent, no account, identifiers or usage data). If there is a newer version you get a notification (on Windows clicking it opens the page), an **Update to X.Y.Z** item in the tray menu, and **Settings → Updates** shows the release notes with **Download and install**. Files are downloaded from `github.com` and checked against the `SHA256SUMS` published with the release before anything is replaced or started; a mismatch, or a release without `SHA256SUMS`, is refused and the installed copy stays as it is.
-
-How it installs depends on how you installed whatRust:
-
-| Installed with | What happens |
-|---|---|
-| AppImage | replaced in place in the background; the new version starts the next time you open the app (or press **Restart now**) |
-| macOS `.app` | replaced in place (the old bundle is kept until the swap succeeds); if its folder is not writable the `.dmg` is saved to Downloads and opened |
-| Windows `.exe` setup | downloaded and verified in the background; the installer runs when you click **Restart and install** |
-| Windows `.msi` | the MSI runs after you click **Download and install** |
-| `.deb` | after you click **Download and install**; asks for your administrator password (`pkexec dpkg -i`) |
-| Flatpak | the verified bundle is saved to Downloads and opened in your software center (the sandbox cannot update itself), or run `curl -fsSL https://raw.githubusercontent.com/karem505/whatRust/master/install-flatpak.sh \| sh` |
-| built from source | only reported |
-
-To turn it off, untick **Check for updates automatically** in **Settings → Updates** (the **Check now** button still works). **Install updates automatically** only applies where no password is needed; untick it to be asked first. Versions 0.6.10 and older do not have the updater: install the newest release by hand once.
-
-### Is whatRust free and open source?
-Yes — whatRust is free and open source under the MIT License. The source is on [GitHub](https://github.com/karem505/whatRust).
-
-### Do voice messages, voice calls, and video calls work in whatRust?
-Voice messages work on every platform — whatRust grants the webview microphone and camera access. Voice and video **calls** depend on the platform:
-
-- **macOS:** yes. whatRust presents itself as the Safari that ships with your macOS — which is exactly what WKWebView is — so WhatsApp Web uses its Safari calling path.
-- **Windows:** no. WhatsApp Web doesn't offer calls to Windows browsers at all — it shows *"Make calls with the Windows app"* even in Chrome or Edge — and whatRust won't disguise your OS to get around Meta's decision. Use the official WhatsApp app for calls on Windows.
-- **Linux:** no. WhatsApp shows *"Your browser doesn't support calling"*, and that is accurate. The AppImage ships its own WebKitGTK, built **without** WebRTC, so what your distro has installed makes no difference there; the `.deb` and Flatpak use your distro's or the GNOME runtime's WebKitGTK, which usually lacks it too. Even a WebRTC-enabled WebKitGTK isn't enough today, because whatRust presents itself to WhatsApp as Chrome on Linux and WebKit can't run WhatsApp's Chrome calling path. This is an engine limitation, not a permissions problem — use the WhatsApp app on your phone for calls.
-
-### Can I use multiple WhatsApp accounts in whatRust?
-Yes. whatRust supports **multiple WhatsApp accounts** running at the same time — each opens in its own window with a fully isolated session, so different numbers stay logged in independently. Add, rename, and remove accounts from **Settings → Accounts**. On macOS this requires macOS 14 or later; Linux and Windows have no limit.
-
-### Does whatRust have an app lock?
-
-Yes. You can set a password under **Settings → Security** to require authentication before whatRust shows your chats. Biometric unlock (Windows Hello, Touch ID, or Linux polkit with an enrolled fingerprint) is an optional shortcut where the OS supports it. The lock controls window access — it does not encrypt data on disk (same posture as Signal Desktop). For at-rest protection use full-disk encryption.
-
-### The global show/hide shortcut doesn't work on my Linux desktop (Wayland)
-
-Wayland blocks apps from grabbing global hotkeys, so whatRust's built-in shortcut can't fire on a Wayland session (GNOME, KDE Plasma's Wayland, etc.) — this is a platform limitation, not specific to whatRust. The reliable approach is to let your desktop own the keybinding and have it toggle whatRust:
-
-1. **Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts → +** (GNOME; KDE has an equivalent under *Custom Shortcuts*)
-2. Name it `whatRust`, set the command to `whatrust --toggle`, and assign your key (e.g. `Ctrl+Shift+W`).
-
-`whatrust --toggle` shows the window if it's hidden and hides it if it's visible — a true toggle that works on Wayland. For the Flatpak, bind `flatpak run io.github.karem505.whatRust --toggle` instead. (The built-in shortcut still works on X11, Windows, and macOS.)
-
-### Does whatRust support the system tray and close-to-tray?
-Yes. It adds a system tray icon with an unread-message badge, can close to the tray, and forwards new messages to native OS notifications.
-
-### Do I have to log in every time I open whatRust?
-No. Login is persistent — scan the QR code once via Linked Devices and you stay signed in across restarts.
-
-### Is whatRust safe? Does it read my messages?
-whatRust loads the official `web.whatsapp.com` in a native webview. It requests only the webview, microphone, and camera access that WhatsApp Web itself needs, and it is open source, so the code can be audited. The optional to-do list stores, on this computer only, the text of messages you explicitly add to it and the reminders you set. That list stays on this computer. Chat text is sent for a reply only after you turn the stand-in on for one individual chat. That text — and a voice-note transcript, if transcription is on — goes to the AI provider chosen in Settings, to the Claude Code, Grok, or Codex program you already signed in to on this computer, to a Hermes profile you point at on this network, or to your Grok Bot account. Hermes and Grok Bot may act with the access you set for that chat and may keep a copy. whatRust still sends the WhatsApp message itself. whatRust leaves a program's login where the program stored it. Leaving a program signed in and answering unattended can reach the limit of your plan.
-
-### My WhatsApp account went "under review" after linking whatRust — why?
-whatRust doesn't talk to WhatsApp's servers itself: it shows the official `web.whatsapp.com` page, exactly as a browser tab would, and linking it is the same Linked Devices flow as WhatsApp Web. A stand-in reply is still a message sent by that linked device, the same way a message you type is. Account reviews are decided by WhatsApp's own automated systems, which whatRust can't see or influence. If your account is flagged, appeal through the WhatsApp app on your phone.
-
-## Limitations
-
-- **Windows unread count**: Windows tray icons ignore text labels, so the unread *number* appears only in the hover tooltip (the icon still switches to a badged variant). macOS shows the count on the Dock icon and Linux on the tray icon.
-- **Linux launcher/dock badge**: the unread count is also sent to the launcher icon via the Unity `LauncherEntry` D-Bus API (.deb, AppImage with its `install.sh` desktop entry, and Flatpak). It shows on KDE Plasma's task manager, Dash to Dock / Ubuntu Dock, Plank and Latte; stock GNOME shows no app-icon badge without one of those extensions.
-- **Notification click** focuses the window on Windows only — elsewhere use the tray icon or the global shortcut.
-- **macOS** builds are unsigned and currently Apple Silicon (arm64) only. A `.dmg` downloaded with a browser shows "whatRust is damaged" until its quarantine flag is cleared (see Install).
-- **Windows ARM64** is a separate build attached after the rest of a release, so a brand-new release can lack the ARM64 installer for a few minutes. The one-line installer picks x64 or ARM64 from the PC's CPU. On ARM64, voice and video transcription use Qualcomm GenieX with Qwen3-ASR 0.6B Q8 locally; install GenieX CLI and download the model in Settings → Transcription. This requires a supported Snapdragon NPU, about 1.1 GiB of model storage, and additional memory while running. Audio is converted locally and sent to a private loopback server started by whatRust. Other platforms retain their FluidVoice setup.
-- **macOS and Windows file drops** go directly to WhatsApp through the native webview. Drag files from Finder/File Explorer onto the open conversation; use the attach (+) button if a drag source does not provide a file the webview can read.
-- **Linux drag-and-drop limits**: up to 200 files per drop, 500 MB per file, and 500 MB per drop total. Base64 transport is decoded incrementally while files stream in, but the page must still hold the final `File` data in memory. Larger batches can always be sent via WhatsApp's attach (+) → Document picker, which is not routed through these limits. Skipped files are reported in a notification. Native drops on macOS and Windows follow WhatsApp's own attachment limits.
-- **Multiple accounts on macOS** require macOS 14+ (older macOS runs a single account); Linux and Windows are unrestricted.
-- **To-do reminders** fire only while whatRust is running (including in the tray). A reminder that comes due while the app is closed is shown the next time it opens, together with the others, instead of one notification per missed item.
-- **Stand-in** replies only while this computer is awake and whatRust is running, and only in an individual chat. It can use only the history WhatsApp Web has already synced. Claude Code, Grok, and Codex are unavailable in the Flatpak build. Hermes and Grok Bot stay available there: chat text goes to the Hermes address you type, or to your Grok Bot account, which may act and keep a copy. whatRust is still the only program that sends the WhatsApp message.
-- **Flatpak file access**: native drag-and-drop needs read-only access to your home
-  files because Tauri does not yet route OS drops through the File Transfer portal.
-  whatRust writes only to Downloads, its sandbox data, and its optional autostart entry.
-  The wrapped WhatsApp page has no general filesystem API.
-
-## Contributing
-
-Contributions to this open-source WhatsApp client are welcome — open an issue or a pull request on [GitHub](https://github.com/karem505/whatRust).
-
-## Disclaimer
-
-whatRust is an unofficial, independent project. It is **not affiliated with, endorsed by, or sponsored by WhatsApp LLC or Meta Platforms, Inc.** "WhatsApp" is a trademark of its respective owner. whatRust only loads the official `web.whatsapp.com` interface in a native webview and does not modify or intercept WhatsApp's services.
-
-## License
-
-Released under the [MIT License](LICENSE).
-
-## Built with
-
-[Rust](https://www.rust-lang.org/) · [Tauri v2](https://tauri.app/) · [WhatsApp Web](https://web.whatsapp.com/)
+whatRust is independent of WhatsApp and Meta. It runs the official WhatsApp Web interface inside the desktop app. The code is available under the [MIT License](LICENSE).
