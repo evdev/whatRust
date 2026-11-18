@@ -176,7 +176,7 @@
     "Transcribe voice notes": "Transcrever notas de voz",
     "Shows the transcript under each voice note. The audio stays on this computer and is transcribed by FluidVoice.": "Mostra a transcrição embaixo de cada nota de voz. O áudio fica neste computador e é transcrito pelo FluidVoice.",
     "FluidVoice port": "Porta do FluidVoice",
-    "FluidVoice's local API. The default is 47733.": "API local do FluidVoice. O padrão é 47733.",
+    "FluidVoice's local API. The default is 47733; the Windows beta uses 47610 automatically.": "API local do FluidVoice. O padrão é 47733; a versão beta do Windows usa 47610 automaticamente.",
     "Connection": "Conexão",
     "Not checked yet.": "Ainda não verificada.",
     "Test connection": "Testar conexão",

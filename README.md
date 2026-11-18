@@ -199,6 +199,9 @@ on ARM64 it installs Qualcomm GenieX CLI and downloads Qwen3-ASR 0.6B Q8
 installs FluidVoice; open FluidVoice afterward, download a speech model, and
 enable its local API. Existing installations and models are kept. If you skip
 this step or it fails, use Settings → Transcription to set it up later.
+The Windows beta uses its own local API on port 47610; whatRust reads its local
+API token from FluidVoice's settings. Existing default-port settings continue to
+work automatically.
 Silent setup (`/S`) skips transcription downloads unless `/TRANSCRIBE` is
 explicitly supplied.
 
