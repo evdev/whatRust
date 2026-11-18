@@ -1657,6 +1657,12 @@ async fn ask_for_audio(
         .map_err(|_| tr("Não foi possível reproduzir o áudio.").to_string())
 }
 
+/// Windows and macOS use the system title bar, so the popup can be dragged and
+/// resized and the page hides its own close button. Linux keeps the borderless card.
+fn uses_native_popup_frame(windows: bool, macos: bool) -> bool {
+    windows || macos
+}
+
 fn present(app: &AppHandle, label: &str) {
     evict_overflow(app);
     let (placements, scale) = popup_layout(app);
@@ -1667,24 +1673,27 @@ fn present(app: &AppHandle, label: &str) {
     let Some((_, position)) = placements.iter().find(|(item, _)| item == label) else {
         return;
     };
+    let native = uses_native_popup_frame(cfg!(windows), cfg!(target_os = "macos"));
     let built = WebviewWindowBuilder::new(app, label, WebviewUrl::App("mention-popup.html".into()))
         .initialization_script(crate::i18n::init_script())
-        .initialization_script(format!("window.__MENTION_NATIVE_FRAME={};", cfg!(windows)))
+        .initialization_script(format!("window.__MENTION_NATIVE_FRAME={native};"))
         .additional_browser_args(crate::window::WEBVIEW2_SYNC_ARGS)
         .title("whatRust")
         .position(position.x, position.y)
         .inner_size(POPUP_W, POPUP_H)
         .min_inner_size(POPUP_MIN_W, POPUP_MIN_H)
-        .resizable(cfg!(windows))
+        .resizable(native)
         .maximizable(false)
         .minimizable(false)
-        .decorations(cfg!(windows))
+        .decorations(native)
         .shadow(true)
         .always_on_top(true)
         .skip_taskbar(true)
         .focused(false)
-        // On Windows, focused(false) applies to the initial show during creation.
-        .visible(cfg!(windows))
+        // Creating the window visible is what makes focused(false) stick: Windows
+        // applies it to the initial show, and macOS orders the window front
+        // without making it key. A later show() would take keyboard focus.
+        .visible(native)
         .build();
     if let Ok(win) = built {
         crate::window::allow_popup_microphone(&win);
@@ -1698,9 +1707,9 @@ fn present(app: &AppHandle, label: &str) {
         });
         let (placements, scale) = popup_layout(app);
         layout(app, &placements, scale);
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         raise_popup(&win);
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         let _ = win.show();
     } else {
         forget(app, label, false);
@@ -1708,26 +1717,47 @@ fn present(app: &AppHandle, label: &str) {
     }
 }
 
-#[cfg(windows)]
+/// Keep the popup above other windows without taking keyboard focus.
+#[cfg(any(windows, target_os = "macos"))]
 fn raise_popup(win: &tauri::WebviewWindow) {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    };
-
-    if let Ok(hwnd) = win.hwnd() {
-        let result = unsafe {
-            SetWindowPos(
-                hwnd,
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-            )
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
         };
-        if let Err(err) = result {
-            crate::dlog::log(&format!("mention: could not raise popup: {err}"));
+
+        if let Ok(hwnd) = win.hwnd() {
+            let result = unsafe {
+                SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+                )
+            };
+            if let Err(err) = result {
+                crate::dlog::log(&format!("mention: could not raise popup: {err}"));
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // NSFloatingWindowLevel. orderFrontRegardless shows the window while
+        // another app is active and does not make it key, matching SWP_NOACTIVATE.
+        const FLOATING: isize = 3;
+        let Ok(ns) = win.ns_window() else {
+            crate::dlog::log("mention: popup has no window to raise");
+            return;
+        };
+        unsafe {
+            let ns = ns as *mut objc2::runtime::AnyObject;
+            let _: () = objc2::msg_send![ns, setLevel: FLOATING];
+            let no: bool = false;
+            let _: () = objc2::msg_send![ns, setHidesOnDeactivate: no];
+            let _: () = objc2::msg_send![ns, orderFrontRegardless];
         }
     }
 }
@@ -1754,9 +1784,9 @@ fn popup_layout(app: &AppHandle) -> (Vec<Placement>, f64) {
     if order.is_empty() {
         return (Vec::new(), 1.0);
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     let foreground = foreground_monitor(app);
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     let foreground: Option<Monitor> = None;
     let monitor = foreground
         .or_else(|| {
@@ -1840,6 +1870,85 @@ fn foreground_monitor(app: &AppHandle) -> Option<Monitor> {
     let x = (f64::from(rect.left) + f64::from(rect.right)) / 2.0;
     let y = (f64::from(rect.top) + f64::from(rect.bottom)) / 2.0;
     app.monitor_from_point(x, y).ok().flatten()
+}
+
+/// The display under the frontmost ordinary window. Floating windows (including
+/// these popups) are skipped, so a new popup does not chase itself.
+#[cfg(target_os = "macos")]
+fn foreground_monitor(app: &AppHandle) -> Option<Monitor> {
+    use std::ptr::NonNull;
+
+    use objc2_core_foundation::{CFArray, CFDictionary, CFRetained, CFString, CFType};
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> *mut CFArray;
+    }
+
+    const ON_SCREEN: u32 = 1;
+    const EXCLUDE_DESKTOP: u32 = 1 << 4;
+
+    let raw = unsafe { CGWindowListCopyWindowInfo(ON_SCREEN | EXCLUDE_DESKTOP, 0) };
+    let list = unsafe { CFRetained::<CFArray<CFType>>::from_raw(NonNull::new(raw.cast())?) };
+    let layer_key = CFString::from_str("kCGWindowLayer");
+    let alpha_key = CFString::from_str("kCGWindowAlpha");
+    let bounds_key = CFString::from_str("kCGWindowBounds");
+    for index in 0..list.len() {
+        let Some(item) = list.get(index) else {
+            continue;
+        };
+        let Ok(info) = item.downcast::<CFDictionary>() else {
+            continue;
+        };
+        // Window-info keys and values are CFStrings and other CF types.
+        let info = unsafe { info.cast_unchecked::<CFString, CFType>() };
+        let layer = dict_number(&info, &layer_key).unwrap_or(0.0);
+        if layer.abs() > 0.5 {
+            continue;
+        }
+        if dict_number(&info, &alpha_key).is_some_and(|alpha| alpha < 0.01) {
+            continue;
+        }
+        let Some(bounds) = info.get(&*bounds_key) else {
+            continue;
+        };
+        let Ok(bounds) = bounds.downcast::<CFDictionary>() else {
+            continue;
+        };
+        let bounds = unsafe { bounds.cast_unchecked::<CFString, CFType>() };
+        let (Some(x), Some(y), Some(width), Some(height)) = (
+            dict_number(&bounds, &CFString::from_str("X")),
+            dict_number(&bounds, &CFString::from_str("Y")),
+            dict_number(&bounds, &CFString::from_str("Width")),
+            dict_number(&bounds, &CFString::from_str("Height")),
+        ) else {
+            continue;
+        };
+        if width < 20.0 || height < 20.0 {
+            continue;
+        }
+        return app
+            .monitor_from_point(x + width / 2.0, y + height / 2.0)
+            .ok()
+            .flatten();
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn dict_number(
+    dict: &objc2_core_foundation::CFDictionary<
+        objc2_core_foundation::CFString,
+        objc2_core_foundation::CFType,
+    >,
+    key: &objc2_core_foundation::CFString,
+) -> Option<f64> {
+    use objc2_core_foundation::CFNumber;
+    let value = dict.get(key)?;
+    let number = value.downcast_ref::<CFNumber>()?;
+    number
+        .as_f64()
+        .or_else(|| number.as_i64().map(|n| n as f64))
 }
 
 fn layout(app: &AppHandle, placements: &[Placement], _scale: f64) {
@@ -1949,12 +2058,19 @@ mod tests {
     use super::{
         answered_by, boot_script_from, duplicate_photo, hold_drop_chat, hold_push, message_token,
         popup_origin, prepare_reply, release_of, reply_text, send_script, shown_body, shown_name,
-        shown_preview, Held, Release, FILE_MAX, POPUP_H, POPUP_W,
+        shown_preview, uses_native_popup_frame, Held, Release, FILE_MAX, POPUP_H, POPUP_W,
     };
     use crate::settings::MentionAccountPrefs;
     use std::collections::{HashMap, VecDeque};
     use std::time::{Duration, Instant};
     use tauri::LogicalSize;
+
+    #[test]
+    fn reply_popups_use_a_native_frame_on_windows_and_mac() {
+        assert!(uses_native_popup_frame(true, false));
+        assert!(uses_native_popup_frame(false, true));
+        assert!(!uses_native_popup_frame(false, false));
+    }
 
     #[test]
     fn the_newest_popup_is_the_top_one() {

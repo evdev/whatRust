@@ -19,11 +19,12 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::OnceLock;
 
 use block2::DynBlock;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject, Bool};
+use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
 use objc2::{define_class, msg_send, sel, ClassType};
 use objc2_foundation::{
     NSBundle, NSData, NSDictionary, NSObject, NSObjectProtocol, NSProcessInfo, NSString, NSUUID,
@@ -82,6 +83,10 @@ define_class!(
         /// Selector spelling is load-bearing: WebKit checks `webCryptoMasterKey:`.
         #[unsafe(method(webCryptoMasterKey:))]
         fn web_crypto_master_key(&self, completion: &DynBlock<dyn Fn(*mut AnyObject)>) {
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                crate::dlog::log("webcrypto: WebKit asked for the master key");
+            }
             let Some(key) = KEY.get().filter(|key| acceptable(key)) else {
                 completion.call((std::ptr::null_mut(),));
                 return;
@@ -99,6 +104,10 @@ define_class!(
 /// Load (or import) the master key and point every account store at it.
 /// Stores are attached again in `attach` just before each webview exists.
 pub fn prepare(app: &AppHandle) {
+    // Wry asks WebKit for the store again while building the window. Stamp
+    // the delegate on that object too, or the second account's store still
+    // falls through to the login keychain.
+    install_fetch_hook();
     if !ensure_key(app) {
         return;
     }
@@ -119,6 +128,11 @@ pub fn attach(store_uuid: Option<[u8; 16]>) {
     if KEY.get().is_none() {
         return;
     }
+    // The navigation-delegate method has to exist before wry builds the
+    // webview. The class itself appears with the first webview, so this
+    // retries until then, including when the second account is opened off
+    // the main thread.
+    install_fetch_hook();
     if objc2::MainThreadMarker::new().is_none() {
         struct Job {
             uuid: Option<[u8; 16]>,
@@ -137,6 +151,133 @@ pub fn attach(store_uuid: Option<[u8; 16]>) {
         return;
     }
     attach_on_main(store_uuid);
+}
+
+/// `dataStoreForIdentifier:` / `defaultDataStore` return the object wry puts
+/// on the webview. Setting the delegate on an earlier instance is not enough:
+/// the instance created for the second account is the one WebKit consults.
+fn install_fetch_hook() {
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.load(Ordering::Acquire) {
+        install_navigation_key();
+        return;
+    }
+    let Some(cls) = AnyClass::get(c"WKWebsiteDataStore") else {
+        return;
+    };
+    let for_id: Imp = unsafe { std::mem::transmute(store_for_identifier as *const ()) };
+    let default: Imp = unsafe { std::mem::transmute(default_store as *const ()) };
+    if !hook_class_method(cls, sel!(dataStoreForIdentifier:), for_id, &ORIG_FOR_ID)
+        || !hook_class_method(cls, sel!(defaultDataStore), default, &ORIG_DEFAULT)
+    {
+        return;
+    }
+    DONE.store(true, Ordering::Release);
+    install_navigation_key();
+    crate::dlog::log("webcrypto: data store fetches carry the master key");
+}
+
+static ORIG_FOR_ID: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static ORIG_DEFAULT: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+
+fn hook_class_method(cls: &AnyClass, name: Sel, imp: Imp, slot: &AtomicPtr<()>) -> bool {
+    if !slot.load(Ordering::Acquire).is_null() {
+        return true;
+    }
+    unsafe {
+        let method = objc2::ffi::class_getClassMethod(cls, name);
+        if method.is_null() {
+            return false;
+        }
+        let Some(old) = objc2::ffi::method_getImplementation(method) else {
+            return false;
+        };
+        slot.store(old as *mut (), Ordering::Release);
+        objc2::ffi::method_setImplementation(method, imp);
+    }
+    true
+}
+
+unsafe extern "C-unwind" fn store_for_identifier(
+    cls: *mut AnyClass,
+    cmd: Sel,
+    uuid: *mut AnyObject,
+) -> *mut AnyObject {
+    let orig = ORIG_FOR_ID.load(Ordering::Acquire);
+    if orig.is_null() {
+        return std::ptr::null_mut();
+    }
+    let f: unsafe extern "C-unwind" fn(*mut AnyClass, Sel, *mut AnyObject) -> *mut AnyObject =
+        std::mem::transmute(orig);
+    let store = unsafe { f(cls, cmd, uuid) };
+    stamp(store);
+    store
+}
+
+unsafe extern "C-unwind" fn default_store(cls: *mut AnyClass, cmd: Sel) -> *mut AnyObject {
+    let orig = ORIG_DEFAULT.load(Ordering::Acquire);
+    if orig.is_null() {
+        return std::ptr::null_mut();
+    }
+    let f: unsafe extern "C-unwind" fn(*mut AnyClass, Sel) -> *mut AnyObject =
+        std::mem::transmute(orig);
+    let store = unsafe { f(cls, cmd) };
+    stamp(store);
+    store
+}
+
+fn stamp(store: *mut AnyObject) {
+    if store.is_null() || KEY.get().is_none() {
+        return;
+    }
+    let store = unsafe { &*store };
+    let selector = sel!(set_delegate:);
+    let responds: Bool = unsafe { msg_send![store, respondsToSelector: selector] };
+    if !responds.as_bool() {
+        return;
+    }
+    let delegate = delegate();
+    unsafe {
+        let _: () = msg_send![store, set_delegate: delegate];
+    }
+}
+
+/// Page loads that miss the data-store delegate ask the navigation delegate
+/// before the keychain. Wry's delegate does not implement that, so the second
+/// account's page falls through. The class exists once the first webview does.
+fn install_navigation_key() {
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.load(Ordering::Acquire) {
+        return;
+    }
+    let Some(class) = AnyClass::get(c"WryNavigationDelegate") else {
+        return;
+    };
+    let added = unsafe {
+        let imp: Imp = std::mem::transmute(navigation_master_key as *const ());
+        objc2::ffi::class_addMethod(
+            class as *const AnyClass as *mut AnyClass,
+            sel!(_webCryptoMasterKeyForWebView:),
+            imp,
+            c"@24@0:8@16".as_ptr(),
+        )
+    };
+    if added.as_bool() {
+        crate::dlog::log("webcrypto: page delegate can answer the master key");
+    }
+    DONE.store(true, Ordering::Release);
+}
+
+unsafe extern "C-unwind" fn navigation_master_key(
+    _this: *mut AnyObject,
+    _cmd: Sel,
+    _webview: *mut AnyObject,
+) -> *mut AnyObject {
+    let Some(key) = KEY.get().filter(|key| acceptable(key)) else {
+        return std::ptr::null_mut();
+    };
+    let data = unsafe { NSData::dataWithBytes_length(key.as_ptr().cast(), key.len()) };
+    Retained::autorelease_return(data).cast()
 }
 
 fn attach_on_main(store_uuid: Option<[u8; 16]>) {

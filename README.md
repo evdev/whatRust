@@ -44,7 +44,7 @@ When whatRust opens, scan the QR code from **WhatsApp → Linked Devices → Lin
 
 Open **Settings → Notifications**, choose an account, and turn on alerts for the events you care about: a personal mention, a reply to one of your messages, a direct message, or a group `@everyone` tag. You can choose the sound and reply popup separately for each account, and use a custom sound. These alerts work in muted chats and while whatRust is in the foreground.
 
-On Windows, reply popups appear in the top-right corner of the display containing the foreground window. They float above other app windows and leave keyboard focus where it is until you interact with the popup.
+On Windows and macOS, reply popups appear in the top-right corner of the display containing the foreground window. They float above other app windows and leave keyboard focus where it is until you interact with the popup.
 Drag the title bar to move a popup, or drag an edge or corner to resize it.
 
 The popup shows who wrote, the message, and a photo preview when available. You can play an incoming voice note, read its transcript when transcription is enabled, or reply with text, a file, a photo, or a recorded voice note. **Open Chat** takes you to the conversation for that account. The popup replaces the ordinary notification for that message. Repeat reports of the same photo are filtered, and different photos still get their own alerts.
