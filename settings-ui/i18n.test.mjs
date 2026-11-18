@@ -4,6 +4,11 @@ import { createRequire } from "node:module";
 import assert from "node:assert/strict";
 
 const require = createRequire(import.meta.url);
+const defaultI18n = require("./i18n.js");
+assert.equal(defaultI18n.lang(), "en");
+assert.equal(defaultI18n.t("Save"), "Save");
+delete require.cache[require.resolve("./i18n.js")];
+globalThis.__WR_LANG = "pt-BR";
 const I18n = require("./i18n.js");
 const { PT, norm, t } = I18n;
 const dir = new URL(".", import.meta.url);
@@ -33,7 +38,7 @@ function visibleTexts(html) {
 }
 
 check("Portuguese translates English source strings", () => {
-  assert.equal(t("Save"), "Salvar"); // default language is pt-BR
+  assert.equal(t("Save"), "Salvar");
   assert.equal(t("Open {0}", ["Ana"]), "Abrir Ana");
   assert.equal(t("NPU test failed. Confirm GenieX and the Q8 model are installed and this computer has a supported Snapdragon NPU. ({0})", ["erro"]), "Falha no teste da NPU. Confirme se o GenieX e o modelo Q8 estão instalados e se este computador tem uma NPU Snapdragon compatível. (erro)");
 });

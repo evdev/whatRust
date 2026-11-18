@@ -444,7 +444,7 @@
     "Saved ✓": "Saved ✓",
   };
 
-  var lang = root.__WR_LANG === "en" ? "en" : "pt-BR";
+  var lang = root.__WR_LANG === "pt-BR" ? "pt-BR" : "en";
 
   function norm(s) { return String(s).replace(/\s+/g, " ").trim(); }
   function has(k) { return Object.prototype.hasOwnProperty.call(PT, k); }
@@ -539,7 +539,7 @@
   }
 
   api.setLang = function (next) {
-    lang = next === "en" ? "en" : "pt-BR";
+    lang = next === "pt-BR" ? "pt-BR" : "en";
     root.__WR_LANG = lang;
     document.documentElement.lang = lang;
     translateAll();
