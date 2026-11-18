@@ -34,12 +34,13 @@ use std::time::Duration;
 /// without forking this file. Empty is ignored.
 pub const REPO: &str = match option_env!("WHATRUST_REPO") {
     Some(repo) if !repo.is_empty() => repo,
-    _ => "karem505/whatRust",
+    _ => "evdev/whatRust",
 };
 pub const FEED_ENV: &str = "WHATRUST_UPDATE_FEED";
 /// Where the Flatpak fallback sends people who cannot use the bundle directly.
-pub const FLATPAK_COMMAND: &str =
-    "curl -fsSL https://raw.githubusercontent.com/karem505/whatRust/master/install-flatpak.sh | sh";
+pub fn flatpak_command() -> String {
+    format!("curl -fsSL https://raw.githubusercontent.com/{REPO}/master/install-flatpak.sh | sh")
+}
 const NOTES_LIMIT: usize = 60_000;
 
 /// Release-asset URL prefix. Derived from [`REPO`] so the download allow-list and
@@ -1553,7 +1554,7 @@ mod tests {
         assert!(!overridden);
         assert_eq!(
             url,
-            "https://api.github.com/repos/karem505/whatRust/releases/latest"
+            format!("https://api.github.com/repos/{REPO}/releases/latest")
         );
     }
 

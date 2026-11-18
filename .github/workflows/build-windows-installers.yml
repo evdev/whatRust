@@ -1,0 +1,48 @@
+name: Build Windows installers
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/build-windows-installers.yml
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x64
+          - runner: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Put clang on PATH for ring
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          $clang = Get-Command clang.exe -ErrorAction SilentlyContinue
+          if (-not $clang) {
+            $clang = Get-ChildItem -Path "$env:ProgramFiles\LLVM","$env:ProgramFiles\Microsoft Visual Studio" -Filter clang.exe -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+          }
+          if (-not $clang) { throw 'clang.exe not found' }
+          $path = if ($clang.Source) { $clang.Source } else { $clang.FullName }
+          Split-Path $path | Add-Content -Path $env:GITHUB_PATH -Encoding utf8NoBOM
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: "./src-tauri -> target"
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        with:
+          args: --bundles nsis -- --locked
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: whatRust-${{ matrix.arch }}-setup
+          path: src-tauri/target/**/bundle/nsis/*_${{ matrix.arch }}-setup.exe
+          if-no-files-found: error

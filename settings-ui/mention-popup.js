@@ -104,7 +104,12 @@ async function watchTranscript() {
 }
 
 async function openChat() {
+  const button = document.getElementById("open");
+  if (button.disabled) return;
+  button.disabled = true;
+  showError("");
   try { await invoke("mention_open"); } catch (error) { showError(String(error)); }
+  finally { button.disabled = false; }
 }
 
 const FILE_MAX = 8 * 1024 * 1024;

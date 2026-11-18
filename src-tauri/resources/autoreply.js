@@ -343,6 +343,8 @@
   }
 
   function alreadyAnswered(chatId, msg, finalOnly) {
+    var saved = (rowFor(chatId) || {}).answered_tokens || [];
+    if (msg.msg_token && saved.indexOf(msg.msg_token) !== -1) return true;
     var bag = answered[chatId] || [];
     var now = Date.now();
     for (var i = 0; i < bag.length; i++) {
@@ -1268,38 +1270,48 @@
     })).then(function () { return messages; });
   }
 
-  function sendText(chatId, step) {
+  async function sendText(chatId, step, pendingMsgs) {
     var wpp = root.WPP;
-    if (!wpp || !wpp.chat || typeof wpp.chat.sendTextMessage !== "function") return Promise.resolve();
-    if (statusOf(chatId) !== "armed") return Promise.resolve();
-    var wait = Math.max(1500, Math.min(4000, String(step.text || "").length * 25));
-    inflight[chatId] = { text: step.text, until: Date.now() + 20000, turn_id: step.turn_id };
-    if (typeof wpp.chat.markIsComposing === "function") {
-      Promise.resolve(wpp.chat.markIsComposing(chatId, wait)).catch(function () {});
+    var armedAt = (rowFor(chatId) || {}).armed_at_ms;
+    if (!wpp || !wpp.chat || typeof wpp.chat.sendTextMessage !== "function") {
+      throw new Error("WhatsApp is still opening");
     }
-    return new Promise(function (resolve) {
-      setTimeout(function () {
-        invoke("autoreply_state").then(applySnapshot).catch(function () {}).then(function () {
-          if (!prefs.enabled || statusOf(chatId) !== "armed") {
-            resolve();
-            return;
-          }
-          Promise.resolve(wpp.chat.sendTextMessage(chatId, step.text, { createChat: false })).then(function (sent) {
-            var id = sent && (typeof sent.id === "string" ? sent.id : widText(sent.id));
-            var token = messageToken(id);
-            rememberSend(chatId, step.text, token);
-            return invoke("autoreply_record_sent", {
-              chat_id: chatId,
-              turn_id: step.turn_id || "",
-              msg_token: token,
-              text: step.text,
-            });
-          }).catch(function () {}).then(function () {
-            refresh().then(resolve);
-          });
-        });
-      }, wait);
+    if (statusOf(chatId) !== "armed") return false;
+    var wait = Math.max(1500, Math.min(4000, String(step.text || "").length * 25));
+    if (typeof wpp.chat.markIsComposing === "function") {
+      Promise.resolve().then(function () { return wpp.chat.markIsComposing(chatId, wait); }).catch(function () {});
+    }
+    await new Promise(function (resolve) { setTimeout(resolve, wait); });
+    applySnapshot(await invoke("autoreply_state"));
+    if (!prefs.enabled || statusOf(chatId) !== "armed" || rowFor(chatId).armed_at_ms !== armedAt) {
+      return false;
+    }
+    inflight[chatId] = { text: step.text, until: Date.now() + 20000, turn_id: step.turn_id };
+    var token;
+    try {
+      var sent = await wpp.chat.sendTextMessage(chatId, step.text, { createChat: false, waitForAck: true });
+      var id = sent && (typeof sent.id === "string" ? sent.id : widText(sent.id));
+      var result = sent && sent.sendMsgResult && sent.sendMsgResult.messageSendResult;
+      var codes = wpp.whatsapp && wpp.whatsapp.SendMsgResult;
+      if (!id || sent.ack < 0 || (result != null && codes && codes.OK != null && result !== codes.OK)) {
+        throw new Error("WhatsApp rejected the reply");
+      }
+      token = messageToken(id);
+      rememberSend(chatId, step.text, token);
+    } finally {
+      delete inflight[chatId];
+    }
+    rememberAnswered(chatId, pendingMsgs, 600000, true);
+    await invoke("autoreply_record_sent", {
+      chat_id: chatId,
+      turn_id: step.turn_id || "",
+      msg_token: token,
+      incoming_tokens: (pendingMsgs || []).map(function (msg) { return msg.msg_token || messageToken(msg.id); }),
+      text: step.text,
+    }).catch(function () {
+      // The message is already sent. Keep it marked in this webview.
     });
+    return true;
   }
 
   function runTool(chatId, step) {
@@ -1391,10 +1403,14 @@
         });
       }
       if (step.kind === "send") {
-        // A sent reply is final; remember it for the rest of the session so a
-        // late duplicate event cannot reopen the same message.
-        rememberAnswered(chatId, pendingMsgs, 600000, true);
-        return sendText(chatId, step);
+        return sendText(chatId, step, pendingMsgs).then(function (sent) {
+          if (!sent) forgetAnswered(chatId, pendingMsgs);
+        }).catch(function () {
+          forgetAnswered(chatId, pendingMsgs);
+          showBanner(chatId, root.__WR_LANG === "pt-BR"
+            ? "A resposta automática não foi enviada."
+            : "The stand-in could not send the reply.");
+        }).then(refresh);
       }
       if (step.kind === "skip" || step.kind === "paused") {
         rememberAnswered(chatId, pendingMsgs, 600000, true);
@@ -1517,8 +1533,14 @@
     ids.forEach(function (id) {
       Promise.resolve(wpp.chat.getMessages(id, { count: 5 })).then(function (list) {
         var name = (chats[id] && chats[id].name) || "";
-        (list || []).map(mapMessage).forEach(function (msg) {
-          if (!msg || msg.from_me) return;
+        var messages = (list || []).map(mapMessage);
+        var lastOutgoing = messages.reduce(function (at, msg) {
+          return msg.from_me ? Math.max(at, msg.timestamp_ms) : at;
+        }, 0);
+        messages.forEach(function (msg) {
+          // With second-resolution timestamps, an incoming message from the
+          // same second as an outgoing one is ambiguous. Leave it alone.
+          if (msg.from_me || msg.timestamp_ms <= lastOutgoing) return;
           schedule(id, name, msg);
         });
       }).catch(function () {});

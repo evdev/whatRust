@@ -2,7 +2,7 @@
 set -eu
 
 APP_ID="io.github.karem505.whatRust"
-BASE_URL="https://github.com/karem505/whatRust/releases/latest/download"
+BASE_URL="https://github.com/evdev/whatRust/releases/latest/download"
 
 if ! command -v flatpak >/dev/null 2>&1; then
   printf '%s\n' "Flatpak is required. Install it from https://flatpak.org/setup/ and run this installer again." >&2

@@ -33,16 +33,20 @@ const MAX_SPAN_MS: u64 = 73 * 3_600_000;
 const FUTURE_SLACK_MS: u64 = 5 * 60_000;
 const MAX_ENTRIES: usize = 200;
 
+#[derive(Default)]
 pub struct ChatSummaryState {
-    gate: tokio::sync::Mutex<()>,
+    state: std::sync::Mutex<SummaryState>,
 }
 
-impl Default for ChatSummaryState {
-    fn default() -> Self {
-        Self {
-            gate: tokio::sync::Mutex::new(()),
-        }
-    }
+#[derive(Default)]
+struct SummaryState {
+    next_draft: u64,
+    drafts: std::collections::HashMap<String, Draft>,
+}
+
+struct Draft {
+    id: u64,
+    summary: Option<ChatSummary>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -532,7 +536,7 @@ pub async fn summarize_chat(
     covered_from_ms: u64,
     sampled: bool,
     message_count: u32,
-) -> Result<ChatSummary, String> {
+) -> Result<u64, String> {
     let account = account_of(&window, &app)?;
     if !valid_chat_id(&chat_id) || !valid_range(&range) {
         return Err("bad_request".into());
@@ -540,51 +544,98 @@ pub async fn summarize_chat(
     check_window(window_start_ms, window_end_ms, now_ms()).map_err(str::to_string)?;
     check_transcript(&transcript).map_err(str::to_string)?;
     let state = app.state::<ChatSummaryState>();
-    {
-        let _gate = state.gate.lock().await;
+    let draft_id = {
+        let mut state = crate::lock::guard(&state.state);
+        require_account(&app, &account)?;
         let mut settings = settings::load(&app);
         allow_summary(settings.chat_summary_consent, acknowledged).map_err(str::to_string)?;
         if acknowledged && !settings.chat_summary_consent {
             settings.chat_summary_consent = true;
             settings::save(&app, &settings).map_err(|err| err.to_string())?;
         }
-    }
+        state.next_draft += 1;
+        let id = state.next_draft;
+        state
+            .drafts
+            .insert(account.clone(), Draft { id, summary: None });
+        id
+    };
     let settings = settings::load(&app);
     let key = match keys::get_key(&app, &settings.ai_provider) {
         Ok(Some(key)) if !key.is_empty() => key,
         _ => return Err("no_key".into()),
     };
     let (points, dropped) = run_model(&settings, &key, &transcript).await?;
-    let _gate = state.gate.lock().await;
-    let now = now_ms();
     let covered = if covered_from_ms >= window_start_ms && covered_from_ms <= window_end_ms {
         covered_from_ms
     } else {
         window_start_ms
     };
-    let path = account_path(&app, &account)?;
-    let mut file = load_file(&path);
-    let stored = upsert(
-        &mut file,
-        ChatSummary {
+    let mut state = crate::lock::guard(&state.state);
+    let draft = state
+        .drafts
+        .get_mut(&account)
+        .filter(|draft| draft.id == draft_id);
+    if let Some(draft) = draft {
+        draft.summary = Some(ChatSummary {
             id: String::new(),
             chat_id,
             chat_name: clean_name(&chat_name),
             range,
             window_start_ms,
             window_end_ms,
-            created_at: now,
-            updated_at: now,
+            created_at: 0,
+            updated_at: 0,
             anchor_token: clean_anchor(&anchor_token),
             message_count: message_count.min(10_000),
             covered_from_ms: covered,
             sampled: sampled || dropped,
             points,
-        },
-    );
+        });
+    }
+    Ok(draft_id)
+}
+
+/// The page saves only after it has accepted the model result. Discarding a
+/// draft cannot modify a previous summary.
+#[tauri::command]
+pub fn chat_summary_save(
+    window: Webview,
+    app: AppHandle,
+    draft_id: u64,
+) -> Result<ChatSummary, String> {
+    let account = account_of(&window, &app)?;
+    let state = app.state::<ChatSummaryState>();
+    let mut state = crate::lock::guard(&state.state);
+    require_account(&app, &account)?;
+    let mut draft = state
+        .drafts
+        .get(&account)
+        .filter(|draft| draft.id == draft_id)
+        .and_then(|draft| draft.summary.clone())
+        .ok_or("bad_request")?;
+    let now = now_ms();
+    draft.created_at = now;
+    draft.updated_at = now;
+    let path = account_path(&app, &account)?;
+    let mut file = load_file(&path);
+    let stored = upsert(&mut file, draft);
     prune(&mut file);
     crate::jsonfile::save(&path, &file).map_err(|err| err.to_string())?;
+    state.drafts.remove(&account);
     Ok(stored)
+}
+
+fn require_account(app: &AppHandle, account: &str) -> Result<(), String> {
+    if crate::accounts::load(app)
+        .accounts
+        .iter()
+        .any(|row| row.id == account)
+    {
+        Ok(())
+    } else {
+        Err("forbidden".into())
+    }
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -623,12 +674,28 @@ pub fn chat_summary_delete(
     if id.len() > 40 || !id.starts_with("cs-") {
         return Err("bad_request".into());
     }
+    let state = app.state::<ChatSummaryState>();
+    let _gate = crate::lock::guard(&state.state);
     let path = account_path(&app, &account)?;
     let mut file = load_file(&path);
     if remove_entry(&mut file, &id, updated_at) {
         crate::jsonfile::save(&path, &file).map_err(|err| err.to_string())?;
     }
     Ok(())
+}
+
+pub fn delete_account(app: &AppHandle, account: &str) {
+    let state = app.state::<ChatSummaryState>();
+    let mut state = crate::lock::guard(&state.state);
+    state.drafts.remove(account);
+    if let Ok(path) = account_path(app, account) {
+        for file in crate::jsonfile::sidecar_paths(&path)
+            .into_iter()
+            .chain([path])
+        {
+            let _ = std::fs::remove_file(file);
+        }
+    }
 }
 
 #[tauri::command]

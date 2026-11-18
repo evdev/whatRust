@@ -762,6 +762,11 @@ pub async fn remove_account(
     let removed = accounts::remove(&mut f, &id)?;
     accounts::save(&app, &f).map_err(|e| e.to_string())?;
 
+    // Clean up new-feature data once the account record has been removed,
+    // even if closing its webview reports an error.
+    crate::chat_summary::delete_account(&app, &removed.id);
+    crate::autoreply::delete_account(&app, &removed.id);
+
     // Close the window if open. `close()` on a WebviewWindow only detaches the
     // view, and close-to-tray would hide it instead, so the WebKit process
     // stayed alive after the account was removed. Destroy the window.
