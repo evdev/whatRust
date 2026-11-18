@@ -7,6 +7,7 @@ description = "Forward notifications, unread titles and diagnostics from WhatsAp
 commands.allow = [
   "notify", "notification_icon", "set_notification_privacy", "set_unread", "dlog", "switcher_accounts", "switch_account", "reload_account_page", "zoom_step",
   "voice_prefs", "voice_lookup", "transcribe_voice", "transcribe_video", "summarize_voice", "voice_transcripts",
+  "search_transcripts",
   "chat_summary_consent", "summarize_chat", "chat_summary_save", "chat_summaries", "chat_summary_delete",
   "todo_list", "todo_add", "todo_update", "todo_toggle_done", "todo_delete",
   "todo_snooze", "todo_dismiss_alarm", "todo_clear_done",

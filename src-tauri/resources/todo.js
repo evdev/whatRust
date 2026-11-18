@@ -3563,7 +3563,8 @@
       showToast(L("Não foi possível abrir essa mensagem.", "Could not open that message."));
       return;
     }
-    Promise.resolve(wpp.chat.openChatBottom(id)).then(function () {
+    Promise.resolve().then(function () { return wpp.chat.openChatBottom(id); }).then(function (opened) {
+      if (opened === false) throw new Error("chat not opened");
       showToast(L("A conversa foi aberta. A mensagem não está mais no histórico local.", "The chat was opened. That message is no longer in local history."));
     }).catch(function () {
       showToast(L("Não foi possível abrir essa mensagem.", "Could not open that message."));
@@ -3577,7 +3578,8 @@
       openBottom(chat);
       return;
     }
-    Promise.resolve(wpp.chat.openChatAt(chat, ids[index])).then(function () {
+    Promise.resolve().then(function () { return wpp.chat.openChatAt(chat, ids[index]); }).then(function (opened) {
+      if (opened === false) throw new Error("message not opened");
       setTimeout(function () {
         var row = findRow(item);
         if (row) highlight(row);
@@ -3729,6 +3731,9 @@
   };
 
   root.__whatrustTodoState = applyState;
+  root.__whatrustJumpToMessage = function (id, chat) {
+    jumpTo({ message: { msg_id: id, msg_token: messageToken(id), chat_id: chat } });
+  };
   root.__whatrustTodoAlarm = function (payload) {
     if (!payload) return;
     var alarms = payload.alarms || [];

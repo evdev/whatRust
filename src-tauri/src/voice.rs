@@ -218,6 +218,24 @@ pub fn voice_transcripts(
 }
 
 #[tauri::command]
+pub async fn search_transcripts(
+    window: Webview,
+    app: AppHandle,
+    query: String,
+) -> Result<transcript_store::SearchResults, String> {
+    let account = account_of(&window)?;
+    crate::lock::require_unlocked(&app)?;
+    let dir = transcripts_dir(&app)?;
+    let results = tauri::async_runtime::spawn_blocking(move || {
+        transcript_store::search(&dir, &account, &query)
+    })
+    .await
+    .map_err(|err| err.to_string())??;
+    crate::lock::require_unlocked(&app)?;
+    Ok(results)
+}
+
+#[tauri::command]
 pub async fn transcribe_voice(
     window: Webview,
     app: AppHandle,

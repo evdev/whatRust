@@ -164,6 +164,11 @@ fn lock_on_main(app: &AppHandle, prompt: bool) {
     crate::notify::on_lock(app);
     crate::todo::on_lock(app);
     crate::mention::on_lock(app);
+    for (label, view) in app.webviews() {
+        if label.starts_with("wa-") {
+            let _ = view.eval("window.__whatrustCloseTranscriptSearch?.()");
+        }
+    }
     crate::integration::broadcast(app);
     crate::voice::push_prefs(app, &crate::settings::load(app));
     let mut hidden = Vec::new();

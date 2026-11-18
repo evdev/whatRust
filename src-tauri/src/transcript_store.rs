@@ -1,4 +1,4 @@
-//! Permanent voice transcripts, one SQLite file per WhatsApp account.
+//! Permanent voice and video transcripts, one SQLite file per WhatsApp account.
 //!
 //! Notes live in `app_data_dir/transcripts/<account-id>.sqlite`, beside that
 //! account's profile. A row is never pruned. Lookup reads one row. A second
@@ -11,8 +11,9 @@
 //! repeated; [`LEGACY_MARKER`] stops it from being read twice.
 
 use crate::jsonfile::Loaded;
-use rusqlite::{params, Connection, OptionalExtension};
-use serde::Deserialize;
+use regex::RegexBuilder;
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -588,6 +589,96 @@ pub fn by_tokens(dir: &Path, account: &str, ids: &[String]) -> Result<Vec<Note>,
     Ok(notes)
 }
 
+const SEARCH_LIMIT: usize = 50;
+const SEARCH_QUERY_CHARS: usize = 160;
+
+#[derive(Default, Serialize)]
+pub struct SearchResults {
+    hits: Vec<SearchHit>,
+    has_more: bool,
+}
+
+#[derive(Serialize)]
+struct SearchHit {
+    id: String,
+    chat: String,
+    at_ms: u64,
+    media: String,
+    before: String,
+    matched: String,
+    after: String,
+}
+
+/// Search this account's saved transcript text without loading media or calling
+/// a provider. Unclaimed legacy rows have no account owner yet.
+pub fn search(dir: &Path, account: &str, query: &str) -> Result<SearchResults, String> {
+    let path = db_path(dir, account)?;
+    let query = query.trim();
+    if query.is_empty() || !path.exists() {
+        return Ok(SearchResults::default());
+    }
+    if query.chars().count() > SEARCH_QUERY_CHARS {
+        return Err("query_too_long".into());
+    }
+    let pattern = query
+        .split_whitespace()
+        .map(regex::escape)
+        .collect::<Vec<_>>()
+        .join(r"\s+");
+    let pattern = RegexBuilder::new(&pattern)
+        .case_insensitive(true)
+        .build()
+        .map_err(|err| err.to_string())?;
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|err| err.to_string())?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|err| err.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, chat, at_ms, media, text FROM note
+             WHERE state = 'ready' AND media IN ('voice', 'video') AND text <> ''
+             ORDER BY at_ms DESC, token",
+        )
+        .map_err(|err| err.to_string())?;
+    let mut rows = stmt.query([]).map_err(|err| err.to_string())?;
+    let mut results = SearchResults::default();
+    while let Some(row) = rows.next().map_err(|err| err.to_string())? {
+        let value = row.get_ref(4).map_err(|err| err.to_string())?;
+        let transcript = value.as_str().map_err(|err| err.to_string())?.trim();
+        let Some(found) = pattern.find(transcript) else {
+            continue;
+        };
+        if results.hits.len() == SEARCH_LIMIT {
+            results.has_more = true;
+            break;
+        }
+        let prefix = &transcript[..found.start()];
+        let suffix = &transcript[found.end()..];
+        let from = prefix.char_indices().rev().nth(60);
+        let to = suffix.char_indices().nth(100);
+        let hit = (|| -> rusqlite::Result<_> {
+            Ok(SearchHit {
+                id: row.get(0)?,
+                chat: row.get(1)?,
+                at_ms: row.get(2)?,
+                media: row.get(3)?,
+                before: match from {
+                    Some((index, ch)) => format!("…{}", &prefix[index + ch.len_utf8()..]),
+                    None => prefix.to_owned(),
+                },
+                matched: found.as_str().to_owned(),
+                after: match to {
+                    Some((index, _)) => format!("{}…", &suffix[..index]),
+                    None => suffix.to_owned(),
+                },
+            })
+        })()
+        .map_err(|err| err.to_string())?;
+        results.hits.push(hit);
+    }
+    Ok(results)
+}
+
 pub fn remove_account(dir: &Path, account: &str) {
     let Ok(path) = db_path(dir, account) else {
         return;
@@ -691,6 +782,92 @@ mod tests {
             at_ms: at,
             media: "voice",
         }
+    }
+
+    #[test]
+    fn search_finds_saved_voice_and_video_in_the_current_account() {
+        let dir = scratch();
+        let rows = [
+            (
+                "default",
+                "false_1555@c.us_ABCDEFGHIJKLMNOP",
+                "voice",
+                "The ÁUDIO.\nNovo is ready.",
+            ),
+            (
+                "default",
+                "true_4444@g.us_ZYXWVUTSRQPONMLK",
+                "video",
+                "Watch this áudio. novo today.",
+            ),
+            (
+                "default",
+                "false_1555@c.us_CCCCCCCCCCCCCCCC",
+                "voice",
+                "This áudioX novo has different punctuation.",
+            ),
+            (
+                "acct-1",
+                "false_1555@c.us_DDDDDDDDDDDDDDDD",
+                "voice",
+                "Private áudio. novo",
+            ),
+        ];
+        for (i, (account, id, media, text)) in rows.into_iter().enumerate() {
+            let at_ms = i as u64 + 1;
+            let note = NewNote {
+                id: id.into(),
+                at_ms,
+                media,
+            };
+            claim(&dir, account, &note, at_ms, 1_000).unwrap();
+            finish(&dir, account, id, text, at_ms, at_ms, at_ms).unwrap();
+        }
+        claim(
+            &dir,
+            "default",
+            &seed("false_1555@c.us_EEEEEEEEEEEEEEEE", 5),
+            5,
+            1_000,
+        )
+        .unwrap();
+        let results = search(&dir, "default", " Áudio.   novo ").unwrap();
+        assert!(!results.has_more);
+        assert_eq!(results.hits.len(), 2);
+        assert_eq!(results.hits[0].media, "video");
+        assert_eq!(results.hits[0].chat, "4444@g.us");
+        assert_eq!(results.hits[0].at_ms, 2);
+        assert_eq!(results.hits[1].media, "voice");
+        assert_eq!(results.hits[1].id, rows[0].1);
+        assert_eq!(results.hits[1].before, "The ");
+        assert_eq!(results.hits[1].matched, "ÁUDIO.\nNovo");
+        assert_eq!(results.hits[1].after, " is ready.");
+        assert_eq!(search(&dir, "acct-1", "áudio.").unwrap().hits.len(), 1);
+        assert!(search(&dir, "acct-2", "novo").unwrap().hits.is_empty());
+        assert!(!db_path(&dir, "acct-2").unwrap().exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_limits_matches_and_keeps_unicode_excerpt_boundaries() {
+        let dir = scratch();
+        let text = format!("{} açaí {}", "🎙".repeat(80), "🎞".repeat(120));
+        for at in 1..=SEARCH_LIMIT as u64 + 1 {
+            let id = format!("false_1555@c.us_{at:016}");
+            claim(&dir, "default", &seed(&id, at), at, 1_000).unwrap();
+            finish(&dir, "default", &id, &text, at, at, at).unwrap();
+        }
+        let results = search(&dir, "default", "AÇAÍ").unwrap();
+        assert_eq!(results.hits.len(), SEARCH_LIMIT);
+        assert!(results.has_more);
+        let hit = &results.hits[0];
+        assert_eq!(hit.at_ms, SEARCH_LIMIT as u64 + 1);
+        assert!(hit.before.starts_with('…'));
+        assert!(hit.after.ends_with('…'));
+        assert_eq!(hit.before.chars().count(), 61);
+        assert_eq!(hit.after.chars().count(), 101);
+        assert_eq!(hit.matched, "açaí");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -35,6 +35,7 @@ const PAGE_COMMANDS: &[&str] = &[
     "transcribe_video",
     "summarize_voice",
     "voice_transcripts",
+    "search_transcripts",
     "chat_summary_consent",
     "summarize_chat",
     "chat_summary_save",

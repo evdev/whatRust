@@ -59,6 +59,11 @@
       out.push(all.map(function (s) { return "html:hover:not([data-wr-idle='on']) " + s.slice(R.length + 1); }).join(",") + "{filter:none!important}");
     if (cfg.idle.on)
       out.push("html[data-wr-idle='on'] #app{filter:blur(" + num(cfg.idle.amt, 1, 40) + "px)!important}");
+    var preview = cfg.g.chat.on ? cfg.g.chat : cfg.g.preview;
+    if (preview.on) out.push(R + "{--wr-transcript-preview-filter:blur(" + num(preview.amt, 1, 40) + "px)}");
+    if (cfg.g.names.on) out.push(R + "{--wr-transcript-name-filter:blur(" + num(cfg.g.names.amt, 1, 40) + "px)}");
+    if (cfg.g.input.on) out.push(R + "{--wr-transcript-input-filter:blur(6px)}");
+    if (cfg.idle.on) out.push("html[data-wr-idle='on']{--wr-transcript-idle-filter:blur(" + num(cfg.idle.amt, 1, 40) + "px)}");
     return out.join("\n");
   }
   var privacySync = Promise.resolve();

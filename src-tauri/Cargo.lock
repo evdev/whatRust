@@ -5157,6 +5157,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-local-authentication",
  "opus-rs",
+ "regex",
  "rusqlite",
  "semver",
  "serde",

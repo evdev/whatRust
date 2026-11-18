@@ -312,6 +312,7 @@ pub fn run() {
             voice::transcribe_video,
             voice::summarize_voice,
             voice::voice_transcripts,
+            voice::search_transcripts,
             chat_summary::chat_summary_consent,
             chat_summary::summarize_chat,
             chat_summary::chat_summary_save,

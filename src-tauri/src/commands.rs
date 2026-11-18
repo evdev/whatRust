@@ -1300,6 +1300,7 @@ mod tests {
             include_str!("../resources/bridge.js"),
             include_str!("../resources/integration.js"),
             include_str!("../resources/todo.js"),
+            include_str!("../resources/transcript-search.js"),
             include_str!("../resources/voice.js"),
             include_str!("../resources/summary.js"),
             include_str!("../resources/mention.js"),

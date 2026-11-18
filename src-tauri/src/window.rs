@@ -187,6 +187,7 @@ macro_rules! account_webview {
             // and reminders. todo.js reads the account from this webview's label
             // via the todo_* commands.
             .initialization_script(include_str!("../resources/todo.js"))
+            .initialization_script(include_str!("../resources/transcript-search.js"))
             .initialization_script(include_str!("../resources/autoreply.js"))
             .initialization_script(include_str!("../resources/summary.js"))
             .initialization_script(crate::mention::boot_script($app, &$label))
