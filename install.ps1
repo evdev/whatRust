@@ -59,13 +59,19 @@ public static class WhatRustArch {
 Write-Host "Installing $app from $repo..." -ForegroundColor Green
 $arch = Get-InstallArch
 Write-Host "CPU architecture: $arch"
-$name = "whatRust_0.6.13_${arch}-setup.exe"
 # Update these together with the checked-in installers and SHA256SUMS.
-$hashes = @{
-  arm64 = '0c9a3f72d1d1ad34c9a6cf0bd29ca143df7c1cbf163485a2c0865d8a4c9a8a9a'
-  x64 = 'f70a3aab7402e78abc1e00cda3689a4208d26d8f8e65b58950abe9c6765e9734'
+$installers = @{
+  arm64 = @{
+    name = 'whatRust_0.6.14_arm64-setup.exe'
+    sha256 = '2b386ff76b6f5ae9660fb5213d2277eebca67edf46e1124c1ef1fefe26b0ac6a'
+  }
+  x64 = @{
+    name = 'whatRust_0.6.14_x64-setup.exe'
+    sha256 = '59f794a2ae9e66ab86283a5efa4fda5bb36e374e74f83697342e0e0b7daa0816'
+  }
 }
-$expected = $hashes[$arch]
+$name = $installers[$arch].name
+$expected = $installers[$arch].sha256
 $out = Join-Path $env:TEMP $name
 Write-Host "Downloading $name..."
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/$repo/master/installers/$name" -OutFile $out -UseBasicParsing
