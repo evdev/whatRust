@@ -63,6 +63,8 @@ Under **Settings → Transcription → AI provider**, choose Claude Code, Codex,
 
 Type in the regular chat search box and choose **Transcripts** below it to search saved voice-note and video transcripts for the active account. You can also open transcript search with **Ctrl+Alt+F** (**Cmd+Option+F** on Mac). Select a match to jump to the original message. Search runs locally and includes existing saved transcripts.
 
+The Windows installers include transcript search. On macOS, it’s available in builds from the current source.
+
 ### Catch up on a chat
 
 Open the chat header menu and choose **Create summary**. Pick **Last hour**, **Last 4 hours**, **Today**, or **Last 3 days**. The result appears under the newest message it covers. It includes existing voice note and video transcripts where available, and tells you when older messages were unavailable or the range had to be shortened.
