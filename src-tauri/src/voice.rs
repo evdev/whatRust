@@ -1055,6 +1055,24 @@ pub fn audio_content_type(filename: &str) -> &'static str {
 }
 
 pub fn probe_health(port: u16) -> Result<String, &'static str> {
+    #[cfg(windows)]
+    if let Some((port, token)) = windows_fluidvoice(port) {
+        let response = llm::client(Duration::from_secs(4))
+            .get(&format!("http://127.0.0.1:{port}/v1/health"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .call()
+            .map_err(|_| "fluidvoice")?;
+        let value: Value = serde_json::from_str(&response.into_string().map_err(|_| "fluidvoice")?)
+            .map_err(|_| "fluidvoice")?;
+        if value.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err("fluidvoice");
+        }
+        return Ok(value
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string());
+    }
     let url = format!("http://127.0.0.1:{port}/v1/health");
     let response = llm::client(Duration::from_secs(4))
         .get(&url)
@@ -1070,6 +1088,35 @@ pub fn probe_health(port: u16) -> Result<String, &'static str> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string())
+}
+
+// Windows beta stores its local API token in its own per-user settings.
+#[cfg(windows)]
+fn windows_fluidvoice(port: u16) -> Option<(u16, String)> {
+    let path = PathBuf::from(std::env::var_os("APPDATA")?)
+        .join("com.altic.fluidvoice.windows")
+        .join("settings.json");
+    let value: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    windows_fluidvoice_config(port, &value)
+}
+
+#[cfg(windows)]
+fn windows_fluidvoice_config(port: u16, value: &Value) -> Option<(u16, String)> {
+    if port != 47610 && port != settings::FLUIDVOICE_PORT_DEFAULT {
+        return None;
+    }
+    if !value.get("local_api_enabled")?.as_bool()? {
+        return None;
+    }
+    let token = value.get("local_api_token")?.as_str()?.to_string();
+    if token.is_empty()
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return None;
+    }
+    Some((47610, token))
 }
 
 fn wants_speaker_labels(audio: &[u8]) -> bool {
@@ -1441,6 +1488,21 @@ fn post_once(
 
 fn fluid_transcribe(port: u16, audio: &[u8], filename: &str) -> Result<String, &'static str> {
     sweep_note_files();
+    #[cfg(windows)]
+    if let Some((port, token)) = windows_fluidvoice(port) {
+        let path = fresh_note_path(filename);
+        let temp = TempAudio { path };
+        std::fs::write(&temp.path, audio).map_err(|_| "fluidvoice")?;
+        let response = llm::client(Duration::from_secs(FLUID_TRANSCRIBE_SECS))
+            .post(&format!("http://127.0.0.1:{port}/v1/transcriptions"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Content-Type", "application/json")
+            .send_string(&path_body(&temp.path))
+            .map_err(|_| "fluidvoice")?;
+        let body = response.into_string().map_err(|_| "fluidvoice")?;
+        let value: Value = serde_json::from_str(&body).map_err(|_| "fluidvoice")?;
+        return transcript_text(&value).ok_or("fluidvoice");
+    }
     let labels = wants_speaker_labels(audio);
     let mut temp = None;
     let result = (|| {
@@ -1489,6 +1551,57 @@ fn fluid_transcribe(port: u16, audio: &[u8], filename: &str) -> Result<String, &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a running FluidVoice Windows beta and a test audio file"]
+    fn windows_beta_live_transcription() {
+        let path = std::env::var_os("WHATRUST_FLUIDVOICE_TEST_AUDIO").expect("test audio path");
+        let audio = std::fs::read(path).expect("read test audio");
+        assert!(!probe_health(settings::FLUIDVOICE_PORT_DEFAULT)
+            .unwrap()
+            .is_empty());
+        let text = fluid_transcribe(
+            settings::FLUIDVOICE_PORT_DEFAULT,
+            &audio,
+            audio_filename(&audio),
+        )
+        .unwrap();
+        assert!(
+            text.to_lowercase().contains("test"),
+            "unexpected transcript: {text}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_beta_uses_its_local_token_and_default_port() {
+        let config =
+            serde_json::json!({"local_api_enabled": true, "local_api_token": "fv_example_123"});
+        assert_eq!(
+            windows_fluidvoice_config(47610, &config),
+            Some((47610, "fv_example_123".into()))
+        );
+        assert_eq!(
+            windows_fluidvoice_config(settings::FLUIDVOICE_PORT_DEFAULT, &config),
+            Some((47610, "fv_example_123".into()))
+        );
+        assert_eq!(windows_fluidvoice_config(12345, &config), None);
+        assert_eq!(
+            windows_fluidvoice_config(
+                47610,
+                &serde_json::json!({"local_api_enabled": false, "local_api_token": "fv_example"})
+            ),
+            None
+        );
+        assert_eq!(
+            windows_fluidvoice_config(
+                47610,
+                &serde_json::json!({"local_api_enabled": true, "local_api_token": "bad\r\ntoken"})
+            ),
+            None
+        );
+    }
 
     fn frame(id: &str, audio: &[u8]) -> Vec<u8> {
         let id_bytes = id.as_bytes();
