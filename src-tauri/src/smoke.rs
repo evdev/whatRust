@@ -56,6 +56,98 @@ fn fills_client(app: &AppHandle, label: &str) -> bool {
     });
     rx.recv_timeout(Duration::from_secs(3)).unwrap_or(false)
 }
+
+fn mention_popup_over_foreground(
+    app: &AppHandle,
+    account_id: &str,
+    label: &str,
+) -> Result<bool, String> {
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetAncestor, GetForegroundWindow, GetWindowRect, WindowFromPoint, GA_ROOT,
+    };
+
+    let original = crate::settings::load(app);
+    let mut settings = original.clone();
+    let prefs = settings
+        .mention_accounts
+        .get_or_insert_with(Default::default)
+        .entry(account_id.to_string())
+        .or_default();
+    prefs.mentions = true;
+    prefs.popup = true;
+    prefs.sound = false;
+    let cover = tauri::window::WindowBuilder::new(app, "smoke-cover")
+        .title("Mention popup test")
+        .maximized(true)
+        .always_on_top(true)
+        .build()
+        .map_err(|err| err.to_string())?;
+    let result = (|| {
+        let cover_hwnd = cover.hwnd().map_err(|err| err.to_string())?;
+        cover.set_focus().map_err(|err| err.to_string())?;
+        if !wait_until(|| unsafe { GetForegroundWindow() } == cover_hwnd) {
+            return Err("could not focus the covering window".into());
+        }
+        let mut cover_rect = RECT::default();
+        unsafe { GetWindowRect(cover_hwnd, &mut cover_rect) }.map_err(|err| err.to_string())?;
+        crate::settings::save(app, &settings).map_err(|err| err.to_string())?;
+        eval(
+            app,
+            label,
+            r#"
+                window.__TAURI__.core.invoke('mention_event', {
+                    chatId: '42@g.us', msgId: 'false_42@g.us_smoke', senderId: '',
+                    chatName: 'Test group', senderName: 'Test sender', body: 'Synthetic mention',
+                    preview: '', voice: false, seconds: 0, atMs: Date.now(),
+                    mentions: true, replies: false, direct: false, everyone: false,
+                });
+                true
+            "#,
+        )?;
+        let mut popup = None;
+        if !wait_until(|| {
+            popup = app
+                .webview_windows()
+                .into_values()
+                .find(|win| win.label().starts_with("mention-"));
+            popup.is_some()
+        }) {
+            return Err("synthetic mention did not create a popup".into());
+        }
+        let popup = popup.unwrap();
+        let hwnd = popup.hwnd().map_err(|err| err.to_string())?;
+        let floated = wait_until(|| unsafe {
+            let mut rect = RECT::default();
+            if GetForegroundWindow() != cover_hwnd || GetWindowRect(hwnd, &mut rect).is_err() {
+                return false;
+            }
+            let point = POINT {
+                x: (rect.left + rect.right) / 2,
+                y: (rect.top + rect.bottom) / 2,
+            };
+            (cover_rect.left..cover_rect.right).contains(&point.x)
+                && (cover_rect.top..cover_rect.bottom).contains(&point.y)
+                && GetAncestor(WindowFromPoint(point), GA_ROOT) == hwnd
+        });
+        let message_is_visible = || {
+            eval(
+                app,
+                popup.label(),
+                "document.getElementById('body-text')?.textContent === 'Synthetic mention'",
+            )
+            .ok()
+            .as_deref()
+                == Some("true")
+        };
+        Ok(floated && wait_until(message_is_visible))
+    })();
+    crate::mention::drop_account(app, label);
+    let _ = cover.destroy();
+    crate::settings::save(app, &original).map_err(|err| err.to_string())?;
+    result
+}
+
 pub fn start(app: &AppHandle) {
     let app = app.clone();
     if std::env::var("WHATRUST_ASR_SMOKE").as_deref() == Ok("1") {
@@ -92,6 +184,11 @@ pub fn start(app: &AppHandle) {
             }
             crate::dlog::log("smoke: real_whatsapp_login_screen_without_linked_account");
             result.push(json!({"test":"real_whatsapp_login_screen_without_linked_account","pass":login_ready}));
+            let popup = mention_popup_over_foreground(&app, &a.id, &label);
+            result.push(match popup {
+                Ok(pass) => json!({"test":"mention_popup_floats_without_taking_focus","pass":pass}),
+                Err(err) => json!({"test":"mention_popup_floats_without_taking_focus","pass":false,"error":err}),
+            });
             for (step, mounted) in [false, true, false, true, false].into_iter().enumerate() {
                 eval(&app, &label, &format!("window.__menuStep=-1;window.__TAURI__.core.invoke('report_integration',{{mounted:{mounted},detector:false}}).then(()=>window.__menuStep={step})"))?;
                 for _ in 0..20 {
@@ -133,6 +230,7 @@ pub fn start(app: &AppHandle) {
             crate::dlog::log("smoke: reattach_preserves_view");
             result.push(json!({"test":"reattach_preserves_view","pass":app.get_webview(&label).unwrap().window().label()=="main"&&eval(&app,&label,"window.__whatrustSmokeToken==='same-live-view'")?=="true"}));
             let second_label = crate::accounts::window_label(&b.id);
+            let detached_label = format!("detached-{}", b.id);
             // Opening a second account keeps the one already open.
             crate::window::open_account_window(&app, b, true).map_err(|e| e.to_string())?;
             crate::window::show_account(&app, &label);
@@ -147,12 +245,13 @@ pub fn start(app: &AppHandle) {
                 "window.__whatrustCloseSmokeToken='preserve-close-view'",
             )?;
             crate::sessions::detach(&app, &b.id)?;
-            app.get_window(&format!("detached-{}", b.id))
+            app.get_window(&detached_label)
                 .ok_or("missing detached window")?
                 .close()
                 .map_err(|e| e.to_string())?;
             let closed_without_dropping_main = wait_until(|| {
-                app.get_webview(&second_label).is_none()
+                app.get_window(&detached_label).is_none()
+                    && app.get_webview(&second_label).is_none()
                     && app.get_webview(&label).is_some()
                     && crate::sessions::selected(&app, "main").as_deref() == Some(label.as_str())
             });
@@ -161,11 +260,14 @@ pub fn start(app: &AppHandle) {
             for cycle in 0..12 {
                 crate::sessions::schedule_layout(&app, "main");
                 crate::sessions::detach(&app, &b.id)?;
-                crate::sessions::schedule_layout(&app, &format!("detached-{}", b.id));
+                crate::sessions::schedule_layout(&app, &detached_label);
                 crate::sessions::attach(&app, &b.id)?;
                 let target = crate::accounts::window_label(&b.id);
                 if eval(&app, &target, "2+2")? != "4" {
                     return Err(format!("reparent/layout circular wait at cycle {cycle}"));
+                }
+                if !wait_until(|| app.get_window(&detached_label).is_none()) {
+                    return Err(format!("detached window did not close at cycle {cycle}"));
                 }
             }
             result.push(json!({"test":"reparent_with_pending_layout_12_cycles","pass":true}));
@@ -263,8 +365,8 @@ pub fn start(app: &AppHandle) {
             crate::notify::from_account(
                 &app,
                 &label,
-                "Teste isolado do whatRust",
-                "Verificação do envio ao Windows; nenhum contato recebeu mensagem.",
+                "whatRust notification test",
+                "Verifies delivery to Windows. No messages were sent to contacts.",
                 None,
                 crate::notify::Source::Test,
             );
@@ -303,7 +405,7 @@ pub fn start(app: &AppHandle) {
                     .iter()
                     .filter(|n| n.source == crate::notify::Source::WebView2)
                     .count();
-                eval(&app,&label,"new Notification('Teste isolado do whatRust',{body:'Verificação da rota do navegador com janela oculta.'});true")?;
+                eval(&app,&label,"new Notification('whatRust notification test',{body:'Verifies browser notifications while the app is in the background.'});true")?;
                 let delivered = wait_until(|| {
                     app.state::<crate::notify::Recent>()
                         .records()
@@ -326,7 +428,7 @@ pub fn start(app: &AppHandle) {
                 .iter()
                 .filter(|n| n.source == crate::notify::Source::Page)
                 .count();
-            eval(&app,&label,"ServiceWorkerRegistration.prototype.showNotification.call({},'Teste da rota de registro',{body:'Verificação isolada do encaminhamento ao aplicativo.'});true")?;
+            eval(&app,&label,"ServiceWorkerRegistration.prototype.showNotification.call({},'whatRust service worker test',{body:'Verifies notification delivery through the app.'});true")?;
             result.push(json!({"test":"registration_notification_while_hidden_reaches_own_service","pass":wait_until(||app.state::<crate::notify::Recent>().records().iter().filter(|n|n.source==crate::notify::Source::Page&&matches!(n.status.as_str(),"submitted"|"dismissed"|"activated")).count()>page_before)}));
             let s = crate::settings::load(&app);
             let mut off = s.clone();
@@ -335,14 +437,14 @@ pub fn start(app: &AppHandle) {
             eval(
                 &app,
                 &label,
-                "new Notification('Teste sem aviso',{body:'Desativado nas preferências.'});true",
+                "new Notification('whatRust notification test',{body:'Notifications are disabled in Settings.'});true",
             )?;
             result.push(json!({"test":"page_constructor_respects_notifications_disabled","pass":wait_until(||app.state::<crate::notify::Recent>().records().iter().any(|n|n.source==crate::notify::Source::WebView2&&n.reason.as_deref()==Some("notifications_disabled")))}));
             crate::settings::save(&app, &s).map_err(|e| e.to_string())?;
             crate::sessions::activate(&app, &label);
             result.push(json!({"test":"restored_document_is_visible","pass":wait_until(||eval(&app,&label,"!document.hidden").ok().as_deref()==Some("true"))}));
             for step in 0..12 {
-                eval(&app,&label,"window.__closeStress=new Notification('Teste de encerramento',{body:'Evento sintético para verificar a interface.'});window.__closeStress.close();window.__TAURI__.core.invoke('set_unread',{title:'WhatsApp',settled:true});true")?;
+                eval(&app,&label,"window.__closeStress=new Notification('whatRust notification close test',{body:'Verifies that the app stays responsive.'});window.__closeStress.close();window.__TAURI__.core.invoke('set_unread',{title:'WhatsApp',settled:true});true")?;
                 crate::sessions::activate(&app, &crate::accounts::window_label(&b.id));
                 crate::sessions::open_panel(&app, Some("main")).map_err(|e| e.to_string())?;
                 crate::sessions::close_panel(&app);
@@ -407,14 +509,14 @@ pub fn start(app: &AppHandle) {
                 eval(
                     &app,
                     "lock",
-                    "document.getElementById('error').textContent.includes('Senha incorreta')",
+                    "document.getElementById('error').textContent === 'Wrong password. Try again.'",
                 )
                 .ok()
                 .as_deref()
                     == Some("true")
             });
-            crate::dlog::log("smoke: wrong_password_keeps_locked_portuguese_feedback");
-            result.push(json!({"test":"wrong_password_keeps_locked_portuguese_feedback","pass":wrong&&!crate::lock::is_unlocked(&app)}));
+            crate::dlog::log("smoke: wrong_password_keeps_locked_english_feedback");
+            result.push(json!({"test":"wrong_password_keeps_locked_english_feedback","pass":wrong&&!crate::lock::is_unlocked(&app)}));
             eval(&app,"lock","document.getElementById('password').value='smoke-new';document.getElementById('unlock').click();true")?;
             let unlocked = wait_until(|| {
                 crate::lock::is_unlocked(&app)
@@ -448,7 +550,7 @@ pub fn start(app: &AppHandle) {
             eval(
                 &app,
                 &label,
-                "new Notification('Teste bloqueado',{body:'Não deve aparecer no Windows.'});true",
+                "new Notification('whatRust lock test',{body:'The app should suppress this notification while locked.'});true",
             )?;
             result.push(json!({"test":"incoming_browser_notification_suppressed_while_locked","pass":wait_until(||app.state::<crate::notify::Recent>().records().len()>before)&&app.state::<crate::notify::Recent>().records().first().is_some_and(|n|n.status=="suppressed"&&n.reason.as_deref()==Some("locked"))}));
             result.push(json!({"test":"lock_removes_existing_windows_notification_history","pass":wait_until(||{
@@ -485,8 +587,8 @@ pub fn start(app: &AppHandle) {
             crate::commands::notify(
                 app.get_webview(&label).unwrap(),
                 app.clone(),
-                "Evento antigo".into(),
-                "Conversão de ícone atrasada".into(),
+                "whatRust delayed notification test".into(),
+                "Simulates a delayed icon conversion.".into(),
                 None,
                 Some(stale),
             );

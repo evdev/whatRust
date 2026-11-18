@@ -1,6 +1,7 @@
 use crate::accounts::{self, Account, ActiveAccount};
 use crate::i18n::{tr, trf};
 use tauri::utils::config::BackgroundThrottlingPolicy;
+use tauri::webview::{NewWindowFeatures, NewWindowResponse};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 /// Recent desktop Chrome UA (Linux, Windows). WhatsApp Web rejects the default
@@ -207,18 +208,12 @@ macro_rules! account_webview {
             // Belt-and-braces: cancel any `file://` navigation so a stray drop can never
             // navigate the window away and tear down the live WhatsApp session.
             .on_navigation(|url| url.scheme() != "file")
-            // Links (issue #30). WhatsApp opens every chat link in a new tab
-            // (`target="_blank"` / `window.open`). Unanswered, the system webview drops
-            // that request (WKWebView, WebKitGTK) or opens nothing useful, so a click
-            // did nothing. Answer it: WhatsApp links load in this window, web/mail/phone
-            // links go to the system's default handler, and no popup window is created.
+            // Chat links go to the appropriate app or browser (issue #30).
+            // A call popout needs a real window linked to its opener.
             .on_new_window({
                 let app = $app.clone();
                 let label = $label.clone();
-                move |url, _features| {
-                    route_new_window(&app, &label, url);
-                    tauri::webview::NewWindowResponse::Deny
-                }
+                move |url, features| route_new_window(&app, &label, url, features)
             })
             // Downloads: with NO handler registered, wry never wires up the platform's
             // download machinery at all — on Linux nobody answers WebKit's
@@ -572,6 +567,8 @@ fn choose_download_destination(
 /// Where a new-window request from an account webview goes.
 #[derive(Debug, PartialEq, Eq)]
 enum NewWindowRoute {
+    /// The active call moves into a native window with the same opener.
+    CallPopout,
     /// A WhatsApp link: load the mapped WhatsApp Web page in the same window.
     InApp(tauri::Url),
     /// An ordinary link: the system's default browser / mail / phone handler.
@@ -581,7 +578,9 @@ enum NewWindowRoute {
 }
 
 fn new_window_route(url: &tauri::Url) -> NewWindowRoute {
-    if let Some(target) = crate::links::whatsapp_web_url(url.as_str()) {
+    if is_whatsapp_origin(url.as_str()) && matches!(url.path(), "/call/popout" | "/call/popout/") {
+        NewWindowRoute::CallPopout
+    } else if let Some(target) = crate::links::whatsapp_web_url(url.as_str()) {
         NewWindowRoute::InApp(target)
     } else if crate::opener::is_openable_external(url) {
         NewWindowRoute::External(url.clone())
@@ -590,8 +589,30 @@ fn new_window_route(url: &tauri::Url) -> NewWindowRoute {
     }
 }
 
-fn route_new_window(app: &AppHandle, label: &str, url: tauri::Url) {
+fn route_new_window(
+    app: &AppHandle,
+    label: &str,
+    url: tauri::Url,
+    features: NewWindowFeatures,
+) -> NewWindowResponse<tauri::Wry> {
     match new_window_route(&url) {
+        NewWindowRoute::CallPopout => {
+            let from_whatsapp = app
+                .get_webview(label)
+                .and_then(|view| view.url().ok())
+                .is_some_and(|url| is_whatsapp_origin(url.as_str()));
+            if from_whatsapp && crate::lock::is_unlocked(app) {
+                match build_call_popout(app, features) {
+                    Ok(window) => {
+                        if crate::lock::is_unlocked(app) && window.show().is_ok() {
+                            return NewWindowResponse::Create { window };
+                        }
+                        let _ = window.destroy();
+                    }
+                    Err(_) => crate::dlog::log("call: could not create popout window"),
+                }
+            }
+        }
         NewWindowRoute::InApp(target) => {
             crate::dlog::log("links: WhatsApp link clicked, opening in-app");
             if let Some(w) = app.get_webview(label) {
@@ -603,6 +624,53 @@ fn route_new_window(app: &AppHandle, label: &str, url: tauri::Url) {
             crate::dlog::log(&format!("links: ignored new window ({})", url.scheme()))
         }
     }
+    NewWindowResponse::Deny
+}
+
+const CALL_POPOUT_PREFIX: &str = "call-popout-";
+
+pub(crate) fn is_call_popout_window(label: &str) -> bool {
+    label.starts_with(CALL_POPOUT_PREFIX)
+}
+
+fn build_call_popout(app: &AppHandle, features: NewWindowFeatures) -> tauri::Result<WebviewWindow> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    // Let the engine perform the first navigation so window.open retains its
+    // WindowProxy and the opener's profile (WebView2 environment or WebKit configuration).
+    let window = WebviewWindowBuilder::new(
+        app,
+        format!("{CALL_POPOUT_PREFIX}{id}"),
+        WebviewUrl::External("about:blank".parse().expect("valid URL")),
+    )
+    .title("WhatsApp")
+    .inner_size(640.0, 480.0)
+    .visible(false)
+    .window_features(features)
+    .user_agent(&user_agent())
+    .background_throttling(BackgroundThrottlingPolicy::Disabled)
+    .on_navigation(|url| url.as_str() == "about:blank" || is_whatsapp_origin(url.as_str()))
+    .on_new_window(|_, _| NewWindowResponse::Deny)
+    .build()?;
+
+    #[cfg(windows)]
+    {
+        let native_window = window.as_ref().window();
+        if let Err(err) =
+            window.with_webview(move |webview| wire_call_popout_windows(webview, native_window))
+        {
+            let _ = window.destroy();
+            return Err(err);
+        }
+    }
+    Ok(window)
+}
+
+/// Whether a URL belongs to WhatsApp Web's HTTPS origin.
+fn is_whatsapp_origin(uri: &str) -> bool {
+    uri == "https://web.whatsapp.com" || uri.starts_with("https://web.whatsapp.com/")
 }
 
 /// Set the display zoom on one account webview.
@@ -1701,47 +1769,45 @@ fn allow_popup_microphone_windows(webview: tauri::webview::PlatformWebview) {
     }
 }
 
-/// Windows (WebView2): auto-allow microphone/camera permission requests so WhatsApp
-/// voice messages and calls work without a prompt (and can't be wedged by a prior "Block").
-///
-/// Notifications (issue #3): also allow the notification permission, and take
-/// over every notification WebView2 receives from the page. bridge.js only sees
-/// notifications raised in the page itself; one raised from a worker never
-/// reached it, so a v0.6.4 tester got a toast for WhatsApp's test notification
-/// but none for real messages. WebView2's `NotificationReceived` sees those too:
-/// it is turned into a whatRust toast (lock-aware, de-duplicated) instead of
-/// WebView2's own popup.
-/// Whether a permission request comes from WhatsApp's own origin.
-#[cfg(any(target_os = "windows", test))]
-fn is_whatsapp_origin(uri: &str) -> bool {
-    uri == "https://web.whatsapp.com" || uri.starts_with("https://web.whatsapp.com/")
+#[cfg(windows)]
+fn wire_call_popout_windows(webview: tauri::webview::PlatformWebview, window: tauri::Window) {
+    use webview2_com::WindowCloseRequestedEventHandler;
+
+    // SAFETY: with_webview runs on the controller's UI thread.
+    unsafe {
+        let Ok(core) = webview.controller().CoreWebView2() else {
+            return;
+        };
+        allow_whatsapp_permissions_windows(&core, false);
+
+        // Wry closes the child HWND on window.close(). Close the outer window too.
+        let handler = WindowCloseRequestedEventHandler::create(Box::new(move |_, _| {
+            let _ = window.close();
+            Ok(())
+        }));
+        let mut token = 0;
+        if core.add_WindowCloseRequested(&handler, &mut token).is_err() {
+            crate::dlog::log("call: could not register popout close handler");
+        }
+    }
 }
 
-#[cfg(target_os = "windows")]
-fn enable_media_windows(webview: tauri::webview::PlatformWebview, app: AppHandle, label: String) {
+/// Allow microphone and camera requests from WhatsApp Web, including previously
+/// blocked requests. The account view also handles desktop notifications.
+#[cfg(windows)]
+unsafe fn allow_whatsapp_permissions_windows(
+    core: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+    notifications: bool,
+) {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
-        ICoreWebView2, ICoreWebView2NotificationReceivedEventArgs,
-        ICoreWebView2PermissionRequestedEventArgs, ICoreWebView2_24, COREWEBVIEW2_PERMISSION_KIND,
+        ICoreWebView2, ICoreWebView2PermissionRequestedEventArgs, COREWEBVIEW2_PERMISSION_KIND,
         COREWEBVIEW2_PERMISSION_KIND_CAMERA, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
         COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
         COREWEBVIEW2_PERMISSION_STATE_DENY,
     };
-    use webview2_com::Microsoft::Web::WebView2::Win32::{
-        COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
-        COREWEBVIEW2_PHYSICAL_KEY_STATUS,
-    };
-    use webview2_com::{NotificationReceivedEventHandler, PermissionRequestedEventHandler};
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
-    use windows_core::Interface;
+    use webview2_com::PermissionRequestedEventHandler;
 
-    // SAFETY: with_webview runs on the UI thread where the WebView2 controller lives;
-    // these are standard WebView2 COM calls.
     unsafe {
-        let controller = webview.controller();
-        let core: ICoreWebView2 = match controller.CoreWebView2() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
         let handler = PermissionRequestedEventHandler::create(Box::new(
             move |_wv: Option<ICoreWebView2>,
                   args: Option<ICoreWebView2PermissionRequestedEventArgs>|
@@ -1749,13 +1815,16 @@ fn enable_media_windows(webview: tauri::webview::PlatformWebview, app: AppHandle
                 if let Some(args) = args {
                     let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
                     args.PermissionKind(&mut kind)?;
+                    let capture = kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE
+                        || kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA;
+                    if !notifications && !capture {
+                        return Ok(());
+                    }
                     let mut uri = windows_core::PWSTR::null();
                     args.Uri(&mut uri)?;
                     let uri = webview2_com::take_pwstr(uri);
                     if is_whatsapp_origin(&uri)
-                        && (kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE
-                            || kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
-                            || kind == COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS)
+                        && (capture || kind == COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS)
                     {
                         args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
                     } else {
@@ -1767,6 +1836,29 @@ fn enable_media_windows(webview: tauri::webview::PlatformWebview, app: AppHandle
         ));
         let mut token: i64 = 0;
         let _ = core.add_PermissionRequested(&handler, &mut token);
+    }
+}
+
+/// Bridge both page and worker notifications into whatRust's lock-aware toasts
+/// (issue #3). The injected page bridge only sees page notifications.
+#[cfg(windows)]
+fn enable_media_windows(webview: tauri::webview::PlatformWebview, app: AppHandle, label: String) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2, ICoreWebView2NotificationReceivedEventArgs, ICoreWebView2_24,
+        COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+        COREWEBVIEW2_PHYSICAL_KEY_STATUS,
+    };
+    use webview2_com::NotificationReceivedEventHandler;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
+    use windows_core::Interface;
+
+    // SAFETY: with_webview runs on the controller's UI thread.
+    unsafe {
+        let controller = webview.controller();
+        let Ok(core) = controller.CoreWebView2() else {
+            return;
+        };
+        allow_whatsapp_permissions_windows(&core, true);
 
         // Issue #80: Ctrl+Shift+P is a WebView2 browser accelerator ("print with
         // the system dialog"). WebView2 handles it before the page, so the
@@ -2624,6 +2716,27 @@ mod tests {
         assert_eq!(mime_for("movie.qt"), "video/quicktime");
         assert_eq!(mime_for("pic.hif"), "image/heif");
         assert_eq!(mime_for("clip.3gp2"), "video/3gpp2");
+    }
+
+    #[test]
+    fn only_whatsapp_web_call_popouts_get_a_native_window() {
+        use super::{new_window_route, NewWindowRoute};
+        let route = |url: &str| new_window_route(&url.parse().unwrap());
+        for url in [
+            "https://web.whatsapp.com/call/popout",
+            "https://web.whatsapp.com/call/popout/?mode=video#call",
+        ] {
+            assert_eq!(route(url), NewWindowRoute::CallPopout);
+        }
+        for url in [
+            "https://web.whatsapp.com/",
+            "https://web.whatsapp.com/call/popouts",
+            "https://web.whatsapp.com.evil.example/call/popout",
+            "https://web.whatsapp.com:8443/call/popout",
+            "http://web.whatsapp.com/call/popout",
+        ] {
+            assert_ne!(route(url), NewWindowRoute::CallPopout);
+        }
     }
 
     #[test]

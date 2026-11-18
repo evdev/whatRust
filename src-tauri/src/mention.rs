@@ -11,10 +11,15 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, LogicalPosition, LogicalSize, Manager, Monitor, PhysicalPosition, PhysicalSize,
+    WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+};
 
 pub const POPUP_W: f64 = 368.0;
 pub const POPUP_H: f64 = 332.0;
+const POPUP_MIN_W: f64 = 300.0;
+const POPUP_MIN_H: f64 = 280.0;
 const POPUP_GAP: f64 = 8.0;
 const POPUP_MARGIN: f64 = 12.0;
 const POPUP_MAX: usize = 4;
@@ -77,6 +82,7 @@ struct PhotoStamp {
 
 struct Card {
     account_label: String,
+    automatic_geometry: Option<PopupGeometry>,
     chat_id: String,
     msg_id: String,
     chat_name: String,
@@ -92,6 +98,21 @@ struct Card {
     replies: bool,
     direct: bool,
     everyone: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PopupGeometry {
+    position: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
+}
+
+impl PopupGeometry {
+    fn read(win: &WebviewWindow) -> Option<Self> {
+        Some(Self {
+            position: win.outer_position().ok()?,
+            size: win.outer_size().ok()?,
+        })
+    }
 }
 
 struct Held {
@@ -173,10 +194,11 @@ pub fn popup_origin(
     work_w: f64,
     work_h: f64,
     index: usize,
+    size: LogicalSize<f64>,
 ) -> (f64, f64) {
-    let x = (work_x + work_w - POPUP_MARGIN - POPUP_W).max(work_x);
-    let y = work_y + POPUP_MARGIN + index as f64 * (POPUP_H + POPUP_GAP);
-    let bottom = (work_y + work_h - POPUP_MARGIN - POPUP_H).max(work_y);
+    let x = (work_x + work_w - POPUP_MARGIN - size.width).max(work_x);
+    let y = work_y + POPUP_MARGIN + index as f64 * (size.height + POPUP_GAP);
+    let bottom = (work_y + work_h - POPUP_MARGIN - size.height).max(work_y);
     (x, y.min(bottom))
 }
 
@@ -1317,6 +1339,7 @@ fn stage(app: &AppHandle, held: Held, sound: bool) -> String {
         label.clone(),
         Card {
             account_label: held.account_label,
+            automatic_geometry: None,
             chat_id: held.chat_id,
             msg_id: held.msg_id,
             chat_name: held.chat_name,
@@ -1636,30 +1659,48 @@ async fn ask_for_audio(
 
 fn present(app: &AppHandle, label: &str) {
     evict_overflow(app);
+    let (placements, scale) = popup_layout(app);
     if app.get_webview_window(label).is_some() {
-        layout(app);
+        layout(app, &placements, scale);
         return;
     }
+    let Some((_, position)) = placements.iter().find(|(item, _)| item == label) else {
+        return;
+    };
     let built = WebviewWindowBuilder::new(app, label, WebviewUrl::App("mention-popup.html".into()))
         .initialization_script(crate::i18n::init_script())
-        .initialization_script(format!(
-            "window.__MENTION_LABEL={};",
-            serde_json::to_string(label).unwrap_or_else(|_| "\"\"".into())
-        ))
+        .initialization_script(format!("window.__MENTION_NATIVE_FRAME={};", cfg!(windows)))
         .additional_browser_args(crate::window::WEBVIEW2_SYNC_ARGS)
         .title("whatRust")
+        .position(position.x, position.y)
         .inner_size(POPUP_W, POPUP_H)
-        .resizable(false)
-        .decorations(false)
+        .min_inner_size(POPUP_MIN_W, POPUP_MIN_H)
+        .resizable(cfg!(windows))
+        .maximizable(false)
+        .minimizable(false)
+        .decorations(cfg!(windows))
         .shadow(true)
         .always_on_top(true)
         .skip_taskbar(true)
         .focused(false)
-        .visible(false)
+        // On Windows, focused(false) applies to the initial show during creation.
+        .visible(cfg!(windows))
         .build();
     if let Ok(win) = built {
         crate::window::allow_popup_microphone(&win);
-        layout(app);
+        let handle = app.clone();
+        let popup_label = label.to_owned();
+        win.on_window_event(move |event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                close_popup(&handle, &popup_label);
+            }
+        });
+        let (placements, scale) = popup_layout(app);
+        layout(app, &placements, scale);
+        #[cfg(windows)]
+        raise_popup(&win);
+        #[cfg(not(windows))]
         let _ = win.show();
     } else {
         forget(app, label, false);
@@ -1667,12 +1708,42 @@ fn present(app: &AppHandle, label: &str) {
     }
 }
 
-fn layout(app: &AppHandle) {
+#[cfg(windows)]
+fn raise_popup(win: &tauri::WebviewWindow) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+
+    if let Ok(hwnd) = win.hwnd() {
+        let result = unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            )
+        };
+        if let Err(err) = result {
+            crate::dlog::log(&format!("mention: could not raise popup: {err}"));
+        }
+    }
+}
+
+type Placement = (String, LogicalPosition<f64>);
+
+fn popup_layout(app: &AppHandle) -> (Vec<Placement>, f64) {
     let (order, anchor) = {
         let state = popups(app);
         let inner = lock::guard(&state.inner);
-        let order: Vec<String> = inner.order.iter().cloned().collect();
-        let anchor = order.first().and_then(|label| {
+        let order: Vec<_> = inner
+            .order
+            .iter()
+            .filter_map(|label| Some((label.clone(), inner.cards.get(label)?.automatic_geometry)))
+            .collect();
+        let anchor = inner.order.front().and_then(|label| {
             inner
                 .cards
                 .get(label)
@@ -1680,32 +1751,113 @@ fn layout(app: &AppHandle) {
         });
         (order, anchor)
     };
-    let (work_x, work_y, work_w, work_h) = work_area(app, anchor.as_deref());
-    for (index, label) in order.iter().enumerate() {
+    if order.is_empty() {
+        return (Vec::new(), 1.0);
+    }
+    #[cfg(windows)]
+    let foreground = foreground_monitor(app);
+    #[cfg(not(windows))]
+    let foreground: Option<Monitor> = None;
+    let monitor = foreground
+        .or_else(|| {
+            anchor
+                .and_then(|label| app.get_webview(&label))
+                .and_then(|view| view.window().current_monitor().ok().flatten())
+        })
+        .or_else(|| app.primary_monitor().ok().flatten());
+    let (work_x, work_y, work_w, work_h, scale) =
+        monitor.map_or((0.0, 0.0, 1280.0, 800.0, 1.0), |monitor| {
+            let scale = monitor.scale_factor();
+            let area = monitor.work_area();
+            (
+                f64::from(area.position.x) / scale,
+                f64::from(area.position.y) / scale,
+                f64::from(area.size.width) / scale,
+                f64::from(area.size.height) / scale,
+                scale,
+            )
+        });
+    let mut automatic = Vec::new();
+    let mut occupied = Vec::new();
+    let mut default_size = None;
+    for (label, expected) in order {
+        if let Some(win) = app.get_webview_window(&label) {
+            if let Some(actual) = PopupGeometry::read(&win) {
+                // The last automatic layout is the reference for native moves and resizes.
+                if expected.is_some_and(|expected| expected != actual) {
+                    let p = actual.position.to_logical::<f64>(scale);
+                    let s = actual.size.to_logical::<f64>(scale);
+                    occupied.push((p.x, p.y, p.x + s.width, p.y + s.height));
+                    continue;
+                }
+                default_size.get_or_insert_with(|| {
+                    actual
+                        .size
+                        .to_logical::<f64>(win.scale_factor().unwrap_or(scale))
+                });
+            }
+        }
+        automatic.push(label);
+    }
+    let size = default_size.unwrap_or_else(|| LogicalSize::new(POPUP_W, POPUP_H));
+    let rows =
+        ((work_h - 2.0 * POPUP_MARGIN + POPUP_GAP) / (size.height + POPUP_GAP)).max(1.0) as usize;
+    let columns =
+        ((work_w - 2.0 * POPUP_MARGIN + POPUP_GAP) / (size.width + POPUP_GAP)).max(1.0) as usize;
+    let mut available = (0..columns)
+        .flat_map(|col| {
+            let width = work_w - col as f64 * (size.width + POPUP_GAP);
+            (0..rows).map(move |row| popup_origin(work_x, work_y, width, work_h, row, size))
+        })
+        .filter(|&(x, y)| {
+            occupied.iter().all(|&(left, top, right, bottom)| {
+                x + size.width <= left || x >= right || y + size.height <= top || y >= bottom
+            })
+        });
+    let placements = automatic
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let default = || popup_origin(work_x, work_y, work_w, work_h, index, size);
+            let (x, y) = if occupied.is_empty() {
+                default()
+            } else {
+                available.next().unwrap_or_else(default)
+            };
+            (label, LogicalPosition::new(x, y))
+        })
+        .collect();
+    (placements, scale)
+}
+
+#[cfg(windows)]
+fn foreground_monitor(app: &AppHandle) -> Option<Monitor> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
+
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(GetForegroundWindow(), &mut rect) }.ok()?;
+    let x = (f64::from(rect.left) + f64::from(rect.right)) / 2.0;
+    let y = (f64::from(rect.top) + f64::from(rect.bottom)) / 2.0;
+    app.monitor_from_point(x, y).ok().flatten()
+}
+
+fn layout(app: &AppHandle, placements: &[Placement], _scale: f64) {
+    let state = popups(app);
+    for (label, position) in placements {
         let Some(win) = app.get_webview_window(label) else {
             continue;
         };
-        let (x, y) = popup_origin(work_x, work_y, work_w, work_h, index);
-        let _ = win.set_position(LogicalPosition::new(x, y));
+        let position = *position;
+        #[cfg(windows)]
+        let position = position.to_physical::<i32>(_scale);
+        if win.set_position(position).is_ok() {
+            let geometry = PopupGeometry::read(&win);
+            if let Some(card) = lock::guard(&state.inner).cards.get_mut(label) {
+                card.automatic_geometry = geometry;
+            }
+        }
     }
-}
-
-fn work_area(app: &AppHandle, anchor: Option<&str>) -> (f64, f64, f64, f64) {
-    let monitor = anchor
-        .and_then(|label| app.get_webview(label))
-        .and_then(|view| view.window().current_monitor().ok().flatten())
-        .or_else(|| app.primary_monitor().ok().flatten());
-    let Some(monitor) = monitor else {
-        return (0.0, 0.0, 1280.0, 800.0);
-    };
-    let scale = monitor.scale_factor().max(1.0);
-    let area = monitor.work_area();
-    (
-        area.position.x as f64 / scale,
-        area.position.y as f64 / scale,
-        area.size.width as f64 / scale,
-        area.size.height as f64 / scale,
-    )
 }
 
 fn close_popup(app: &AppHandle, label: &str) {
@@ -1726,7 +1878,11 @@ fn forget(app: &AppHandle, label: &str, fill: bool) {
     let state = popups(app);
     lock::guard(&state.media).remove(label);
     lock::guard(&state.opening).retain(|_, wait| wait.popup != label);
-    layout(app);
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let (placements, scale) = popup_layout(&handle);
+        layout(&handle, &placements, scale);
+    });
     if fill {
         pump(app);
     }
@@ -1798,11 +1954,13 @@ mod tests {
     use crate::settings::MentionAccountPrefs;
     use std::collections::{HashMap, VecDeque};
     use std::time::{Duration, Instant};
+    use tauri::LogicalSize;
 
     #[test]
     fn the_newest_popup_is_the_top_one() {
-        let (x0, y0) = popup_origin(0.0, 0.0, 1440.0, 900.0, 0);
-        let (_x1, y1) = popup_origin(0.0, 0.0, 1440.0, 900.0, 1);
+        let size = LogicalSize::new(POPUP_W, POPUP_H);
+        let (x0, y0) = popup_origin(0.0, 0.0, 1440.0, 900.0, 0, size);
+        let (_x1, y1) = popup_origin(0.0, 0.0, 1440.0, 900.0, 1, size);
         assert_eq!(x0, 1440.0 - 12.0 - POPUP_W);
         assert!(y0 < y1);
         assert!(y1 - y0 > POPUP_H);
@@ -1810,7 +1968,14 @@ mod tests {
 
     #[test]
     fn a_short_screen_keeps_the_popup_on_it() {
-        let (_, y) = popup_origin(0.0, 20.0, 800.0, 400.0, 5);
+        let (_, y) = popup_origin(
+            0.0,
+            20.0,
+            800.0,
+            400.0,
+            5,
+            LogicalSize::new(POPUP_W, POPUP_H),
+        );
         assert!(y < 20.0 + 400.0 - POPUP_H);
     }
 

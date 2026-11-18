@@ -569,6 +569,11 @@
     text = String(text || "error");
     if (text.indexOf("needs_consent") !== -1) return L("Confirme o envio antes de resumir.", "Confirm sending before summarizing.");
     if (text.indexOf("no_key") !== -1) return L("Falta a chave da API nas configurações.", "The API key is missing in Settings.");
+    if (text === "cli_missing") return L("Programa não encontrado. Confira o caminho nas configurações.", "CLI executable not found. Check the program path in Settings.");
+    if (text === "cli_auth") return L("Entre na sua conta no Antigravity CLI.", "Sign in to your account in Antigravity CLI.");
+    if (text === "cli_flags") return L("Atualize o programa para usar o modo restrito.", "Update the CLI to use the required restricted mode.");
+    if (text === "cli_timeout") return L("O programa demorou demais para responder.", "The CLI request timed out.");
+    if (text === "cli_failed") return L("O programa não respondeu. Confira se você entrou na sua conta pelo programa.", "The CLI request failed. Check that you're signed in to the program.");
     if (text.indexOf("locked") !== -1) return L("O whatRust está bloqueado.", "whatRust is locked.");
     if (text.indexOf("empty") !== -1) return L("Não há mensagens nesse intervalo.", "No messages in that range.");
     if (text.indexOf("llm") !== -1) return L("A IA não respondeu.", "The AI provider did not respond.");
@@ -1487,7 +1492,7 @@
         start(chat, range);
         return;
       }
-      var provider = view && view.provider ? view.provider : "OpenRouter";
+      var provider = view && view.provider ? view.provider : "OpenRouter API";
       paintCard(
         L(
           "O whatRust envia as mensagens deste intervalo para " + provider + " e guarda o resumo neste computador, não no telefone. Em grupos, isso inclui o que as outras pessoas escreveram. Nada é enviado no chat.",

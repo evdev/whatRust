@@ -31,6 +31,7 @@ body {
   height: 100%;
   display: flex;
   flex-direction: column;
+  overflow: auto;
   gap: 8px;
   padding: 10px;
   border-radius: 16px;
@@ -44,7 +45,7 @@ body {
     inset 0 -7px 10px rgba(0, 0, 0, 0.16),
     0 6px 0 #6e0c16;
 }
-header { display: flex; align-items: flex-start; gap: 8px; }
+header { display: flex; align-items: flex-start; gap: 8px; flex-shrink: 0; }
 #open {
   flex: 1;
   display: flex;
@@ -84,15 +85,22 @@ header { display: flex; align-items: flex-start; gap: 8px; }
 }
 #close::before { content: "×"; }
 #close:hover { background: var(--field); color: var(--fg); }
-#body {
+.message {
   flex: 1;
+  min-height: 44px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+}
+#body {
+  flex: 1 0 auto;
+  width: 100%;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 6px;
   min-height: 44px;
-  max-height: 120px;
-  overflow: auto;
   padding: 0;
   border: 0;
   background: transparent;
@@ -105,7 +113,7 @@ header { display: flex; align-items: flex-start; gap: 8px; }
 #body[hidden] { display: none; }
 #incoming {
   max-width: 100%;
-  max-height: 72px;
+  max-height: clamp(72px, 30vh, 240px);
   border-radius: 8px;
   object-fit: contain;
   background: var(--field);
@@ -113,6 +121,7 @@ header { display: flex; align-items: flex-start; gap: 8px; }
 #incoming[hidden] { display: none; }
 #heard {
   display: flex;
+  flex-shrink: 0;
   flex-direction: column;
   gap: 6px;
 }
@@ -162,7 +171,7 @@ header { display: flex; align-items: flex-start; gap: 8px; }
 }
 #heard-transcript {
   margin: 0;
-  max-height: 72px;
+  max-height: clamp(72px, 28vh, 200px);
   overflow: auto;
   color: var(--fg);
   font-size: 13px;

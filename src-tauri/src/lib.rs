@@ -189,9 +189,10 @@ pub fn run() {
                             & !tauri_plugin_window_state::StateFlags::VISIBLE
                             & !tauri_plugin_window_state::StateFlags::DECORATIONS,
                     )
-                    // Reply popups are one-shot. Restoring one would reopen an
-                    // empty window on the next launch.
-                    .with_filter(|label| !label.starts_with("mention-"))
+                    // Reply and call popup labels are transient.
+                    .with_filter(|label| {
+                        !label.starts_with("mention-") && !window::is_call_popout_window(label)
+                    })
                     .build(),
             )
             .plugin(
@@ -393,8 +394,8 @@ pub fn run() {
             // A reset only runs while no WebViews hold the session stores open.
             // Failure aborts startup before reading accounts or creating a view.
             applock::complete_pending_reset(handle).map_err(std::io::Error::other)?;
-            i18n::set(i18n::Lang::from_code(&s.language));
             if smoke_mode {
+                s.language = i18n::EN.into();
                 s.start_minimized = true;
                 if std::env::var("WHATRUST_ASR_SMOKE").as_deref() == Ok("1") {
                     s.voice_transcribe = true;
@@ -403,6 +404,7 @@ pub fn run() {
                 }
                 settings::save(handle, &s)?;
             }
+            i18n::set(i18n::Lang::from_code(&s.language));
             // Window model for this run (Linux/macOS opt-in; Windows always single).
             sessions::init_mode(&s);
             let args: Vec<String> = std::env::args().collect();
@@ -412,8 +414,11 @@ pub fn run() {
             let mut f = accounts::load(handle);
             dlog::log("startup: account configuration loaded");
             if smoke_mode {
-                if f.accounts.len() == 1 {
-                    accounts::add(&mut f, "Conta de teste B");
+                const TEST_ACCOUNT_NAME: &str = "Test Account B";
+                if let Some(account) = f.accounts.get_mut(1) {
+                    account.name = TEST_ACCOUNT_NAME.into();
+                } else {
+                    accounts::add(&mut f, TEST_ACCOUNT_NAME);
                 }
                 accounts::save(handle, &f)?;
                 applock::save(handle, &applock::AppLockConfig::default())?;

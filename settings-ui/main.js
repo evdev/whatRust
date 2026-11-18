@@ -1,16 +1,19 @@
 const invoke = window.__TAURI__.core.invoke;
 const LANGS = ["pt-BR", "en"];
 const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "standin_enabled", "hide_app_banner"];
-const STANDIN_BACKENDS = ["api", "claude_cli", "grok_cli", "codex_cli", "hermes", "grok_bot"];
 const AI_PROVIDERS = ["openrouter", "gemini", "anthropic"];
+const TEXT_CLI_PROVIDERS = ["claude_cli", "codex_cli", "antigravity_cli"];
+const STANDIN_CLI_PROVIDERS = [...TEXT_CLI_PROVIDERS, "grok_cli"];
+const STANDIN_BACKENDS = ["api", ...STANDIN_CLI_PROVIDERS, "hermes", "grok_bot"];
 const LIST_PROVIDERS = ["gemini", "anthropic"];
 let translateModels = { openrouter: "", gemini: "", anthropic: "" };
 let summaryModels = { openrouter: "", gemini: "", anthropic: "" };
 let shownProvider = "openrouter";
+let shownCli = "";
 let standinModels = { openrouter: "", gemini: "", anthropic: "" };
-let standinCliModels = { claude_cli: "", grok_cli: "", codex_cli: "" };
+let standinCliModels = {};
 let legacyCliModel = "";
-let standinBins = { claude_cli: "", grok_cli: "", codex_cli: "" };
+let standinBins = {};
 let standinShown = "api";
 let standinCli = false;
 let personaLoaded = false;
@@ -20,8 +23,8 @@ let modelCatalogs = { gemini: null, anthropic: null };
 // Model lists for each program, keyed by backend plus the program path that
 // produced them. A new path must not reuse the previous program's list.
 let cliModelCatalogs = {};
+const cliCatalogRequests = new Set();
 let catalogToken = 0;
-let cliCatalogToken = 0;
 let catalogLoading = false;
 const ZOOM_DEFAULT = 1;
 const SINGLE_WINDOW_SUBTITLE = "One window with an account switcher. An account loads only when you open it, and opening another does not close the first. Requires restarting whatRust.";
@@ -321,16 +324,27 @@ async function load() {
     openrouter: s.ai_model_openrouter || "",
     gemini: s.ai_model_gemini || "",
     anthropic: s.ai_model_anthropic || "",
+    claude_cli: s.ai_model_claude_cli || "",
+    codex_cli: s.ai_model_codex_cli || "",
+    antigravity_cli: s.ai_model_antigravity_cli || "",
   };
   summaryModels = {
     openrouter: s.summary_model_openrouter || translateModels.openrouter,
     gemini: s.summary_model_gemini || translateModels.gemini,
     anthropic: s.summary_model_anthropic || translateModels.anthropic,
+    claude_cli: s.summary_model_claude_cli || "",
+    codex_cli: s.summary_model_codex_cli || "",
+    antigravity_cli: s.summary_model_antigravity_cli || "",
   };
-  document.getElementById("ai_provider").value = AI_PROVIDERS.includes(s.ai_provider) ? s.ai_provider : "openrouter";
-  paintChatSummaryConsent(!!s.chat_summary_consent);
-  shownProvider = document.getElementById("ai_provider").value;
   standinCli = !!s.standin_cli_available;
+  shownProvider = AI_PROVIDERS.includes(s.ai_provider) ? s.ai_provider : "openrouter";
+  shownCli = standinCli && TEXT_CLI_PROVIDERS.includes(s.ai_cli_backend) ? s.ai_cli_backend : "";
+  const aiProvider = document.getElementById("ai_provider");
+  aiProvider.value = shownCli || shownProvider;
+  for (const opt of aiProvider.options) {
+    if (TEXT_CLI_PROVIDERS.includes(opt.value)) opt.disabled = !standinCli;
+  }
+  paintChatSummaryConsent(!!s.chat_summary_consent);
   standinModels = {
     openrouter: s.standin_model_openrouter || "",
     gemini: s.standin_model_gemini || "",
@@ -340,11 +354,13 @@ async function load() {
     claude_cli: s.standin_model_claude || "",
     grok_cli: s.standin_model_grok || "",
     codex_cli: s.standin_model_codex || "",
+    antigravity_cli: s.standin_model_antigravity || "",
   };
   standinBins = {
     claude_cli: s.standin_claude_bin || "",
     grok_cli: s.standin_grok_bin || "",
     codex_cli: s.standin_codex_bin || "",
+    antigravity_cli: s.standin_antigravity_bin || "",
   };
   const standinBackend = STANDIN_BACKENDS.includes(s.standin_backend) ? s.standin_backend : "api";
   legacyCliModel = s.standin_cli_model || "";
@@ -470,13 +486,20 @@ async function save() {
   commitModelFields();
   s.fluidvoice_port = parseInt(document.getElementById("fluidvoice_port").value, 10) || 47733;
   s.translate_target_lang = document.getElementById("translate_target_lang").value.trim() || "English";
-  s.ai_provider = document.getElementById("ai_provider").value;
+  s.ai_provider = shownProvider;
+  s.ai_cli_backend = shownCli;
   s.ai_model_openrouter = translateModels.openrouter;
   s.ai_model_gemini = translateModels.gemini;
   s.ai_model_anthropic = translateModels.anthropic;
+  s.ai_model_claude_cli = translateModels.claude_cli;
+  s.ai_model_codex_cli = translateModels.codex_cli;
+  s.ai_model_antigravity_cli = translateModels.antigravity_cli;
   s.summary_model_openrouter = summaryModels.openrouter;
   s.summary_model_gemini = summaryModels.gemini;
   s.summary_model_anthropic = summaryModels.anthropic;
+  s.summary_model_claude_cli = summaryModels.claude_cli;
+  s.summary_model_codex_cli = summaryModels.codex_cli;
+  s.summary_model_antigravity_cli = summaryModels.antigravity_cli;
   commitStandinFields();
   s.standin_backend = document.getElementById("standin_backend").value;
   s.standin_model_openrouter = standinModels.openrouter;
@@ -485,6 +508,7 @@ async function save() {
   s.standin_model_claude = standinCliModels.claude_cli;
   s.standin_model_grok = standinCliModels.grok_cli;
   s.standin_model_codex = standinCliModels.codex_cli;
+  s.standin_model_antigravity = standinCliModels.antigravity_cli;
   // A leftover single model from an older settings file is only meaningful for
   // the program that was selected then. Rust already moved that case. Once a
   // program is selected here, drop the leftover so it is not applied to a
@@ -498,6 +522,7 @@ async function save() {
   s.standin_claude_bin = standinBins.claude_cli;
   s.standin_grok_bin = standinBins.grok_cli;
   s.standin_codex_bin = standinBins.codex_cli;
+  s.standin_antigravity_bin = standinBins.antigravity_cli;
   s.standin_delay_secs = parseInt(document.getElementById("standin_delay_secs").value, 10) || 10;
   s.standin_hourly_limit = parseInt(document.getElementById("standin_hourly_limit").value, 10) || 12;
   s.standin_hermes_url = document.getElementById("standin_hermes_url").value.trim();
@@ -788,7 +813,9 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("ai_provider").addEventListener("change", () => {
     commitStandinFields();
     commitModelFields();
-    shownProvider = document.getElementById("ai_provider").value;
+    const provider = document.getElementById("ai_provider").value;
+    shownCli = TEXT_CLI_PROVIDERS.includes(provider) ? provider : "";
+    if (!shownCli) shownProvider = provider;
     refreshKeyState();
     syncModelControls();
     showStandinFields();
@@ -797,6 +824,7 @@ window.addEventListener("DOMContentLoaded", () => {
     commitStandinFields();
     syncStandinAvailability();
     showStandinFields();
+    if (shownCli && standinShown === "api" && usesModelList(shownProvider)) loadModelCatalog(shownProvider);
     // The old program's result would otherwise be read as this one's.
     document.getElementById("standin_cli_state").textContent = "Not checked yet.";
   });
@@ -838,13 +866,18 @@ window.addEventListener("DOMContentLoaded", () => {
   }
   document.getElementById("standin_model").addEventListener("input", commitStandinFields);
   document.getElementById("standin_model_select").addEventListener("change", commitStandinFields);
-  document.getElementById("standin_bin").addEventListener("change", () => {
-    commitStandinFields();
-    if (standinShown === "api") return;
-    // The path selects which installed program, so the list has to be read again.
-    fillCliModelSelect(standinShown);
-    loadCliModelCatalog(standinShown);
+  const aiBin = document.getElementById("ai_cli_bin");
+  const standinBin = document.getElementById("standin_bin");
+  aiBin.addEventListener("input", () => {
+    standinBins[shownCli] = aiBin.value.trim();
+    if (shownCli === standinShown) standinBin.value = aiBin.value;
   });
+  standinBin.addEventListener("input", () => {
+    standinBins[standinShown] = standinBin.value.trim();
+    if (shownCli === standinShown) aiBin.value = standinBin.value;
+  });
+  aiBin.addEventListener("change", () => refreshCliModelCatalog(shownCli));
+  standinBin.addEventListener("change", () => refreshCliModelCatalog(standinShown));
   document.getElementById("test_fluidvoice").addEventListener("click", testFluidVoice);
   document.getElementById("install_fluidvoice").addEventListener("click", () => {
     offerFluidVoiceInstall(false);
@@ -882,8 +915,6 @@ function standinUsesList() {
 }
 
 function commitStandinFields() {
-  const bin = document.getElementById("standin_bin").value.trim();
-  if (standinShown !== "api") standinBins[standinShown] = bin;
   if (!standinUsesList()) {
     standinModels[shownProvider] = document.getElementById("standin_model").value.trim();
     return;
@@ -897,8 +928,11 @@ function commitStandinFields() {
 }
 
 function showStandinFields() {
-  const backend = document.getElementById("standin_backend").value;
-  const cli = backend === "claude_cli" || backend === "grok_cli" || backend === "codex_cli";
+  const backendSelect = document.getElementById("standin_backend");
+  const providerOption = document.querySelector(`#ai_provider option[value="${shownProvider}"]`);
+  backendSelect.querySelector('option[value="api"]').textContent = providerOption.textContent;
+  const backend = backendSelect.value;
+  const cli = STANDIN_CLI_PROVIDERS.includes(backend);
   const agent = backend === "hermes" || backend === "grok_bot";
   const listed = cli || (!agent && usesModelList(shownProvider));
   const input = document.getElementById("standin_model");
@@ -925,11 +959,10 @@ function showStandinFields() {
 
 function syncStandinAvailability() {
   const select = document.getElementById("standin_backend");
-  const cliIds = ["claude_cli", "grok_cli", "codex_cli"];
   for (const opt of select.options) {
-    if (cliIds.includes(opt.value)) opt.disabled = !standinCli;
+    if (STANDIN_CLI_PROVIDERS.includes(opt.value)) opt.disabled = !standinCli;
   }
-  if (!standinCli && cliIds.includes(select.value)) select.value = "api";
+  if (!standinCli && STANDIN_CLI_PROVIDERS.includes(select.value)) select.value = "api";
   if (!standinCli) {
     document.getElementById("standin_backend_hint").textContent =
       "In this install, the command-line programs are not available. The API key, Hermes, and Grok Bot still work.";
@@ -1021,6 +1054,13 @@ function usesModelList(provider) {
 }
 
 function commitModelFields() {
+  if (shownCli) {
+    const translate = document.getElementById("translate_model_select");
+    const summary = document.getElementById("summary_model_select");
+    if (!translate.disabled) translateModels[shownCli] = translate.value;
+    if (!summary.disabled) summaryModels[shownCli] = summary.value;
+    return;
+  }
   if (usesModelList(shownProvider)) {
     const translate = document.getElementById("translate_model_select").value.trim();
     const summary = document.getElementById("summary_model_select").value.trim();
@@ -1033,11 +1073,22 @@ function commitModelFields() {
 }
 
 function syncModelControls() {
-  const listed = usesModelList(shownProvider);
+  const listed = !!shownCli || usesModelList(shownProvider);
+  for (const id of ["ai_key_row", "ai_key_actions", "ai_key_state", "ai_key_note"]) {
+    document.getElementById(id).hidden = !!shownCli;
+  }
+  document.getElementById("ai_cli_bin_row").hidden = !shownCli;
+  document.getElementById("ai_cli_bin").value = standinBins[shownCli] || "";
+  document.getElementById("translate_model_hint").hidden = !!shownCli;
   document.getElementById("translate_model").hidden = listed;
   document.getElementById("summary_model").hidden = listed;
   document.getElementById("translate_model_select").hidden = !listed;
   document.getElementById("summary_model_select").hidden = !listed;
+  if (shownCli) {
+    refreshCliModelCatalog(shownCli);
+    if (standinShown === "api" && usesModelList(shownProvider)) loadModelCatalog(shownProvider);
+    return;
+  }
   if (!listed) {
     catalogToken += 1;
     catalogLoading = false;
@@ -1051,9 +1102,11 @@ function syncModelControls() {
 }
 
 function renderModelSelects() {
-  const models = modelCatalogs[shownProvider] || [];
-  fillModelSelect("translate_model_select", translateModels[shownProvider], models);
-  fillModelSelect("summary_model_select", summaryModels[shownProvider], models);
+  if (!shownCli) {
+    const models = modelCatalogs[shownProvider] || [];
+    fillModelSelect("translate_model_select", translateModels[shownProvider], models);
+    fillModelSelect("summary_model_select", summaryModels[shownProvider], models);
+  }
   if (document.getElementById("standin_backend").value === "api") fillStandinModelSelect();
 }
 
@@ -1071,6 +1124,13 @@ function cliCatalogKey(backend) {
   return backend + "\n" + (standinBins[backend] || "");
 }
 
+function renderTextCliModels() {
+  const models = cliModelCatalogs[cliCatalogKey(shownCli)] || [];
+  const defaultModel = { id: "", label: "Program default" };
+  fillModelSelect("translate_model_select", translateModels[shownCli], models, defaultModel, false);
+  fillModelSelect("summary_model_select", summaryModels[shownCli], models, defaultModel, false);
+}
+
 function fillCliModelSelect(backend) {
   const loaded = cliModelCatalogs[cliCatalogKey(backend)];
   fillModelSelect(
@@ -1080,7 +1140,7 @@ function fillCliModelSelect(backend) {
     { id: "", label: "Program default" },
     false,
   );
-  if (!loaded) document.getElementById("standin_model_select").disabled = true;
+  if (!loaded && backend !== "antigravity_cli") document.getElementById("standin_model_select").disabled = true;
 }
 
 function fillModelSelect(id, saved, models, leading, requiresKey) {
@@ -1102,47 +1162,61 @@ function fillModelSelect(id, saved, models, leading, requiresKey) {
   }
   select.value = saved || (leading ? leading.id : "");
   const needsKey = requiresKey !== false;
-  select.disabled = (needsKey && (catalogLoading || !keyFlags[shownProvider])) || options.length === 0;
+  select.disabled = (needsKey && (catalogLoading || !keyFlags[shownProvider]))
+    || (options.length === 0 && (needsKey || !leading));
+}
+
+function refreshCliModelCatalog(backend) {
+  if (shownCli && shownCli === backend) renderTextCliModels();
+  if (standinShown === backend) fillCliModelSelect(backend);
+  loadCliModelCatalog(backend);
 }
 
 async function loadCliModelCatalog(backend) {
   const key = cliCatalogKey(backend);
-  if (cliModelCatalogs[key]) return;
-  const token = ++cliCatalogToken;
+  if (cliModelCatalogs[key] || cliCatalogRequests.has(key)) return;
+  cliCatalogRequests.add(key);
   const bin = standinBins[backend] || "";
-  document.getElementById("standin_model_select").disabled = true;
   try {
     const models = await invoke("list_standin_cli_models", { backend, bin });
-    if (token !== cliCatalogToken) return;
-    // An empty answer is not cached, so the next visit can try again.
     if (Array.isArray(models) && models.length) cliModelCatalogs[key] = models;
-  } catch (e) {
-    if (token !== cliCatalogToken) return;
+  } catch {
+    // Keep the saved model and program default available.
+  } finally {
+    cliCatalogRequests.delete(key);
   }
-  if (document.getElementById("standin_backend").value === backend) fillCliModelSelect(backend);
+  if (key === cliCatalogKey(backend)) {
+    if (shownCli === backend) renderTextCliModels();
+    if (standinShown === backend) fillCliModelSelect(backend);
+  }
 }
 
 async function loadModelCatalog(provider) {
   const hint = document.getElementById("translate_model_hint");
+  const setHint = (text) => {
+    if (!shownCli) hint.textContent = text;
+  };
   if (!keyFlags[provider]) {
     catalogLoading = false;
-    hint.textContent = "Save the API key to list models.";
+    setHint("Save the API key to list models.");
     renderModelSelects();
     return;
   }
   if (modelCatalogs[provider]) {
     catalogLoading = false;
-    hint.textContent = modelCatalogs[provider].length
+    setHint(modelCatalogs[provider].length
       ? "Main models available for this key."
-      : "No main model is available for this key.";
+      : "No main model is available for this key.");
     renderModelSelects();
     return;
   }
   const token = ++catalogToken;
   catalogLoading = true;
-  hint.textContent = "Loading models…";
-  document.getElementById("translate_model_select").disabled = true;
-  document.getElementById("summary_model_select").disabled = true;
+  setHint("Loading models…");
+  if (!shownCli) {
+    document.getElementById("translate_model_select").disabled = true;
+    document.getElementById("summary_model_select").disabled = true;
+  }
   if (document.getElementById("standin_backend").value === "api") {
     document.getElementById("standin_model_select").disabled = true;
   }
@@ -1150,13 +1224,13 @@ async function loadModelCatalog(provider) {
     const models = await invoke("list_ai_models", { provider });
     if (token !== catalogToken || shownProvider !== provider) return;
     modelCatalogs[provider] = Array.isArray(models) ? models : [];
-    hint.textContent = modelCatalogs[provider].length
+    setHint(modelCatalogs[provider].length
       ? "Main models available for this key."
-      : "No main model is available for this key.";
+      : "No main model is available for this key.");
   } catch (e) {
     if (token !== catalogToken || shownProvider !== provider) return;
     const message = errorText(e);
-    hint.textContent = message;
+    setHint(message);
     setKeyStatus(message, "bad");
   }
   if (token !== catalogToken || shownProvider !== provider) return;
@@ -1178,7 +1252,7 @@ function setKeyStatus(text, tone) {
 }
 
 function refreshKeyState() {
-  const on = keyFlags[document.getElementById("ai_provider").value];
+  const on = keyFlags[shownProvider];
   setKeyStatus(on ? "Key saved on this computer." : "No key saved.", "ok");
 }
 

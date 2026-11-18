@@ -44,6 +44,9 @@ When whatRust opens, scan the QR code from **WhatsApp → Linked Devices → Lin
 
 Open **Settings → Notifications**, choose an account, and turn on alerts for the events you care about: a personal mention, a reply to one of your messages, a direct message, or a group `@everyone` tag. You can choose the sound and reply popup separately for each account, and use a custom sound. These alerts work in muted chats and while whatRust is in the foreground.
 
+On Windows, reply popups appear in the top-right corner of the display containing the foreground window. They float above other app windows and leave keyboard focus where it is until you interact with the popup.
+Drag the title bar to move a popup, or drag an edge or corner to resize it.
+
 The popup shows who wrote, the message, and a photo preview when available. You can play an incoming voice note, read its transcript when transcription is enabled, or reply with text, a file, a photo, or a recorded voice note. **Open Chat** takes you to the conversation for that account. The popup replaces the ordinary notification for that message. Repeat reports of the same photo are filtered, and different photos still get their own alerts.
 
 ### Transcribe voice notes and videos
@@ -54,7 +57,7 @@ In **Settings → Transcription**, turn on **Transcribe voice notes** to see the
 - **Windows ARM64:** Use **GenieX CLI** and download **Qwen3-ASR 0.6B Q8** from the Transcription settings. This requires a supported Snapdragon NPU and about 1.1 GiB for the model.
 - **Other builds that use FluidVoice:** Run FluidVoice with its local API enabled. The default port is `47733`.
 
-If you want a translation or a short summary of a transcript, select OpenRouter, Gemini, or Anthropic in the same settings and save an API key. You can choose separate models for translation and summaries. When you change the translation language, provider, or model, whatRust refreshes translations already on screen. Once you summarize a transcript, you can turn it into a to-do.
+Under **Settings → Transcription → AI provider**, choose Claude Code, Codex, or Antigravity CLI to translate transcripts and summarize transcripts or chats using your CLI sign-in. Sign in through the CLI first. These options require a native install. You can also select OpenRouter API, Gemini API, or Anthropic API and save an API key. You can choose separate models for translation and summaries. When you change the translation language, provider, or model, whatRust refreshes translations already on screen. Once you summarize a transcript, you can turn it into a to-do.
 
 ### Catch up on a chat
 
@@ -74,7 +77,7 @@ Turn on **Allow stand-in** in **Settings → Stand-in**, then enable it from the
 
 The stand-in can search available chat history and transcripts. It pauses when you reply yourself and can stay quiet and alert you when it isn't sure what to say. You can set a reply delay and hourly limit. Messages it sends are marked in the conversation. If WhatsApp rejects a send, the app shows an error and leaves the incoming message unanswered. When the app starts, it checks for recent replies before answering anything that came in while it was opening.
 
-Use the saved provider API key, a signed-in Claude Code, Grok, or Codex CLI, a Hermes service on your private network, or Grok Bot. The CLI options require a native install. Hermes and Grok Bot have per-chat tool access settings. whatRust sends the reply through the linked WhatsApp session. The stand-in runs only while whatRust is open and the computer is awake.
+Use the saved provider API key, a signed-in Claude Code, Grok, Codex, or Antigravity CLI, a Hermes service on your private network, or Grok Bot. The CLI options require a native install. Hermes and Grok Bot have per-chat tool access settings. whatRust sends the reply through the linked WhatsApp session. The stand-in runs only while whatRust is open and the computer is awake.
 
 ### Accounts, language, and everyday use
 
@@ -95,7 +98,7 @@ Translation sends the transcript text to your chosen provider. Summarizing a cha
 - **Settings → Security** offers a password and, where supported, biometric unlock. You can lock on launch, on demand, when hiding to the tray, or after idle time. App lock protects access to the window. Use your operating system's disk encryption to protect data on disk.
 - Drag files into a conversation to attach them. Download notices offer **Open** or **Show in folder**, and you can choose your download folder, app icon, and interface size in Settings. Ordinary web links open in your browser, and `whatsapp://` links can open a chat in whatRust.
 - **Settings → Network** supports HTTP and SOCKS5 proxies. Restart after changing the proxy. Proxies that require credentials need a local relay.
-- Voice messages are supported. Voice and video calls work on Windows and macOS when WhatsApp enables browser calling for your account. Both call types were verified in this fork’s 0.6.16 Windows ARM64 test build. Linux builds do not currently support calls. Press **Ctrl/Cmd+Shift+P** to open the privacy blur controls before sharing your screen.
+- Voice messages are supported. Voice and video calls work on Windows and macOS when WhatsApp enables browser calling for your account. Both call types were verified in this fork’s 0.6.16 Windows ARM64 test build. During a call on Windows, choose **Move to New Window** to open it in a movable, resizable window. Linux builds do not currently support calls. Press **Ctrl/Cmd+Shift+P** to open the privacy blur controls before sharing your screen.
 - **Settings → Updates** checks this fork's GitHub releases and verifies release downloads against their published checksums. You can also upgrade a checked-in build by running the installer linked above.
 
 whatRust uses WebView2 on Windows, WKWebView on macOS, and WebKitGTK on Linux. The Linux build needs WebKitGTK 2.46.1 or newer for WhatsApp's QR login. The macOS build targets Apple Silicon and requires macOS 12.1 or newer.

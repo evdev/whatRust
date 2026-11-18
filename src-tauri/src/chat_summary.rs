@@ -5,8 +5,7 @@
 //! The transcript is not written to disk and is not logged.
 
 use crate::jsonfile::Loaded;
-use crate::keys;
-use crate::llm::{self, Completion};
+use crate::llm::TextBackend;
 use crate::settings::{self, Settings};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -21,6 +20,7 @@ use tauri::{AppHandle, Manager, Webview};
 const CONTEXT_CHARS: usize = 300_000;
 const MAX_CHUNKS: usize = 2;
 const MAX_TRANSCRIPT: usize = CONTEXT_CHARS * MAX_CHUNKS;
+const CLI_CONTEXT_CHARS: usize = 100_000;
 const MAX_POINTS: usize = 48;
 /// A single bullet can be a long sentence. Cutting at a few hundred
 /// characters is what left a three-day summary stopped mid-sentence.
@@ -79,14 +79,6 @@ pub struct ConsentView {
     pub provider: String,
 }
 
-pub fn provider_name(id: &str) -> &'static str {
-    match id {
-        "gemini" => "Gemini",
-        "anthropic" => "Anthropic",
-        _ => "OpenRouter",
-    }
-}
-
 pub fn allow_summary(stored_consent: bool, acknowledged: bool) -> Result<(), &'static str> {
     if stored_consent || acknowledged {
         Ok(())
@@ -135,8 +127,8 @@ pub fn merge_prompt(parts: &str) -> (String, String) {
 /// One piece, unless the transcript is larger than one context window.
 /// Extra pieces beyond that are the oldest and are dropped. The returned
 /// flag is true when that happened.
-pub fn chunk_transcript(text: &str) -> (Vec<String>, bool) {
-    if text.chars().count() <= CONTEXT_CHARS {
+fn chunk_transcript(text: &str, chunk_chars: usize, max_chunks: usize) -> (Vec<String>, bool) {
+    if text.chars().count() <= chunk_chars {
         return (vec![text.to_string()], false);
     }
     let mut chunks = Vec::new();
@@ -144,14 +136,14 @@ pub fn chunk_transcript(text: &str) -> (Vec<String>, bool) {
     let mut buf_chars = 0usize;
     for line in text.split_inclusive('\n') {
         let n = line.chars().count();
-        if n > CONTEXT_CHARS {
+        if n > chunk_chars {
             if !buf.is_empty() {
                 chunks.push(std::mem::take(&mut buf));
                 buf_chars = 0;
             }
             let mut rest = line;
-            while rest.chars().count() > CONTEXT_CHARS {
-                let (head, tail) = split_at_chars(rest, CONTEXT_CHARS);
+            while rest.chars().count() > chunk_chars {
+                let (head, tail) = split_at_chars(rest, chunk_chars);
                 chunks.push(head);
                 rest = tail;
             }
@@ -161,7 +153,7 @@ pub fn chunk_transcript(text: &str) -> (Vec<String>, bool) {
             }
             continue;
         }
-        if buf_chars > 0 && buf_chars + n > CONTEXT_CHARS {
+        if buf_chars > 0 && buf_chars + n > chunk_chars {
             chunks.push(std::mem::take(&mut buf));
             buf_chars = 0;
         }
@@ -171,9 +163,9 @@ pub fn chunk_transcript(text: &str) -> (Vec<String>, bool) {
     if !buf.is_empty() {
         chunks.push(buf);
     }
-    let dropped = chunks.len() > MAX_CHUNKS;
+    let dropped = chunks.len() > max_chunks;
     if dropped {
-        let start = chunks.len() - MAX_CHUNKS;
+        let start = chunks.len() - max_chunks;
         chunks = chunks.split_off(start);
     }
     (chunks, dropped)
@@ -434,40 +426,22 @@ fn summary_thinking(provider: &str, model: &str) -> Option<&'static str> {
     matches!(provider, "gemini" | "openrouter").then_some("low")
 }
 
-fn summary_job<'a>(
-    provider: &'a str,
-    model: &'a str,
-    key: &'a str,
-    system: &'a str,
-    user: &'a str,
-    thinking_level: Option<&'a str>,
-) -> Completion<'a> {
-    Completion {
-        provider,
-        model,
-        key,
-        system,
-        user,
-        max_tokens: SUMMARY_TOKENS,
-        thinking_budget: None,
-        thinking_level,
-    }
-}
-
 async fn complete_summary(
-    provider: &str,
+    backend: &TextBackend,
     model: &str,
-    key: &str,
     system: &str,
     user: &str,
+    level: Option<&str>,
 ) -> Result<String, String> {
-    let level = summary_thinking(provider, model);
-    let outcome =
-        llm::complete_detailed(summary_job(provider, model, key, system, user, level)).await;
+    let outcome = backend
+        .complete(model, system, user, SUMMARY_TOKENS, level)
+        .await;
     let outcome = match outcome {
         Err("llm_rejected") if level.is_some() => {
             crate::dlog::log("summary: provider rejected the thinking level, retrying without it");
-            llm::complete_detailed(summary_job(provider, model, key, system, user, None)).await
+            backend
+                .complete(model, system, user, SUMMARY_TOKENS, None)
+                .await
         }
         other => other,
     };
@@ -475,22 +449,26 @@ async fn complete_summary(
 }
 
 async fn run_model(
+    app: &AppHandle,
     settings: &Settings,
-    key: &str,
     transcript: &str,
 ) -> Result<(Vec<String>, bool), String> {
-    let (chunks, dropped) = chunk_transcript(transcript);
+    let backend = TextBackend::load(app, settings)?;
+    let (chunk_chars, max_chunks) = match &backend {
+        TextBackend::Cli { .. } => (CLI_CONTEXT_CHARS, MAX_TRANSCRIPT / CLI_CONTEXT_CHARS),
+        TextBackend::Api { .. } => (CONTEXT_CHARS, MAX_CHUNKS),
+    };
+    let (chunks, dropped) = chunk_transcript(transcript, chunk_chars, max_chunks);
     crate::dlog::log(&format!("summary: chunks={}", chunks.len()));
-    let provider = settings.ai_provider.clone();
-    let model = settings.summary_model().to_string();
+    let model = settings.text_summary_model().to_string();
+    let level = summary_thinking(settings.text_provider(), &model);
     let mut tasks = Vec::with_capacity(chunks.len());
     for chunk in chunks {
-        let provider = provider.clone();
+        let backend = backend.clone();
         let model = model.clone();
-        let key = key.to_string();
         tasks.push(tauri::async_runtime::spawn(async move {
             let (system, user) = chat_prompt(&chunk);
-            complete_summary(&provider, &model, &key, &system, &user).await
+            complete_summary(&backend, &model, &system, &user, level).await
         }));
     }
     let mut partials = Vec::with_capacity(tasks.len());
@@ -501,7 +479,7 @@ async fn run_model(
         points_of(&partials[0])
     } else {
         let (system, user) = merge_prompt(&partials.join("\n"));
-        let text = complete_summary(&provider, &model, key, &system, &user).await?;
+        let text = complete_summary(&backend, &model, &system, &user, level).await?;
         points_of(&text)
     };
     if points.is_empty() {
@@ -516,7 +494,7 @@ pub fn chat_summary_consent(window: Webview, app: AppHandle) -> Result<ConsentVi
     let settings = settings::load(&app);
     Ok(ConsentView {
         consented: settings.chat_summary_consent,
-        provider: provider_name(&settings.ai_provider).to_string(),
+        provider: crate::llm::provider_label(settings.text_provider()).to_string(),
     })
 }
 
@@ -561,11 +539,7 @@ pub async fn summarize_chat(
         id
     };
     let settings = settings::load(&app);
-    let key = match keys::get_key(&app, &settings.ai_provider) {
-        Ok(Some(key)) if !key.is_empty() => key,
-        _ => return Err("no_key".into()),
-    };
-    let (points, dropped) = run_model(&settings, &key, &transcript).await?;
+    let (points, dropped) = run_model(&app, &settings, &transcript).await?;
     let covered = if covered_from_ms >= window_start_ms && covered_from_ms <= window_end_ms {
         covered_from_ms
     } else {
@@ -745,10 +719,10 @@ mod tests {
 
     #[test]
     fn a_normal_transcript_is_one_call() {
-        let (chunks, dropped) = chunk_transcript(&"x".repeat(50_000));
+        let (chunks, dropped) = chunk_transcript(&"x".repeat(50_000), CONTEXT_CHARS, MAX_CHUNKS);
         assert!(!dropped);
         assert_eq!(chunks, vec!["x".repeat(50_000)]);
-        let (one, dropped) = chunk_transcript("short note");
+        let (one, dropped) = chunk_transcript("short note", CONTEXT_CHARS, MAX_CHUNKS);
         assert!(!dropped);
         assert_eq!(one, vec!["short note".to_string()]);
     }
@@ -757,7 +731,7 @@ mod tests {
     fn chunks_keep_the_newest_text_when_the_window_is_exceeded() {
         let line = format!("{}\n", "x".repeat(CONTEXT_CHARS / 2));
         let text = line.repeat(5);
-        let (chunks, dropped) = chunk_transcript(&text);
+        let (chunks, dropped) = chunk_transcript(&text, CONTEXT_CHARS, MAX_CHUNKS);
         assert!(dropped);
         assert_eq!(chunks.len(), MAX_CHUNKS);
         assert!(chunks[0].starts_with('x'));

@@ -94,6 +94,7 @@ pub fn should_hide(label: &str) -> bool {
         && (label.starts_with("wa-")
             || label == "settings"
             || label == "main"
+            || crate::window::is_call_popout_window(label)
             || label.starts_with("detached-"))
 }
 
@@ -169,7 +170,7 @@ fn lock_on_main(app: &AppHandle, prompt: bool) {
     for (label, w) in app.windows() {
         if should_hide(&label) && w.is_visible().unwrap_or(false) {
             let _ = w.hide();
-            if crate::sessions::enabled() {
+            if crate::sessions::enabled() && !crate::window::is_call_popout_window(&label) {
                 crate::sessions::layout(app, &label);
             }
             hidden.push(label);
@@ -227,7 +228,7 @@ fn unlock_on_main(app: &AppHandle) {
             }
             if let Some(w) = app.get_window(&label) {
                 let _ = w.show();
-                if crate::sessions::enabled() {
+                if crate::sessions::enabled() && !crate::window::is_call_popout_window(&label) {
                     crate::sessions::layout(app, &label);
                 }
             }
@@ -315,6 +316,7 @@ mod tests {
         assert!(should_hide("wa-default"));
         assert!(should_hide("wa-acct-3"));
         assert!(should_hide("settings"));
+        assert!(should_hide("call-popout-1"));
         assert!(!should_hide("mention-1"));
     }
 

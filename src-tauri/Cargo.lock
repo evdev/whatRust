@@ -5171,6 +5171,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-window-state",
  "tauri-winrt-notification",
+ "tempfile",
  "tokio",
  "ureq 2.12.1",
  "ureq 3.5.1",

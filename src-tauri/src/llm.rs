@@ -8,6 +8,7 @@ use crate::i18n::{tr, trf};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const OPENROUTER: &str = "openrouter";
@@ -122,18 +123,8 @@ pub fn parse(provider: &str, body: &str) -> Result<String, &'static str> {
     }
 }
 
-pub async fn complete(job: Completion<'_>) -> Result<String, &'static str> {
-    // Voice and summary callers have one error string. A schema rejection is
-    // only meaningful to the stand-in, which uses `complete_turns`.
-    match complete_detailed(job).await {
-        Err("llm_rejected") => Err("llm"),
-        other => other,
-    }
-}
-
-/// Same request as `complete`, but a rejected body stays `llm_rejected` so
-/// the caller can retry without the part the provider refused.
-pub async fn complete_detailed(job: Completion<'_>) -> Result<String, &'static str> {
+/// A rejected request stays `llm_rejected` so callers can retry it.
+async fn complete_detailed(job: Completion<'_>) -> Result<String, &'static str> {
     let provider = job.provider.to_string();
     let max_tokens = job.max_tokens;
     let outbound = build(&job)?;
@@ -1323,6 +1314,7 @@ pub enum CliBackend {
     Claude,
     Grok,
     Codex,
+    Antigravity,
 }
 
 impl CliBackend {
@@ -1331,14 +1323,119 @@ impl CliBackend {
             "claude_cli" => Some(Self::Claude),
             "grok_cli" => Some(Self::Grok),
             "codex_cli" => Some(Self::Codex),
+            "antigravity_cli" => Some(Self::Antigravity),
             _ => None,
         }
+    }
+}
+
+pub fn provider_label(id: &str) -> &'static str {
+    match id {
+        "gemini" => "Gemini API",
+        "anthropic" => "Anthropic API",
+        "claude_cli" => "Claude Code",
+        "grok_cli" => "Grok",
+        "codex_cli" => "Codex",
+        "antigravity_cli" => "Antigravity CLI",
+        "hermes" => "Hermes",
+        "grok_bot" => "Grok Bot",
+        _ => "OpenRouter API",
+    }
+}
+
+pub fn resolve_cli(backend: CliBackend, explicit: &str) -> Option<PathBuf> {
+    let names = cli_names(backend);
+    if !explicit.is_empty() {
+        let path = PathBuf::from(explicit);
+        return path.is_file().then_some(path);
+    }
+    pick_program(&program_dirs(), names).or_else(|| {
+        if cfg!(windows) && backend == CliBackend::Antigravity {
+            let local = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+            return first_program(&local.join("agy/bin"), names);
+        }
+        None
+    })
+}
+
+/// An `.exe` anywhere in the search list beats a `.cmd` that appears earlier.
+/// npm puts `claude.cmd` on `PATH`; the native `claude.exe` lives later, in
+/// `%USERPROFILE%\.local\bin`, and the batch shim rejects long arguments.
+fn pick_program(dirs: &[PathBuf], names: &[&str]) -> Option<PathBuf> {
+    let (primary, fallback): (Vec<&str>, Vec<&str>) =
+        names.iter().copied().partition(|name| !batch_name(name));
+    dirs.iter()
+        .find_map(|dir| first_program(dir, &primary))
+        .or_else(|| dirs.iter().find_map(|dir| first_program(dir, &fallback)))
+}
+
+fn batch_name(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+}
+
+fn program_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join(".grok/bin"));
+        dirs.push(home.join(".cargo/bin"));
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    #[cfg(windows)]
+    dirs.extend(windows_program_dirs(
+        std::env::var_os("APPDATA").as_deref().map(Path::new),
+        std::env::var_os("LOCALAPPDATA").as_deref().map(Path::new),
+    ));
+    dirs
+}
+
+/// npm's global bin on Windows is the prefix root, not `bin/`. WinGet links
+/// and per-user Program Files sit beside it. The native Claude installer is
+/// already covered by `%USERPROFILE%\.local\bin`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_program_dirs(appdata: Option<&Path>, local: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(appdata) = appdata {
+        dirs.push(appdata.join("npm"));
+    }
+    if let Some(local) = local {
+        dirs.push(local.join("Programs"));
+        dirs.push(local.join("Microsoft").join("WinGet").join("Links"));
+    }
+    dirs
+}
+
+/// `.exe` before the bare name, then the batch shims. A folder that has both
+/// `codex.exe` and `codex.cmd` must run the executable: batch escaping rejects
+/// some of the long arguments these programs are given.
+fn first_program(dir: &Path, names: &[&str]) -> Option<PathBuf> {
+    names
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|path| path.is_file())
+}
+
+fn cli_names(backend: CliBackend) -> &'static [&'static str] {
+    match backend {
+        CliBackend::Claude => &["claude.exe", "claude", "claude.cmd", "claude.bat"],
+        CliBackend::Grok => &["grok.exe", "grok", "grok.cmd", "grok.bat"],
+        CliBackend::Codex => &["codex.exe", "codex", "codex.cmd", "codex.bat"],
+        CliBackend::Antigravity => &["agy.exe", "agy"],
     }
 }
 
 pub struct CliPlan {
     pub args: Vec<String>,
     pub strip_env: &'static [&'static str],
+    env: &'static [(&'static str, &'static str)],
+    require_success: bool,
 }
 
 /// Arguments for one headless completion. The chat text is never placed here;
@@ -1378,6 +1475,8 @@ pub fn cli_plan(
             CliPlan {
                 args,
                 strip_env: &["ANTHROPIC_API_KEY"],
+                env: &[],
+                require_success: false,
             }
         }
         CliBackend::Grok => {
@@ -1409,6 +1508,8 @@ pub fn cli_plan(
             CliPlan {
                 args,
                 strip_env: &["XAI_API_KEY"],
+                env: &[],
+                require_success: false,
             }
         }
         CliBackend::Codex => {
@@ -1428,9 +1529,214 @@ pub fn cli_plan(
             CliPlan {
                 args,
                 strip_env: &["OPENAI_API_KEY", "CODEX_API_KEY"],
+                env: &[],
+                require_success: false,
+            }
+        }
+        CliBackend::Antigravity => {
+            let mut args = [
+                "--input-format=stream-json",
+                "--output-format=stream-json",
+                "--disable-slash-commands",
+                "--print-timeout=75s",
+                "--settings=whatrust-agy.json",
+                "--json-schema=schema.json",
+            ]
+            .map(String::from)
+            .to_vec();
+            if !model.is_empty() {
+                args.push(format!("--model={model}"));
+            }
+            CliPlan {
+                args,
+                strip_env: ANTIGRAVITY_STRIP_ENV,
+                env: ANTIGRAVITY_ENV,
+                require_success: true,
             }
         }
     }
+}
+
+#[derive(Clone)]
+pub enum TextBackend {
+    Api {
+        provider: String,
+        key: String,
+    },
+    Cli {
+        backend: CliBackend,
+        program: PathBuf,
+    },
+}
+
+impl TextBackend {
+    pub fn load(
+        app: &tauri::AppHandle,
+        settings: &crate::settings::Settings,
+    ) -> Result<Self, &'static str> {
+        let provider = settings.text_provider();
+        if let Some(backend @ (CliBackend::Claude | CliBackend::Codex | CliBackend::Antigravity)) =
+            CliBackend::parse(provider)
+        {
+            let program = resolve_cli(backend, settings.cli_bin(backend)).ok_or("cli_missing")?;
+            return Ok(Self::Cli { backend, program });
+        }
+        let key = crate::keys::get_key(app, provider)
+            .ok()
+            .flatten()
+            .filter(|key| !key.is_empty())
+            .ok_or("no_key")?;
+        Ok(Self::Api {
+            provider: provider.to_string(),
+            key,
+        })
+    }
+
+    pub async fn complete(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+        thinking_level: Option<&str>,
+    ) -> Result<String, &'static str> {
+        match self {
+            Self::Api { provider, key } => {
+                complete_detailed(Completion {
+                    provider,
+                    model,
+                    key,
+                    system,
+                    user,
+                    max_tokens,
+                    thinking_budget: None,
+                    thinking_level,
+                })
+                .await
+            }
+            Self::Cli { backend, program } => {
+                complete_cli_text(program, *backend, model, system, user).await
+            }
+        }
+    }
+}
+
+const TEXT_SCHEMA: &str = r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}"#;
+
+async fn complete_cli_text(
+    program: &Path,
+    backend: CliBackend,
+    model: &str,
+    system: &str,
+    user: &str,
+) -> Result<String, &'static str> {
+    let temp = tempfile::Builder::new()
+        .prefix("whatrust-text-")
+        .tempdir()
+        .map_err(|_| "llm")?;
+    let dir = temp.path();
+    let system = format!("{system}\nReturn the requested answer in the text field. Use only the supplied text and do not call tools.");
+    let system_file = dir.join("system.md");
+    let schema_file = dir.join("schema.json");
+    let stdin = match backend {
+        CliBackend::Claude => {
+            std::fs::write(&system_file, &system).map_err(|_| "llm")?;
+            user.to_string()
+        }
+        CliBackend::Codex | CliBackend::Antigravity => {
+            std::fs::write(&schema_file, TEXT_SCHEMA).map_err(|_| "llm")?;
+            format!("{system}\n\n{user}")
+        }
+        CliBackend::Grok => return Err("llm"),
+    };
+    let mut plan = cli_plan(
+        backend,
+        model,
+        &system_file,
+        &system,
+        TEXT_SCHEMA,
+        &schema_file,
+        dir,
+    );
+    plan.require_success = true;
+    match backend {
+        CliBackend::Claude => {
+            plan.args.push("--no-session-persistence".into());
+            plan.strip_env = &[
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_BASE_URL",
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX",
+                "CLAUDE_CODE_USE_FOUNDRY",
+            ];
+        }
+        CliBackend::Codex => {
+            for arg in [
+                "--ignore-rules",
+                "--sandbox",
+                "read-only",
+                "--disable",
+                "shell_tool",
+                "--disable",
+                "unified_exec",
+                "--disable",
+                "apps",
+                "--disable",
+                "plugins",
+                "--disable",
+                "multi_agent",
+                "-c",
+                "approval_policy=never",
+                "-c",
+                "web_search=disabled",
+            ] {
+                plan.args.push(arg.into());
+            }
+            plan.strip_env = &["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"];
+        }
+        CliBackend::Antigravity => {}
+        CliBackend::Grok => unreachable!(),
+    }
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let raw = run_cli(program, backend, plan, &stdin, dir, cancel)
+        .await
+        .map_err(|err| match err.as_str() {
+            "cli_missing" => "cli_missing",
+            "cli_auth" => "cli_auth",
+            "timeout" => "cli_timeout",
+            _ if err.starts_with("cli_flags:") => "cli_flags",
+            _ => "cli_failed",
+        })?;
+    cli_text_answer(backend, &raw).ok_or("cli_failed")
+}
+
+fn cli_text_answer(backend: CliBackend, raw: &str) -> Option<String> {
+    let answer = match backend {
+        CliBackend::Claude => {
+            let result: Value = serde_json::from_str(raw).ok()?;
+            if result.get("is_error").and_then(Value::as_bool) == Some(true) {
+                return None;
+            }
+            result
+                .get("structured_output")
+                .cloned()
+                .or_else(|| serde_json::from_str(result.get("result")?.as_str()?).ok())?
+        }
+        CliBackend::Codex => raw
+            .lines()
+            .rev()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|event| {
+                event.get("type").and_then(Value::as_str) == Some("item.completed")
+                    && event.pointer("/item/type").and_then(Value::as_str) == Some("agent_message")
+            })
+            .and_then(|event| serde_json::from_str(event.pointer("/item/text")?.as_str()?).ok())?,
+        CliBackend::Antigravity => serde_json::from_str(raw).ok()?,
+        CliBackend::Grok => return None,
+    };
+    let text = answer.get("text")?.as_str()?.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// Flags that must appear in the installed CLI's help before it is launched.
@@ -1461,6 +1767,14 @@ pub fn safety_gaps(backend: CliBackend, help: &str) -> Vec<&'static str> {
             "--ephemeral",
             "--ignore-user-config",
             "--skip-git-repo-check",
+        ],
+        CliBackend::Antigravity => &[
+            "--input-format",
+            "--output-format",
+            "--disable-slash-commands",
+            "--print-timeout",
+            "--settings",
+            "--json-schema",
         ],
     };
     need.iter()
@@ -1596,10 +1910,14 @@ pub async fn run_cli(
         let help = tauri::async_runtime::spawn_blocking(move || {
             run_capturing(
                 &help_program,
-                &help_args(backend),
-                "",
+                CliPlan {
+                    args: help_args(backend),
+                    strip_env: &[],
+                    env: &[],
+                    require_success: false,
+                },
+                String::new(),
                 &help_cwd,
-                &[],
                 15,
                 None,
             )
@@ -1616,21 +1934,103 @@ pub async fn run_cli(
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         return Err("cancelled".into());
     }
-    let owned_stdin = stdin_text.to_string();
-    let cwd = cwd.to_path_buf();
-    tauri::async_runtime::spawn_blocking(move || {
-        run_capturing(
-            &program,
-            &plan.args,
-            &owned_stdin,
-            &cwd,
-            plan.strip_env,
-            90,
-            Some(cancel),
+    let owned_stdin = if backend == CliBackend::Antigravity {
+        std::fs::write(cwd.join("whatrust-agy.json"), ANTIGRAVITY_SETTINGS)
+            .map_err(|err| err.to_string())?;
+        format!(
+            "{}\n",
+            json!({"event": "user", "message": {"content": stdin_text}})
         )
+    } else {
+        stdin_text.to_string()
+    };
+    let cwd = cwd.to_path_buf();
+    let raw = tauri::async_runtime::spawn_blocking(move || {
+        if backend == CliBackend::Antigravity {
+            list_antigravity_models(&program, &cwd, Some(cancel.clone()))?;
+        }
+        run_capturing(&program, plan, owned_stdin, &cwd, 90, Some(cancel))
     })
     .await
-    .map_err(|err| err.to_string())?
+    .map_err(|err| err.to_string())??;
+    if backend == CliBackend::Antigravity {
+        antigravity_cli_response(&raw).ok_or_else(|| "cli_failed".into())
+    } else {
+        Ok(raw)
+    }
+}
+
+const ANTIGRAVITY_SETTINGS: &str = r#"{
+  "agentMode": "",
+  "toolPermission": "strict",
+  "allowNonWorkspaceAccess": false,
+  "modelProvider": "",
+  "permissions": {
+    "allow": [],
+    "deny": ["command(*)", "read_file(*)", "write_file(*)", "mcp(*)", "read_url(*)", "execute_url(*)"]
+  }
+}"#;
+const ANTIGRAVITY_STRIP_ENV: &[&str] = &["GEMINI_API_KEY"];
+const ANTIGRAVITY_ENV: &[(&str, &str)] = &[("AGY_CLI_DISABLE_AUTO_UPDATE", "true")];
+
+pub fn list_antigravity_models(
+    program: &Path,
+    cwd: &Path,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<Vec<ModelChoice>, String> {
+    // A signed-out streaming session starts an OAuth flow. Check the session
+    // through the model catalog before giving the program any message text.
+    let raw = run_capturing(
+        program,
+        CliPlan {
+            args: vec!["models".into()],
+            strip_env: ANTIGRAVITY_STRIP_ENV,
+            env: ANTIGRAVITY_ENV,
+            require_success: true,
+        },
+        String::new(),
+        cwd,
+        12,
+        cancel,
+    )
+    .map_err(|err| {
+        if err.starts_with("exit:") {
+            "cli_auth".into()
+        } else {
+            err
+        }
+    })?;
+    Ok(raw
+        .lines()
+        .filter_map(|line| {
+            let (id, label) = line.trim().split_once(char::is_whitespace)?;
+            if !id.contains('-')
+                || !id
+                    .bytes()
+                    .all(|ch| ch.is_ascii_alphanumeric() || b"-_.".contains(&ch))
+            {
+                return None;
+            }
+            Some(ModelChoice {
+                id: id.into(),
+                label: label.trim().into(),
+            })
+        })
+        .collect())
+}
+
+fn antigravity_cli_response(raw: &str) -> Option<String> {
+    let event = raw
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event.get("event").and_then(Value::as_str) == Some("result"))?;
+    let result = event.get("result")?;
+    if result.get("status")?.as_str()? != "SUCCESS" {
+        return None;
+    }
+    result.get("structured_output")?.as_object()?;
+    Some(result["structured_output"].to_string())
 }
 
 /// Spawn without a console window. The release binary is a GUI subsystem
@@ -1662,24 +2062,24 @@ fn batch_program(program: &std::path::Path) -> bool {
 
 fn run_capturing(
     program: &std::path::Path,
-    args: &[String],
-    stdin_text: &str,
+    plan: CliPlan,
+    stdin_text: String,
     cwd: &std::path::Path,
-    strip_env: &[&str],
     timeout_secs: u64,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<String, String> {
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::process::Stdio;
     use std::time::{Duration, Instant};
     let mut command = hidden_command(program);
     command
-        .args(args)
+        .args(plan.args)
+        .envs(plan.env.iter().copied())
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for name in strip_env {
+        .stderr(Stdio::null());
+    for name in plan.strip_env {
         command.env_remove(name);
     }
     // A `.cmd` that cannot be escaped must not return the argument text.
@@ -1688,9 +2088,17 @@ fn run_capturing(
         Err(_) if batch_program(program) => return Err("cli_missing".into()),
         Err(err) => return Err(err.to_string()),
     };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(stdin_text.as_bytes());
-    }
+    let mut stdin = child.stdin.take().expect("piped CLI stdin");
+    let mut stdout = child.stdout.take().expect("piped CLI stdout");
+    // Drain stdout while feeding stdin so full pipes cannot stall the child
+    // or keep the caller from enforcing the deadline.
+    let writer = std::thread::spawn(move || stdin.write_all(stdin_text.as_bytes()));
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        (&mut stdout).take(1_000_000).read_to_end(&mut buf)?;
+        std::io::copy(&mut stdout, &mut std::io::sink())?;
+        Ok::<_, std::io::Error>(buf)
+    });
     let started = Instant::now();
     let limit = Duration::from_secs(timeout_secs);
     let status = loop {
@@ -1702,27 +2110,29 @@ fn run_capturing(
             let _ = child.wait();
             return Err("cancelled".into());
         }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() > limit => {
+        match child.try_wait().map_err(|err| err.to_string())? {
+            Some(status) if reader.is_finished() && writer.is_finished() => break status,
+            _ if started.elapsed() > limit => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err("timeout".into());
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(30)),
-            Err(err) => return Err(err.to_string()),
+            _ => std::thread::sleep(Duration::from_millis(30)),
         }
     };
-    let mut output = String::new();
-    if let Some(mut stdout) = child.stdout.take() {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf);
-        buf.truncate(1_000_000);
-        output = String::from_utf8_lossy(&buf).into_owned();
-    }
-    if !status.success() && output.trim().is_empty() {
+    let buf = reader
+        .join()
+        .map_err(|_| "cli_output".to_string())?
+        .map_err(|err| err.to_string())?;
+    let output = String::from_utf8_lossy(&buf).into_owned();
+    if !status.success() && (plan.require_success || output.trim().is_empty()) {
         return Err(format!("exit:{}", status.code().unwrap_or(1)));
+    }
+    if plan.require_success {
+        writer
+            .join()
+            .map_err(|_| "cli_input".to_string())?
+            .map_err(|err| err.to_string())?;
     }
     Ok(output)
 }
@@ -1737,9 +2147,14 @@ pub fn cli_picker_models(
     backend: CliBackend,
     program: Option<&std::path::Path>,
 ) -> Vec<ModelChoice> {
+    if backend == CliBackend::Antigravity {
+        return program
+            .and_then(|program| list_antigravity_models(program, &std::env::temp_dir(), None).ok())
+            .unwrap_or_default();
+    }
     if let Some(program) = program.filter(|path| path.is_absolute() && path.is_file()) {
         let args: &[&str] = match backend {
-            CliBackend::Claude => &[],
+            CliBackend::Claude | CliBackend::Antigravity => &[],
             CliBackend::Grok => &["models"],
             CliBackend::Codex => &["debug", "models", "--bundled"],
         };
@@ -1748,7 +2163,7 @@ pub fn cli_picker_models(
                 let parsed = match backend {
                     CliBackend::Grok => parse_grok_models(&text),
                     CliBackend::Codex => parse_codex_models(&text),
-                    CliBackend::Claude => Vec::new(),
+                    CliBackend::Claude | CliBackend::Antigravity => Vec::new(),
                 };
                 if !parsed.is_empty() {
                     return parsed;
@@ -1770,6 +2185,7 @@ pub fn builtin_cli_models(backend: CliBackend) -> Vec<ModelChoice> {
         CliBackend::Grok => {
             model_choices(&[("grok-4.7", "Grok 4.7"), ("grok-build", "Grok Build")])
         }
+        CliBackend::Antigravity => Vec::new(),
         CliBackend::Codex => model_choices(&[
             ("gpt-6-astra", "GPT-6-Astra"),
             ("gpt-6-sol", "GPT-6-Sol"),
@@ -2489,6 +2905,61 @@ mod tests {
     }
 
     #[test]
+    fn an_exe_in_the_folder_wins_over_the_batch_shim() {
+        let dir = std::env::temp_dir().join(format!("whatrust-bin-exe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("codex.cmd"), b"@echo off").unwrap();
+        std::fs::write(dir.join("codex.exe"), b"MZ").unwrap();
+        let found = first_program(&dir, cli_names(CliBackend::Codex)).unwrap();
+        assert_eq!(found.file_name().unwrap(), "codex.exe");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_exe_later_in_the_search_list_beats_an_earlier_cmd() {
+        let root = std::env::temp_dir().join(format!("whatrust-bin-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let npm = root.join("npm");
+        let native = root.join("local");
+        std::fs::create_dir_all(&npm).unwrap();
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::write(npm.join("codex.cmd"), b"@echo off").unwrap();
+        std::fs::write(native.join("codex.exe"), b"MZ").unwrap();
+        let found = pick_program(&[npm, native], cli_names(CliBackend::Codex)).unwrap();
+        assert_eq!(found.file_name().unwrap(), "codex.exe");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_cmd_shim_is_used_when_it_is_the_only_program() {
+        let dir = std::env::temp_dir().join(format!("whatrust-bin-cmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("codex.cmd"), b"@echo off").unwrap();
+        let found = first_program(&dir, cli_names(CliBackend::Codex)).unwrap();
+        assert_eq!(found.file_name().unwrap(), "codex.cmd");
+        assert!(first_program(&dir, cli_names(CliBackend::Claude)).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn windows_program_dirs_use_the_npm_prefix_and_winget_links() {
+        let app = PathBuf::from(r"C:\Users\a\AppData\Roaming");
+        let local = PathBuf::from(r"C:\Users\a\AppData\Local");
+        let dirs = windows_program_dirs(Some(&app), Some(&local));
+        assert_eq!(
+            dirs,
+            vec![
+                app.join("npm"),
+                local.join("Programs"),
+                local.join("Microsoft").join("WinGet").join("Links"),
+            ]
+        );
+        assert!(windows_program_dirs(None, None).is_empty());
+    }
+
+    #[test]
     fn cli_plans_keep_the_chat_off_the_command_line() {
         let dir = std::env::temp_dir().join("whatrust-cli-plan");
         let secret = "SECRET_CHAT_LINE";
@@ -2549,6 +3020,32 @@ mod tests {
         assert_eq!(codex.args[0], "exec");
         assert!(codex.strip_env.contains(&"OPENAI_API_KEY"));
         assert!(codex.strip_env.contains(&"CODEX_API_KEY"));
+    }
+
+    #[test]
+    fn cli_text_uses_only_the_structured_answer() {
+        let claude = r#"{"type":"result","is_error":false,"result":"preamble","structured_output":{"text":" First line\nSecond line "}}"#;
+        assert_eq!(
+            cli_text_answer(CliBackend::Claude, claude).as_deref(),
+            Some("First line\nSecond line")
+        );
+        let error = r#"{"type":"result","is_error":true,"structured_output":{"text":"partial"}}"#;
+        assert!(cli_text_answer(CliBackend::Claude, error).is_none());
+
+        let codex = concat!(
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"text\":\"first\"}"}}"#,
+            "\n",
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"text\":\"final\"}"}}"#,
+            "\n",
+            r#"{"type":"item.completed","item":{"type":"reasoning","text":"{\"text\":\"internal\"}"}}"#,
+            "\n",
+            r#"{"type":"turn.completed"}"#
+        );
+        assert_eq!(
+            cli_text_answer(CliBackend::Codex, codex).as_deref(),
+            Some("final")
+        );
+        assert!(cli_text_answer(CliBackend::Codex, r#"{"text":"not a message"}"#).is_none());
     }
 
     #[test]

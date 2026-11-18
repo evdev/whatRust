@@ -24,6 +24,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["time"] }
+tempfile = "3"
 # Loopback calls to FluidVoice and the configured LLM. ureq 2's API is what
 # those callers use. The updater needs ureq 3 (SOCKS proxy); the crates are
 # not API-compatible, so it is imported as `ureq3`.

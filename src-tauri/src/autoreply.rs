@@ -1515,94 +1515,6 @@ fn notify_skip(app: &AppHandle, account: &str, chat_name: &str, paused: bool, ab
     );
 }
 
-fn resolve_bin(explicit: &str, names: &[&str]) -> Option<PathBuf> {
-    if !explicit.is_empty() {
-        let path = PathBuf::from(explicit);
-        return path.is_file().then_some(path);
-    }
-    pick_program(&program_dirs(), names)
-}
-
-/// An `.exe` anywhere in the search list beats a `.cmd` that appears earlier.
-/// npm puts `claude.cmd` on `PATH`; the native `claude.exe` lives later, in
-/// `%USERPROFILE%\.local\bin`, and the batch shim rejects long arguments.
-fn pick_program(dirs: &[PathBuf], names: &[&str]) -> Option<PathBuf> {
-    let (primary, fallback): (Vec<&str>, Vec<&str>) =
-        names.iter().copied().partition(|name| !batch_name(name));
-    dirs.iter()
-        .find_map(|dir| first_program(dir, &primary))
-        .or_else(|| dirs.iter().find_map(|dir| first_program(dir, &fallback)))
-}
-
-fn batch_name(name: &str) -> bool {
-    Path::new(name)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
-}
-
-fn program_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(path) = std::env::var_os("PATH") {
-        dirs.extend(std::env::split_paths(&path));
-    }
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        let home = PathBuf::from(home);
-        dirs.push(home.join(".local/bin"));
-        dirs.push(home.join(".grok/bin"));
-        dirs.push(home.join(".cargo/bin"));
-    }
-    dirs.push(PathBuf::from("/opt/homebrew/bin"));
-    dirs.push(PathBuf::from("/usr/local/bin"));
-    #[cfg(windows)]
-    dirs.extend(windows_program_dirs(
-        std::env::var_os("APPDATA").as_deref().map(Path::new),
-        std::env::var_os("LOCALAPPDATA").as_deref().map(Path::new),
-    ));
-    dirs
-}
-
-/// npm's global bin on Windows is the prefix root, not `bin/`. WinGet links
-/// and per-user Program Files sit beside it. The native Claude installer is
-/// already covered by `%USERPROFILE%\.local\bin`.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn windows_program_dirs(appdata: Option<&Path>, local: Option<&Path>) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(appdata) = appdata {
-        dirs.push(appdata.join("npm"));
-    }
-    if let Some(local) = local {
-        dirs.push(local.join("Programs"));
-        dirs.push(local.join("Microsoft").join("WinGet").join("Links"));
-    }
-    dirs
-}
-
-/// `.exe` before the bare name, then the batch shims. A folder that has both
-/// `codex.exe` and `codex.cmd` must run the executable: batch escaping rejects
-/// some of the long arguments these programs are given.
-fn first_program(dir: &Path, names: &[&str]) -> Option<PathBuf> {
-    names
-        .iter()
-        .map(|name| dir.join(name))
-        .find(|path| path.is_file())
-}
-
-fn cli_names(backend: CliBackend) -> &'static [&'static str] {
-    match backend {
-        CliBackend::Claude => &["claude.exe", "claude", "claude.cmd", "claude.bat"],
-        CliBackend::Grok => &["grok.exe", "grok", "grok.cmd", "grok.bat"],
-        CliBackend::Codex => &["codex.exe", "codex", "codex.cmd", "codex.bat"],
-    }
-}
-
-fn explicit_bin(settings: &Settings, backend: CliBackend) -> &str {
-    match backend {
-        CliBackend::Claude => settings.standin_claude_bin.as_str(),
-        CliBackend::Grok => settings.standin_grok_bin.as_str(),
-        CliBackend::Codex => settings.standin_codex_bin.as_str(),
-    }
-}
-
 async fn complete(
     app: &AppHandle,
     settings: &Settings,
@@ -1617,25 +1529,22 @@ async fn complete(
         if !settings::cli_backends_allowed() {
             return Err(tr("The command-line program was not found.").into());
         }
-        let program = resolve_bin(explicit_bin(settings, backend), cli_names(backend))
+        let program = llm::resolve_cli(backend, settings.cli_bin(backend))
             .ok_or_else(|| tr("The command-line program was not found.").to_string())?;
-        let dir = std::env::temp_dir().join(format!(
-            "whatrust-standin-{}-{}",
-            std::process::id(),
-            now_ms()
-        ));
-        std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-        }
+        let temp = tempfile::Builder::new()
+            .prefix("whatrust-standin-")
+            .tempdir()
+            .map_err(|err| err.to_string())?;
+        let dir = temp.path();
         let system_file = dir.join("system.md");
         let schema_file = dir.join("schema.json");
-        let prompt_file = dir.join("prompt.txt");
-        write_private(&system_file, system)?;
-        write_private(&schema_file, DECISION_SCHEMA)?;
-        write_private(&prompt_file, user)?;
+        match backend {
+            CliBackend::Claude => write_private(&system_file, system)?,
+            CliBackend::Codex | CliBackend::Antigravity => {
+                write_private(&schema_file, DECISION_SCHEMA)?
+            }
+            CliBackend::Grok => write_private(&dir.join("prompt.txt"), user)?,
+        }
         let plan = llm::cli_plan(
             backend,
             settings.standin_program_model(),
@@ -1643,19 +1552,17 @@ async fn complete(
             &clip_chars(system, 24_000),
             DECISION_SCHEMA,
             &schema_file,
-            &dir,
+            dir,
         );
-        let stdin = if backend == CliBackend::Codex {
-            format!("{system}\n\n{user}")
-        } else if backend == CliBackend::Claude {
-            user.to_string()
-        } else {
-            String::new()
+        let stdin = match backend {
+            CliBackend::Codex | CliBackend::Antigravity => format!("{system}\n\n{user}"),
+            CliBackend::Claude => user.to_string(),
+            CliBackend::Grok => String::new(),
         };
-        let result = llm::run_cli(&program, backend, plan, &stdin, &dir, cancel).await;
-        let _ = std::fs::remove_dir_all(&dir);
+        let result = llm::run_cli(&program, backend, plan, &stdin, dir, cancel).await;
         let raw = result.map_err(|err| match err.as_str() {
             "cli_missing" => tr("The command-line program was not found.").into_owned(),
+            "cli_auth" => tr("That program's session is not ready.").into_owned(),
             "cancelled" => tr("The request was cancelled.").into_owned(),
             "timeout" => tr("The request to the program timed out.").into_owned(),
             other if other.starts_with("cli_flags:") => {
@@ -1765,18 +1672,12 @@ fn write_private(path: &Path, text: &str) -> Result<(), String> {
 }
 
 fn prefs_label(settings: &Settings) -> String {
-    match settings.standin_backend.as_str() {
-        "claude_cli" => "Claude Code".into(),
-        "grok_cli" => "Grok".into(),
-        "codex_cli" => "Codex".into(),
-        "hermes" => "Hermes".into(),
-        "grok_bot" => "Grok Bot".into(),
-        _ => match settings.ai_provider.as_str() {
-            "gemini" => "Gemini".into(),
-            "anthropic" => "Anthropic".into(),
-            _ => "OpenRouter".into(),
-        },
-    }
+    let id = if settings.standin_backend == "api" {
+        &settings.ai_provider
+    } else {
+        &settings.standin_backend
+    };
+    llm::provider_label(id).into()
 }
 
 #[tauri::command]
@@ -2069,7 +1970,7 @@ pub async fn list_standin_cli_models(
     // The field on screen wins over the last saved path, so the list matches
     // the program the user is pointing at before they save.
     let explicit = settings::sanitize_bin(&bin);
-    let program = resolve_bin(&explicit, cli_names(backend));
+    let program = llm::resolve_cli(backend, &explicit);
     tauri::async_runtime::spawn_blocking(move || {
         llm::cli_picker_models(backend, program.as_deref())
     })
@@ -2126,17 +2027,33 @@ pub async fn standin_cli_status(
             });
         }
     }
-    let program = resolve_bin(explicit_bin(&settings, backend), cli_names(backend));
+    let program = llm::resolve_cli(backend, settings.cli_bin(backend));
     let Some(program) = program else {
         return Ok(CliStatus {
             ok: false,
             detail: tr("The command-line program was not found.").into_owned(),
         });
     };
+    if backend == CliBackend::Antigravity {
+        let ready = tauri::async_runtime::spawn_blocking(move || {
+            llm::list_antigravity_models(&program, &std::env::temp_dir(), None).is_ok()
+        })
+        .await
+        .map_err(|err| err.to_string())?;
+        return Ok(CliStatus {
+            ok: ready,
+            detail: if ready {
+                tr("Session ready.").into_owned()
+            } else {
+                tr("That program's session is not ready.").into_owned()
+            },
+        });
+    }
     let args: Vec<String> = match backend {
         CliBackend::Claude => vec!["auth".into(), "status".into()],
         CliBackend::Codex => vec!["login".into(), "status".into()],
         CliBackend::Grok => llm::help_args(backend),
+        CliBackend::Antigravity => unreachable!(),
     };
     let dir = std::env::temp_dir();
     let output = tauri::async_runtime::spawn_blocking(move || {
@@ -3171,61 +3088,6 @@ mod tests {
             found >= 6,
             "expected the stand-in page calls, found {found}"
         );
-    }
-
-    #[test]
-    fn an_exe_in_the_folder_wins_over_the_batch_shim() {
-        let dir = std::env::temp_dir().join(format!("whatrust-bin-exe-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("codex.cmd"), b"@echo off").unwrap();
-        std::fs::write(dir.join("codex.exe"), b"MZ").unwrap();
-        let found = first_program(&dir, cli_names(CliBackend::Codex)).unwrap();
-        assert_eq!(found.file_name().unwrap(), "codex.exe");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn an_exe_later_in_the_search_list_beats_an_earlier_cmd() {
-        let root = std::env::temp_dir().join(format!("whatrust-bin-order-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let npm = root.join("npm");
-        let native = root.join("local");
-        std::fs::create_dir_all(&npm).unwrap();
-        std::fs::create_dir_all(&native).unwrap();
-        std::fs::write(npm.join("codex.cmd"), b"@echo off").unwrap();
-        std::fs::write(native.join("codex.exe"), b"MZ").unwrap();
-        let found = pick_program(&[npm, native], cli_names(CliBackend::Codex)).unwrap();
-        assert_eq!(found.file_name().unwrap(), "codex.exe");
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn a_cmd_shim_is_used_when_it_is_the_only_program() {
-        let dir = std::env::temp_dir().join(format!("whatrust-bin-cmd-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("codex.cmd"), b"@echo off").unwrap();
-        let found = first_program(&dir, cli_names(CliBackend::Codex)).unwrap();
-        assert_eq!(found.file_name().unwrap(), "codex.cmd");
-        assert!(first_program(&dir, cli_names(CliBackend::Claude)).is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn windows_program_dirs_use_the_npm_prefix_and_winget_links() {
-        let app = PathBuf::from(r"C:\Users\a\AppData\Roaming");
-        let local = PathBuf::from(r"C:\Users\a\AppData\Local");
-        let dirs = windows_program_dirs(Some(&app), Some(&local));
-        assert_eq!(
-            dirs,
-            vec![
-                app.join("npm"),
-                local.join("Programs"),
-                local.join("Microsoft").join("WinGet").join("Links"),
-            ]
-        );
-        assert!(windows_program_dirs(None, None).is_empty());
     }
 
     #[test]

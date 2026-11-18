@@ -499,6 +499,11 @@
     if (text.indexOf("no_audio") !== -1) return L("Este vídeo não tem áudio para transcrever.", "This video has no audio to transcribe.");
     if (text.indexOf("too_large") !== -1) return L("Esta nota é longa demais para transcrever.", "This note is too long to transcribe.");
     if (text.indexOf("no_key") !== -1) return L("Falta a chave da API nas configurações.", "The API key is missing in Settings.");
+    if (text === "cli_missing") return L("Programa não encontrado. Confira o caminho nas configurações.", "CLI executable not found. Check the program path in Settings.");
+    if (text === "cli_auth") return L("Entre na sua conta no Antigravity CLI.", "Sign in to your account in Antigravity CLI.");
+    if (text === "cli_flags") return L("Atualize o programa para usar o modo restrito.", "Update the CLI to use the required restricted mode.");
+    if (text === "cli_timeout") return L("O programa demorou demais para responder.", "The CLI request timed out.");
+    if (text === "cli_failed") return L("O programa não respondeu. Confira se você entrou na sua conta pelo programa.", "The CLI request failed. Check that you're signed in to the program.");
     if (text.indexOf("llm") !== -1) return L("A IA não respondeu.", "The AI provider did not respond.");
     if (text.indexOf("no_transcript") !== -1) return L("Ainda não há transcrição.", "There is no transcript yet.");
     if (text.indexOf("locked") !== -1) return L("O whatRust está bloqueado.", "whatRust is locked.");

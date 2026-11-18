@@ -133,10 +133,18 @@
           <label class="row">
             <span class="row-text"><span class="row-title">AI provider</span></span>
             <select id="ai_provider" aria-label="AI provider">
-              <option value="openrouter">OpenRouter</option>
-              <option value="gemini">Gemini</option>
-              <option value="anthropic">Anthropic</option>
+              <option value="openrouter">OpenRouter API</option>
+              <option value="gemini">Gemini API</option>
+              <option value="anthropic">Anthropic API</option>
+              <option value="claude_cli">Claude Code</option>
+              <option value="codex_cli">Codex</option>
+              <option value="antigravity_cli">Antigravity CLI</option>
             </select>
+          </label>
+          <label class="row" id="ai_cli_bin_row" hidden>
+            <span class="row-text"><span class="row-title">Program</span>
+              <span class="row-subtitle">Uses your existing CLI sign-in. Enter the full program path if needed. This path is shared with Stand-in.</span></span>
+            <input type="text" id="ai_cli_bin" aria-label="Program" />
           </label>
           <div class="row">
             <span class="row-text"><span class="row-title">Translation model</span>
@@ -150,12 +158,12 @@
             <input type="text" class="model-choice" id="summary_model" aria-label="Summary model" />
             <select class="model-choice" id="summary_model_select" aria-label="Summary model" hidden></select>
           </div>
-          <label class="row entry-row">
+          <label class="row entry-row" id="ai_key_row">
             <span class="row-title">API key</span>
             <input type="password" id="ai_key" autocomplete="off" aria-label="API key" />
           </label>
         </div>
-        <div class="group-actions">
+        <div class="group-actions" id="ai_key_actions">
           <button type="button" id="save_ai_key">Save key</button>
           <button type="button" id="remove_ai_key" class="secondary">Remove key</button>
         </div>
@@ -165,7 +173,8 @@
             <span class="row-subtitle" id="chat_summary_consent_state">Not allowed yet.</span></span>
           <button type="button" id="chat_summary_revoke" class="secondary" hidden>Revoke</button>
         </div>
-        <p class="group-note">The key stays on this computer and never enters the WhatsApp page. Translation and the Summarize button each use the model chosen for them. A chat summary stays on this computer, not on the phone, and is not sent into the chat.</p>
+        <p class="group-note" id="ai_key_note">The key stays on this computer and never enters the WhatsApp page.</p>
+        <p class="group-note">Chat summaries are saved on this computer.</p>
       </section>
 
       <section class="group" id="sec-standin">
@@ -178,12 +187,13 @@
           </label>
           <label class="row">
             <span class="row-text"><span class="row-title">How to reply</span>
-              <span class="row-subtitle" id="standin_backend_hint">The API key above, or a program you have already signed in to.</span></span>
+              <span class="row-subtitle" id="standin_backend_hint">A saved provider key or a program you have already signed in to.</span></span>
             <select id="standin_backend" aria-label="How to reply">
-              <option value="api">API key</option>
+              <option value="api">OpenRouter API</option>
               <option value="claude_cli">Claude Code</option>
               <option value="grok_cli">Grok</option>
               <option value="codex_cli">Codex</option>
+              <option value="antigravity_cli">Antigravity CLI</option>
               <option value="hermes">Hermes</option>
               <option value="grok_bot">Grok Bot</option>
             </select>

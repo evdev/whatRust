@@ -694,7 +694,9 @@ heardAudio.addEventListener("ended", () => {
 
 document.getElementById("open").addEventListener("click", openChat);
 document.getElementById("body").addEventListener("click", openChat);
-document.getElementById("close").addEventListener("click", () => {
+const close = document.getElementById("close");
+close.hidden = window.__MENTION_NATIVE_FRAME === true;
+close.addEventListener("click", () => {
   invoke("mention_dismiss").catch(() => {});
 });
 document.getElementById("reply").addEventListener("submit", send);

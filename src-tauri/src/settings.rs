@@ -74,18 +74,26 @@ pub struct Settings {
     pub translate_target_lang: String,
     /// `openrouter`, `gemini` or `anthropic`.
     pub ai_provider: String,
+    /// Optional CLI for translation and summaries. Empty uses the API provider.
+    pub ai_cli_backend: String,
     /// Translation model for each provider. Summaries use the `summary_model_*`
     /// fields and fall back to these when a summary model has not been chosen.
     pub ai_model_openrouter: String,
     pub ai_model_gemini: String,
     pub ai_model_anthropic: String,
+    pub ai_model_claude_cli: String,
+    pub ai_model_codex_cli: String,
+    pub ai_model_antigravity_cli: String,
     /// `None` means the field was absent, so the translation model is used.
     pub summary_model_openrouter: Option<String>,
     pub summary_model_gemini: Option<String>,
     pub summary_model_anthropic: Option<String>,
+    pub summary_model_claude_cli: String,
+    pub summary_model_codex_cli: String,
+    pub summary_model_antigravity_cli: String,
     /// Master switch for the per-chat stand-in. Off until the user turns it on.
     pub standin_enabled: bool,
-    /// `api`, `claude_cli`, `grok_cli`, `codex_cli`, `hermes`, or `grok_bot`.
+    /// Provider ID, or `api` to use the saved API provider.
     pub standin_backend: String,
     /// Optional stand-in model for each API provider. Empty uses the summary model.
     pub standin_model_openrouter: Option<String>,
@@ -99,10 +107,12 @@ pub struct Settings {
     pub standin_model_claude: String,
     pub standin_model_grok: String,
     pub standin_model_codex: String,
-    /// Absolute path to a CLI binary. Empty means look on PATH and the usual install locations.
+    pub standin_model_antigravity: String,
+    /// Shared CLI paths. Empty means look on PATH and the usual install locations.
     pub standin_claude_bin: String,
     pub standin_grok_bin: String,
     pub standin_codex_bin: String,
+    pub standin_antigravity_bin: String,
     /// Seconds to wait after the last incoming message before one reply.
     pub standin_delay_secs: u16,
     /// Stand-in replies allowed in one chat during a rolling hour.
@@ -189,12 +199,19 @@ impl Default for Settings {
             translate_enabled: false,
             translate_target_lang: "English".into(),
             ai_provider: "openrouter".into(),
+            ai_cli_backend: String::new(),
             ai_model_openrouter: DEFAULT_MODEL_OPENROUTER.into(),
             ai_model_gemini: DEFAULT_MODEL_GEMINI.into(),
             ai_model_anthropic: DEFAULT_MODEL_ANTHROPIC.into(),
+            ai_model_claude_cli: String::new(),
+            ai_model_codex_cli: String::new(),
+            ai_model_antigravity_cli: String::new(),
             summary_model_openrouter: None,
             summary_model_gemini: None,
             summary_model_anthropic: None,
+            summary_model_claude_cli: String::new(),
+            summary_model_codex_cli: String::new(),
+            summary_model_antigravity_cli: String::new(),
             standin_enabled: false,
             standin_backend: "api".into(),
             standin_model_openrouter: None,
@@ -204,9 +221,11 @@ impl Default for Settings {
             standin_model_claude: String::new(),
             standin_model_grok: String::new(),
             standin_model_codex: String::new(),
+            standin_model_antigravity: String::new(),
             standin_claude_bin: String::new(),
             standin_grok_bin: String::new(),
             standin_codex_bin: String::new(),
+            standin_antigravity_bin: String::new(),
             standin_delay_secs: 10,
             standin_hourly_limit: 12,
             standin_hermes_url: String::new(),
@@ -459,7 +478,7 @@ pub fn sanitize_standin_backend(value: &str, cli_ok: bool) -> String {
     if matches!(value, "hermes" | "grok_bot") {
         return value.to_string();
     }
-    if cli_ok && matches!(value, "claude_cli" | "grok_cli" | "codex_cli") {
+    if cli_ok && crate::llm::CliBackend::parse(value).is_some() {
         value.to_string()
     } else {
         "api".into()
@@ -657,7 +676,42 @@ fn sanitize_label(value: &str, fallback: &str) -> String {
 }
 
 impl Settings {
-    /// Translation model for the selected provider.
+    pub fn text_provider(&self) -> &str {
+        if self.ai_cli_backend.is_empty() {
+            &self.ai_provider
+        } else {
+            &self.ai_cli_backend
+        }
+    }
+
+    pub fn translation_model(&self) -> &str {
+        match self.ai_cli_backend.as_str() {
+            "claude_cli" => &self.ai_model_claude_cli,
+            "codex_cli" => &self.ai_model_codex_cli,
+            "antigravity_cli" => &self.ai_model_antigravity_cli,
+            _ => self.ai_model(),
+        }
+    }
+
+    pub fn text_summary_model(&self) -> &str {
+        match self.ai_cli_backend.as_str() {
+            "claude_cli" => &self.summary_model_claude_cli,
+            "codex_cli" => &self.summary_model_codex_cli,
+            "antigravity_cli" => &self.summary_model_antigravity_cli,
+            _ => self.summary_model(),
+        }
+    }
+
+    pub fn cli_bin(&self, backend: crate::llm::CliBackend) -> &str {
+        match backend {
+            crate::llm::CliBackend::Claude => &self.standin_claude_bin,
+            crate::llm::CliBackend::Grok => &self.standin_grok_bin,
+            crate::llm::CliBackend::Codex => &self.standin_codex_bin,
+            crate::llm::CliBackend::Antigravity => &self.standin_antigravity_bin,
+        }
+    }
+
+    /// Translation model for the selected API provider.
     pub fn ai_model(&self) -> &str {
         match self.ai_provider.as_str() {
             "gemini" => self.ai_model_gemini.as_str(),
@@ -666,7 +720,7 @@ impl Settings {
         }
     }
 
-    /// Summary model for the selected provider.
+    /// Summary model for the selected API provider.
     pub fn summary_model(&self) -> &str {
         let chosen = match self.ai_provider.as_str() {
             "gemini" => self.summary_model_gemini.as_deref(),
@@ -686,6 +740,7 @@ impl Settings {
             "claude_cli" => self.standin_model_claude.as_str(),
             "grok_cli" => self.standin_model_grok.as_str(),
             "codex_cli" => self.standin_model_codex.as_str(),
+            "antigravity_cli" => self.standin_model_antigravity.as_str(),
             _ => "",
         }
     }
@@ -726,10 +781,21 @@ impl Settings {
         self.fluidvoice_port = sanitize_port(self.fluidvoice_port);
         self.translate_target_lang = sanitize_label(&self.translate_target_lang, "English");
         self.ai_provider = sanitize_provider(&self.ai_provider);
+        if !cli_backends_allowed()
+            || !matches!(
+                self.ai_cli_backend.as_str(),
+                "claude_cli" | "codex_cli" | "antigravity_cli"
+            )
+        {
+            self.ai_cli_backend.clear();
+        }
         self.ai_model_openrouter =
             sanitize_model(&self.ai_model_openrouter, DEFAULT_MODEL_OPENROUTER);
         self.ai_model_gemini = sanitize_model(&self.ai_model_gemini, DEFAULT_MODEL_GEMINI);
         self.ai_model_anthropic = sanitize_model(&self.ai_model_anthropic, DEFAULT_MODEL_ANTHROPIC);
+        self.ai_model_claude_cli = sanitize_model(&self.ai_model_claude_cli, "");
+        self.ai_model_codex_cli = sanitize_model(&self.ai_model_codex_cli, "");
+        self.ai_model_antigravity_cli = sanitize_model(&self.ai_model_antigravity_cli, "");
         self.summary_model_openrouter = Some(sanitize_model(
             self.summary_model_openrouter.as_deref().unwrap_or(""),
             &self.ai_model_openrouter,
@@ -742,9 +808,14 @@ impl Settings {
             self.summary_model_anthropic.as_deref().unwrap_or(""),
             &self.ai_model_anthropic,
         ));
+        self.summary_model_claude_cli = sanitize_model(&self.summary_model_claude_cli, "");
+        self.summary_model_codex_cli = sanitize_model(&self.summary_model_codex_cli, "");
+        self.summary_model_antigravity_cli =
+            sanitize_model(&self.summary_model_antigravity_cli, "");
         self.standin_model_claude = sanitize_model(&self.standin_model_claude, "");
         self.standin_model_grok = sanitize_model(&self.standin_model_grok, "");
         self.standin_model_codex = sanitize_model(&self.standin_model_codex, "");
+        self.standin_model_antigravity = sanitize_model(&self.standin_model_antigravity, "");
         let legacy = sanitize_model(&self.standin_cli_model, "");
         match self.standin_backend.as_str() {
             "claude_cli" => {
@@ -786,6 +857,7 @@ impl Settings {
         self.standin_claude_bin = sanitize_bin(&self.standin_claude_bin);
         self.standin_grok_bin = sanitize_bin(&self.standin_grok_bin);
         self.standin_codex_bin = sanitize_bin(&self.standin_codex_bin);
+        self.standin_antigravity_bin = sanitize_bin(&self.standin_antigravity_bin);
         self.standin_delay_secs = sanitize_delay(self.standin_delay_secs);
         self.standin_hourly_limit = sanitize_hourly(self.standin_hourly_limit);
         self.standin_hermes_url =
@@ -1461,6 +1533,28 @@ mod tests {
         let s = s.sanitized();
         assert_eq!(s.ai_model(), "claude-haiku-5-5");
         assert_eq!(s.summary_model(), "claude-sonnet-5-5");
+    }
+
+    #[test]
+    fn text_cli_models_are_independent_of_standin_api_settings() {
+        let s = Settings {
+            ai_provider: "anthropic".into(),
+            ai_cli_backend: "codex_cli".into(),
+            ai_model_codex_cli: " gpt-5.5 ".into(),
+            summary_model_codex_cli: "".into(),
+            summary_model_anthropic: Some("claude-sonnet-5-5".into()),
+            ..Settings::default()
+        }
+        .sanitized();
+        assert_eq!(s.ai_provider, "anthropic");
+        assert_eq!(s.standin_model(), "claude-sonnet-5-5");
+        if super::cli_backends_allowed() {
+            assert_eq!(s.text_provider(), "codex_cli");
+            assert_eq!(s.translation_model(), "gpt-5.5");
+            assert_eq!(s.text_summary_model(), "");
+        } else {
+            assert_eq!(s.text_provider(), "anthropic");
+        }
     }
 
     #[test]

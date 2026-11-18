@@ -185,7 +185,7 @@
     return;
   }
 
-  var prefs = { enabled: false, delay_secs: 10, voice: false, video: false, backend: "api", backend_id: "api", agent: false, grok_host: "" };
+  var prefs = { enabled: false, delay_secs: 10, voice: false, video: false, backend: "the API", backend_id: "api", agent: false, grok_host: "" };
   var chats = {};
   var privacyAck = false;
   var timers = {};
@@ -525,16 +525,6 @@
     }
     var lum = 0.2126 * +rgb[0] + 0.7152 * +rgb[1] + 0.0722 * +rgb[2];
     return lum > 150 ? "light" : "dark";
-  }
-
-  function backendLabel(id) {
-    if (id === "claude_cli" || id === "Claude Code") return "Claude Code";
-    if (id === "grok_cli" || id === "Grok") return "Grok";
-    if (id === "codex_cli" || id === "Codex") return "Codex";
-    if (id === "hermes" || id === "Hermes") return "Hermes";
-    if (id === "grok_bot" || id === "Grok Bot") return "Grok Bot";
-    if (id === "Gemini" || id === "Anthropic" || id === "OpenRouter") return id;
-    return "the API";
   }
 
   function accessWord(value) {
@@ -1045,7 +1035,7 @@
     var note = document.createElement("div");
     note.className = "confirm";
     var copy = document.createElement("p");
-    var where = backendLabel(prefs.backend_id || prefs.backend);
+    var where = prefs.backend;
     var level = accessWord((rowFor(current.id) && rowFor(current.id).access) || "memory");
     if (prefs.agent) {
       copy.textContent = "Messages in this chat go to " + where + ". It can use the access level shown (" + level + "), and it may act and keep a copy.";

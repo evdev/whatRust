@@ -8,7 +8,7 @@
 
 use crate::i18n::tr;
 use crate::keys;
-use crate::llm::{self, Completion};
+use crate::llm::{self, TextBackend};
 use crate::settings::{self, Settings};
 use crate::transcript_store::{self, Claim, NewNote};
 use serde::Serialize;
@@ -731,7 +731,7 @@ async fn ready_note(
     })
 }
 
-/// `Ok(None)` when translation is off. `Err("no_key" | "llm")` when it was requested and failed.
+/// `Ok(None)` when translation is off, otherwise return the translation or error code.
 async fn ensure_translation(
     app: &AppHandle,
     settings: &Settings,
@@ -755,30 +755,16 @@ async fn ensure_translation(
     if !owned {
         return wait_translation(dir, account, &note.token, &key).await;
     }
-    let api_key = match keys::get_key(app, &settings.ai_provider) {
-        Ok(Some(key)) => key,
-        Ok(None) => {
-            let _ = transcript_store::clear_translation_claim(dir, account, &note.token, &key);
-            return Err("no_key");
-        }
-        Err(_) => {
-            let _ = transcript_store::clear_translation_claim(dir, account, &note.token, &key);
-            return Err("no_key");
-        }
-    };
     let (system, user) = llm::translate_prompt(&settings.translate_target_lang, &text);
-    let translated = match llm::complete(Completion {
-        provider: &settings.ai_provider,
-        model: settings.ai_model(),
-        key: &api_key,
-        system: &system,
-        user: &user,
-        max_tokens: 2048,
-        thinking_budget: None,
-        thinking_level: None,
-    })
-    .await
-    {
+    let result = match TextBackend::load(app, settings) {
+        Ok(backend) => {
+            backend
+                .complete(settings.translation_model(), &system, &user, 2048, None)
+                .await
+        }
+        Err(code) => Err(code),
+    };
+    let translated = match result {
         Ok(text) => text,
         Err(code) => {
             let _ = transcript_store::clear_translation_claim(dir, account, &note.token, &key);
@@ -811,38 +797,30 @@ async fn wait_translation(
 }
 
 async fn run_summary(app: &AppHandle, settings: &Settings, text: &str) -> Result<String, String> {
-    let api_key = match keys::get_key(app, &settings.ai_provider) {
-        Ok(Some(key)) => key,
-        Ok(None) => return Err("no_key".into()),
-        Err(_) => return Err("no_key".into()),
-    };
+    let backend = TextBackend::load(app, settings)?;
     let clipped = llm::clip(text);
     let (system, user) = llm::summary_prompt(clipped);
-    llm::complete(Completion {
-        provider: &settings.ai_provider,
-        model: settings.summary_model(),
-        key: &api_key,
-        system: &system,
-        user: &user,
-        max_tokens: 1024,
-        thinking_budget: None,
-        thinking_level: None,
-    })
-    .await
-    .map_err(str::to_string)
+    backend
+        .complete(settings.text_summary_model(), &system, &user, 1024, None)
+        .await
+        .map_err(str::to_string)
 }
 
 fn translation_key(settings: &Settings) -> String {
     format!(
         "{}|{}|{}",
-        settings.ai_provider,
-        settings.ai_model(),
+        settings.text_provider(),
+        settings.translation_model(),
         settings.translate_target_lang
     )
 }
 
 fn summary_key(settings: &Settings) -> String {
-    format!("{}|{}", settings.ai_provider, settings.summary_model())
+    format!(
+        "{}|{}",
+        settings.text_provider(),
+        settings.text_summary_model()
+    )
 }
 
 #[derive(Clone)]
