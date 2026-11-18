@@ -35,6 +35,7 @@ function visibleTexts(html) {
 check("Portuguese translates English source strings", () => {
   assert.equal(t("Save"), "Salvar"); // default language is pt-BR
   assert.equal(t("Open {0}", ["Ana"]), "Abrir Ana");
+  assert.equal(t("NPU test failed. Confirm GenieX and the Q8 model are installed and this computer has a supported Snapdragon NPU. ({0})", ["erro"]), "Falha no teste da NPU. Confirme se o GenieX e o modelo Q8 estão instalados e se este computador tem uma NPU Snapdragon compatível. (erro)");
 });
 
 check("placeholders match between English and Portuguese", () => {

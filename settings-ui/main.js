@@ -793,7 +793,7 @@ window.addEventListener("DOMContentLoaded", () => {
     button.disabled = true;
     document.getElementById("fluidvoice_status").textContent = "Downloading Qwen3-ASR Q8. This may take several minutes…";
     try { await invoke("geniex_download"); await refreshTranscriptionStatus(); }
-    catch (e) { document.getElementById("fluidvoice_status").textContent = "Model download failed. Check that GenieX is installed, you have network access and sufficient disk space, then try again. (" + errorText(e) + ")"; }
+    catch (e) { document.getElementById("fluidvoice_status").textContent = t("Model download failed. Check that GenieX is installed, you have network access and sufficient disk space, then try again. ({0})", [errorText(e)]); }
     finally { button.disabled = false; }
   });
   document.getElementById("voice_transcribe").addEventListener("change", () => {
@@ -1146,7 +1146,7 @@ async function testFluidVoice() {
     const status = document.getElementById("fluidvoice_status");
     status.textContent = "Testing the NPU. Loading the model may take a minute…";
     try { await invoke("geniex_test"); status.textContent = "GenieX and the Q8 model responded on the NPU."; }
-    catch (e) { status.textContent = "NPU test failed. Confirm GenieX and the Q8 model are installed and this computer has a supported Snapdragon NPU. (" + errorText(e) + ")"; }
+    catch (e) { status.textContent = t("NPU test failed. Confirm GenieX and the Q8 model are installed and this computer has a supported Snapdragon NPU. ({0})", [errorText(e)]); }
     return;
   }
   await refreshTranscriptionStatus();
