@@ -2975,7 +2975,8 @@ mod tests {
 
     #[test]
     fn resolve_cli_finds_the_gemini_bin_install() {
-        let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+        let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        else {
             return;
         };
         let installed = PathBuf::from(&home)
@@ -3004,7 +3005,9 @@ mod tests {
         let home = PathBuf::from("/Users/a");
         let local = PathBuf::from(r"C:\Users\a\AppData\Local");
         let dirs = antigravity_install_dirs(Some(&home), Some(&local));
-        assert!(dirs.iter().any(|dir| dir.ends_with(Path::new(".gemini/bin"))));
+        assert!(dirs
+            .iter()
+            .any(|dir| dir.ends_with(Path::new(".gemini/bin"))));
         assert!(dirs.iter().any(|dir| dir.ends_with(Path::new("agy/bin"))));
         #[cfg(target_os = "macos")]
         assert!(dirs.iter().any(|dir| dir.ends_with("Contents/Helpers")));
@@ -3028,7 +3031,8 @@ mod tests {
             installed.join("agy")
         };
         std::fs::write(&program, b"agy").unwrap();
-        let found = pick_program(&[path_bin, installed], cli_names(CliBackend::Antigravity)).unwrap();
+        let found =
+            pick_program(&[path_bin, installed], cli_names(CliBackend::Antigravity)).unwrap();
         assert_eq!(found, program);
         std::fs::remove_dir_all(&root).unwrap();
     }

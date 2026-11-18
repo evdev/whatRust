@@ -1054,6 +1054,9 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
         // or left idle, and WhatsApp's socket would die with it. The activity
         // allows the Mac to sleep; it only stops the app itself from being napped.
         crate::menubar::set_keep_alive(true);
+        // Menu-bar-only keeps the left click for the panel. Otherwise a click
+        // opens the account menu instead of focusing a window over it.
+        crate::tray::sync_left_click(app);
     }
 
     #[cfg(desktop)]

@@ -67,7 +67,10 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .icon_as_template(ICON_IS_TEMPLATE)
         .tooltip("WhatsApp")
         .menu(&menu)
-        .show_menu_on_left_click(false)
+        .show_menu_on_left_click(opens_menu_on_left_click(
+            cfg!(target_os = "macos"),
+            crate::menubar::enabled(app),
+        ))
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
             // While locked, every menu action except Quit just (re)shows the lock screen.
@@ -102,17 +105,27 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             }
         })
         .on_tray_icon_event(|tray, event| {
-            // Note: Linux does not deliver left-click tray events; use the menu there.
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = &event
-            {
-                // macOS, menu-bar mode on: the tray icon toggles the
-                // panel, anchored under this icon.
-                #[cfg(target_os = "macos")]
-                if crate::menubar::enabled(tray.app_handle()) {
+            // Linux does not deliver left-click tray events; the menu is the
+            // only path there. On macOS a left click opens that menu (see
+            // `tray_click`); focusing a window from the same click dismisses it.
+            let left_up = matches!(
+                &event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            );
+            if !left_up {
+                return;
+            }
+            match tray_click(
+                cfg!(target_os = "macos"),
+                crate::menubar::enabled(tray.app_handle()),
+            ) {
+                TrayClick::ShowWindow => crate::window::show_active(tray.app_handle()),
+                TrayClick::TogglePanel => {
+                    #[cfg(target_os = "macos")]
                     if let TrayIconEvent::Click { rect, .. } = event {
                         // The rect is a logical-or-physical enum; the active
                         // window's scale factor resolves it to physical px.
@@ -124,12 +137,13 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                             Some((pos.x, pos.y, size.width, size.height)),
                         );
                     }
-                    return;
                 }
-                crate::window::show_active(tray.app_handle());
+                // The status item opened its menu on mouse-down.
+                TrayClick::Menu => {}
             }
         })
         .build(app)?;
+    sync_left_click(app);
     Ok(())
 }
 
@@ -212,6 +226,48 @@ pub fn rebuild_menu(app: &AppHandle) {
     let _ = tray.set_menu(Some(menu));
 }
 
+/// What a left click on the tray icon should do.
+///
+/// On macOS the click opens the account menu (Settings lives there too).
+/// Focusing a window from that same click makes AppKit close the menu, which
+/// is what made the icon look like it only brought the app forward. Menu-bar-only
+/// mode is the exception: the click toggles the panel, and the menu stays on
+/// the right click. Other platforms keep left-click as "show the window".
+#[derive(Debug, PartialEq, Eq)]
+enum TrayClick {
+    Menu,
+    ShowWindow,
+    TogglePanel,
+}
+
+fn tray_click(macos: bool, menubar_only: bool) -> TrayClick {
+    if macos && menubar_only {
+        TrayClick::TogglePanel
+    } else if macos {
+        TrayClick::Menu
+    } else {
+        TrayClick::ShowWindow
+    }
+}
+
+/// Left click opens the menu on macOS, except in menu-bar-only mode where it
+/// toggles the panel. Windows and Linux keep their own click behavior.
+fn opens_menu_on_left_click(macos: bool, menubar_only: bool) -> bool {
+    macos && !menubar_only
+}
+
+/// Apply [`opens_menu_on_left_click`] to the live icon. Called at setup and
+/// whenever settings change menu-bar-only mode.
+pub fn sync_left_click(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id("main-tray") else {
+        return;
+    };
+    let _ = tray.set_show_menu_on_left_click(opens_menu_on_left_click(
+        cfg!(target_os = "macos"),
+        crate::menubar::enabled(app),
+    ));
+}
+
 /// Show or hide the menu-bar icon (macOS, issue #44). Elsewhere the tray icon
 /// stays: on Windows and Linux it is the only way back to a hidden window,
 /// while macOS always has the Dock icon (see `RunEvent::Reopen` in lib.rs).
@@ -251,7 +307,7 @@ pub fn update_badge(app: &AppHandle, count: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_state, BadgeState};
+    use super::{badge_state, opens_menu_on_left_click, tray_click, BadgeState, TrayClick};
 
     #[test]
     fn zero_is_clear() {
@@ -262,5 +318,24 @@ mod tests {
     fn positive_is_count() {
         assert_eq!(badge_state(1), BadgeState::Count(1));
         assert_eq!(badge_state(42), BadgeState::Count(42));
+    }
+
+    #[test]
+    fn macos_left_click_opens_the_menu_instead_of_the_window() {
+        assert_eq!(tray_click(true, false), TrayClick::Menu);
+        assert!(opens_menu_on_left_click(true, false));
+    }
+
+    #[test]
+    fn menu_bar_only_keeps_the_panel_toggle() {
+        assert_eq!(tray_click(true, true), TrayClick::TogglePanel);
+        assert!(!opens_menu_on_left_click(true, true));
+    }
+
+    #[test]
+    fn other_platforms_still_show_the_window() {
+        assert_eq!(tray_click(false, false), TrayClick::ShowWindow);
+        assert_eq!(tray_click(false, true), TrayClick::ShowWindow);
+        assert!(!opens_menu_on_left_click(false, false));
     }
 }

@@ -3,6 +3,8 @@ mod accounts;
 mod agents;
 mod appicon;
 mod applock;
+#[cfg(target_os = "macos")]
+mod appmenu;
 mod aumid;
 mod autoreply;
 mod badge;
@@ -405,6 +407,10 @@ pub fn run() {
                 settings::save(handle, &s)?;
             }
             i18n::set(i18n::Lang::from_code(&s.language));
+            // Settings in the application menu. The menu bar already exists;
+            // this only inserts the item, and it follows the language above.
+            #[cfg(target_os = "macos")]
+            appmenu::install(handle);
             // Window model for this run (Linux/macOS opt-in; Windows always single).
             sessions::init_mode(&s);
             let args: Vec<String> = std::env::args().collect();

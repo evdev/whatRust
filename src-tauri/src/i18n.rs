@@ -98,6 +98,8 @@ pub fn refresh(app: &tauri::AppHandle) {
         let _ = w.set_title(&tr("whatRust — Configurações"));
     }
     crate::tray::rebuild_menu(app);
+    #[cfg(target_os = "macos")]
+    crate::appmenu::install(app);
     let total = app
         .try_state::<crate::accounts::UnreadMap>()
         .map(|m| crate::accounts::aggregate_unread(&crate::lock::guard(&m)))
@@ -250,6 +252,7 @@ static EN_TABLE: &[(&str, &str)] = &[
     ("Contas…", "Accounts…"),
     ("Contas", "Accounts"),
     ("Configurações", "Settings"),
+    ("Configurações…", "Settings…"),
     ("Recarregar", "Reload"),
     ("Sair", "Quit"),
     ("Bloquear agora", "Lock now"),
@@ -439,6 +442,7 @@ mod tests {
     fn every_literal_has_an_english_entry() {
         let sources = [
             include_str!("accounts.rs"),
+            include_str!("appmenu.rs"),
             include_str!("applock.rs"),
             include_str!("commands.rs"),
             include_str!("integration.rs"),
