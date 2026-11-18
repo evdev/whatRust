@@ -1350,12 +1350,42 @@ pub fn resolve_cli(backend: CliBackend, explicit: &str) -> Option<PathBuf> {
         return path.is_file().then_some(path);
     }
     pick_program(&program_dirs(), names).or_else(|| {
-        if cfg!(windows) && backend == CliBackend::Antigravity {
-            let local = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
-            return first_program(&local.join("agy/bin"), names);
+        if backend != CliBackend::Antigravity {
+            return None;
         }
-        None
+        // The CLI installer writes `agy` to ~/.gemini/bin. An app opened from
+        // Finder or the Dock does not inherit the shell PATH, and the
+        // ~/.antigravity/antigravity/bin/agy link often points at a file the
+        // desktop app no longer ships. These are the directories the installer
+        // uses instead.
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from);
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        pick_program(
+            &antigravity_install_dirs(home.as_deref(), local.as_deref()),
+            names,
+        )
     })
+}
+
+/// Directories where the Antigravity CLI installer places `agy`, apart from PATH.
+fn antigravity_install_dirs(home: Option<&Path>, local: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = home {
+        dirs.push(home.join(".gemini").join("bin"));
+    }
+    if let Some(local) = local {
+        dirs.push(local.join("agy").join("bin"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(PathBuf::from("/Applications/Gemini.app/Contents/Helpers"));
+        if let Some(home) = home {
+            dirs.push(home.join("Applications/Gemini.app/Contents/Helpers"));
+        }
+    }
+    dirs
 }
 
 /// An `.exe` anywhere in the search list beats a `.cmd` that appears earlier.
@@ -2941,6 +2971,66 @@ mod tests {
         assert_eq!(found.file_name().unwrap(), "codex.cmd");
         assert!(first_program(&dir, cli_names(CliBackend::Claude)).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_cli_finds_the_gemini_bin_install() {
+        let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+            return;
+        };
+        let installed = PathBuf::from(&home)
+            .join(".gemini")
+            .join("bin")
+            .join(if cfg!(windows) { "agy.exe" } else { "agy" });
+        if !installed.is_file() {
+            return;
+        }
+        let earlier = program_dirs().iter().any(|dir| {
+            cli_names(CliBackend::Antigravity)
+                .iter()
+                .any(|name| dir.join(name).is_file())
+        });
+        if earlier {
+            return;
+        }
+        assert_eq!(
+            resolve_cli(CliBackend::Antigravity, "").as_deref(),
+            Some(installed.as_path())
+        );
+    }
+
+    #[test]
+    fn antigravity_install_dirs_cover_the_normal_cli_locations() {
+        let home = PathBuf::from("/Users/a");
+        let local = PathBuf::from(r"C:\Users\a\AppData\Local");
+        let dirs = antigravity_install_dirs(Some(&home), Some(&local));
+        assert!(dirs.iter().any(|dir| dir.ends_with(Path::new(".gemini/bin"))));
+        assert!(dirs.iter().any(|dir| dir.ends_with(Path::new("agy/bin"))));
+        #[cfg(target_os = "macos")]
+        assert!(dirs.iter().any(|dir| dir.ends_with("Contents/Helpers")));
+        #[cfg(not(target_os = "macos"))]
+        assert!(antigravity_install_dirs(None, None).is_empty());
+    }
+
+    #[test]
+    fn a_broken_path_entry_does_not_hide_the_installed_antigravity_cli() {
+        let root = std::env::temp_dir().join(format!("whatrust-agy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path_bin = root.join("path");
+        let installed = root.join("home").join(".gemini").join("bin");
+        std::fs::create_dir_all(&path_bin).unwrap();
+        std::fs::create_dir_all(&installed).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("missing-antigravity", path_bin.join("agy")).unwrap();
+        let program = if cfg!(windows) {
+            installed.join("agy.exe")
+        } else {
+            installed.join("agy")
+        };
+        std::fs::write(&program, b"agy").unwrap();
+        let found = pick_program(&[path_bin, installed], cli_names(CliBackend::Antigravity)).unwrap();
+        assert_eq!(found, program);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
