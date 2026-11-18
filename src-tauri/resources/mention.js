@@ -378,14 +378,9 @@
         return true;
       }
       // A photo is often delivered twice, with two unrelated ids: once as the
-      // message, again when its picture settles. The thumbnail and caption
-      // identify it. A different picture has a different thumbnail.
+      // message, again when its picture settles. Require matching media
+      // content when those reports have different message tokens.
       var photos = [];
-      function thumbKey(msg) {
-        var body = String(field(msg, "body") || "").replace(/\s+/g, "");
-        if (body.length < 40) return "";
-        return body.length + ":" + body.slice(0, 32);
-      }
       function photoSig(hit, msg) {
         var type = String(field(msg, "type") || "").toLowerCase();
         var visual = type === "image" || type === "sticker" || type === "video" || type === "gif" || !!dataUrl(field(msg, "body"));
@@ -394,10 +389,8 @@
         return {
           chat: hit.chatId,
           senderId: hit.senderId,
-          sender: personName(msg, hit.senderId),
-          caption: textOf(msg).slice(0, 180),
           hash: String(field(msg, "filehash") || field(media, "filehash") || ""),
-          thumb: thumbKey(msg),
+          thumb: dataUrl(field(msg, "body")),
           at: atMs(msg),
         };
       }
@@ -409,11 +402,7 @@
         if (Math.abs((a.at || 0) - (b.at || 0)) > 8000) return false;
         if (a.hash && b.hash && a.hash !== b.hash) return false;
         if (a.thumb && b.thumb && a.thumb !== b.thumb) return false;
-        if ((a.thumb && a.thumb === b.thumb) || (a.hash && a.hash === b.hash)) return true;
-        if (a.caption !== b.caption) return false;
-        var sameChat = a.chat && a.chat === b.chat;
-        var sameSender = a.sender && b.sender && fold(a.sender) === fold(b.sender);
-        return !!(sameChat || sameSender);
+        return !!((a.thumb && a.thumb === b.thumb) || (a.hash && a.hash === b.hash));
       }
       wpp.on("chat.new_message", function (msg) {
         var moment = hooks.now();
@@ -877,10 +866,18 @@
     }).catch(function () { fail(); });
   };
 
-  root.__whatrustMentionOpen = function (chatId) {
-    var wpp = root.WPP;
-    if (!wpp || !wpp.chat || typeof wpp.chat.openChatBottom !== "function") return;
-    Promise.resolve(wpp.chat.openChatBottom(chatId)).catch(function () {});
+  root.__whatrustMentionOpen = async function (chatId, request) {
+    var ok = false;
+    var deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      var wpp = root.WPP;
+      if (wpp && wpp.isReady && wpp.chat && typeof wpp.chat.openChatBottom === "function") {
+        try { ok = (await wpp.chat.openChatBottom(chatId)) !== false; } catch (e) {}
+        break;
+      }
+      await new Promise(function (resolve) { setTimeout(resolve, 250); });
+    }
+    invoke("mention_opened", { request: request, ok: ok }).catch(function () {});
   };
 
   function ensureWatch() {

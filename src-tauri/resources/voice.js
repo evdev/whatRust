@@ -536,10 +536,13 @@
       row.appendChild(box);
     }
     box.style.cssText = view.status === "offer" ? "margin-top:6px;" : panelStyle(view.id, bubblePaint(row));
+    var translation = prefs && prefs.translate
+      && (!prefs.translation_key || view.translation_key === prefs.translation_key)
+      ? view.translation : "";
     var signature = [
       view.status || "",
       view.text || "",
-      view.translation || "",
+      translation || "",
       view.summary || "",
       view.summaryStatus || "",
       view.notice || "",
@@ -580,7 +583,7 @@
         false,
         "data-wr-voice-text"
       );
-      if (prefs && prefs.translate && view.translation) addText(view.translation, true);
+      if (translation) addText(translation, true);
       if (view.notice) addText(explain(view.notice), true);
       addSummary(view.summary);
       addButton(
@@ -695,6 +698,7 @@
   var openChat = "";
   var checking = Object.create(null);
   var retryAt = Object.create(null);
+  var translationRequests = Object.create(null);
   var armed = false;
   var scheduled = false;
   function invoke(cmd, args) {
@@ -723,6 +727,26 @@
     if (!view || view.skip || view.status === "hidden") return;
     var rows = findRows(id);
     for (var i = 0; i < rows.length; i++) renderBox(rows[i], view, prefs);
+    if (rows.length && view.status === "ready" && prefs.translate
+        && prefs.translation_key && view.translation_key !== prefs.translation_key) {
+      refreshTranslation(id, view);
+    }
+  }
+
+  function refreshTranslation(id, view) {
+    var currentPrefs = prefs;
+    if (translationRequests[id] === currentPrefs) return;
+    translationRequests[id] = currentPrefs;
+    invoke("voice_lookup", { id: id }).then(function (looked) {
+      if (prefs !== currentPrefs || known[id] !== view || !looked || looked.status !== "ready"
+          || looked.translation_key !== currentPrefs.translation_key) return;
+      view.translation = looked.translation;
+      view.translation_key = looked.translation_key;
+      if (!view.summaryStatus || view.summaryStatus !== "error") view.notice = looked.notice;
+      paint(id);
+    }).catch(function () {}).then(function () {
+      if (translationRequests[id] === currentPrefs) delete translationRequests[id];
+    });
   }
 
   var queue = createQueue(2, function (id) {
@@ -867,12 +891,14 @@
 
   function watchLoading(id) {
     setTimeout(function () {
-      if (!known[id] || known[id].status !== "loading") return;
+      var view = known[id];
+      if (!view || view.status !== "loading") return;
       var state = queue.state(id);
       var video = videoQueue.state(id);
       if (state === "queued" || state === "run" || video === "queued" || video === "run") return;
       delete known[id];
-      consider(id);
+      if (view.media === "video") considerVideo(id);
+      else consider(id);
     }, 1500);
   }
 
@@ -1114,6 +1140,7 @@
         enabled: !!next.enabled,
         video: !!next.video,
         translate: !!next.translate,
+        translation_key: next.translation_key || "",
         geniex: !!next.geniex,
         target: next.target || "English",
       };
@@ -1131,17 +1158,8 @@
         var view = known[id];
         if (!view || view.skip || view.status !== "ready") return;
         if (view.media === "video" && !prefs.video) return;
-        if (prefs.translate && !view.translation) {
-          invoke("voice_lookup", { id: id }).then(function (looked) {
-            if (looked && looked.status === "ready") {
-              if (view.media) looked.media = view.media;
-              known[id] = looked;
-              paint(id);
-            }
-          }).catch(function () {});
-        } else {
-          paint(id);
-        }
+        paint(id);
+        if (prefs.translate && !view.translation) refreshTranslation(id, view);
       });
     });
   };

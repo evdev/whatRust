@@ -177,7 +177,7 @@ pub fn status_json(app: &AppHandle) -> Value {
             "needsPassword": m.needs_password(),
             "autoInstall": m.auto_install_default(),
             "howTo": m.how_to(),
-            "flatpakCommand": if matches!(m, Method::Flatpak) { updater::FLATPAK_COMMAND } else { "" },
+            "flatpakCommand": if matches!(m, Method::Flatpak) { updater::flatpak_command() } else { String::new() },
         },
         "releasesUrl": format!("https://github.com/{}/releases", updater::REPO),
     })

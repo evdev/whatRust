@@ -37,7 +37,7 @@ pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"action":{"t
 pub struct AutoreplyState {
     gate: Mutex<()>,
     cancel: Arc<AtomicBool>,
-    active: Mutex<Option<String>>,
+    active: Mutex<Option<(String, String)>>,
     /// One model call at a time, so two chats cannot launch two CLIs together.
     turn: tokio::sync::Mutex<()>,
 }
@@ -91,6 +91,7 @@ pub struct ChatView {
     pub status: String,
     pub aliases: Vec<String>,
     pub tokens: Vec<String>,
+    pub answered_tokens: Vec<String>,
     pub armed_at_ms: u64,
     /// `memory`, `read`, or `full`. Missing on an older row means memory.
     pub access: String,
@@ -197,6 +198,8 @@ struct ChatRow {
     #[serde(default)]
     tokens: Vec<String>,
     #[serde(default)]
+    answered_tokens: Vec<String>,
+    #[serde(default)]
     sent_at: Vec<u64>,
     #[serde(default)]
     log: Vec<LogRow>,
@@ -221,6 +224,7 @@ impl Default for ChatRow {
             armed_at_ms: 0,
             pause_reason: String::new(),
             tokens: Vec::new(),
+            answered_tokens: Vec::new(),
             sent_at: Vec::new(),
             log: Vec::new(),
             access: access_memory(),
@@ -367,12 +371,45 @@ fn with_store<T>(
 ) -> Result<T, String> {
     let state = app.state::<AutoreplyState>();
     let _gate = state.gate.lock().unwrap_or_else(|err| err.into_inner());
+    require_account(app, account)?;
     let root = data_root(app)?;
     let path = state_path(&root, account)?;
     let mut store = load_store(&path);
     let value = edit(&mut store)?;
     save_store(&path, &store)?;
     Ok(value)
+}
+
+fn require_account(app: &AppHandle, account: &str) -> Result<(), String> {
+    if crate::accounts::load(app)
+        .accounts
+        .iter()
+        .any(|row| row.id == account)
+    {
+        Ok(())
+    } else {
+        Err("forbidden".into())
+    }
+}
+
+pub fn delete_account(app: &AppHandle, account: &str) {
+    let state = app.state::<AutoreplyState>();
+    let _gate = state.gate.lock().unwrap_or_else(|err| err.into_inner());
+    let active = state.active.lock().unwrap_or_else(|err| err.into_inner());
+    if active.as_ref().is_some_and(|(owner, _)| owner == account) {
+        state.cancel.store(true, Ordering::Relaxed);
+    }
+    if let Ok(root) = data_root(app) {
+        if let Ok(path) = state_path(&root, account) {
+            for file in crate::jsonfile::sidecar_paths(&path)
+                .into_iter()
+                .chain([path])
+            {
+                let _ = std::fs::remove_file(file);
+            }
+            let _ = std::fs::remove_dir_all(root.join("chats").join(account));
+        }
+    }
 }
 
 fn account_of(window: &tauri::Webview) -> Result<String, String> {
@@ -391,6 +428,7 @@ fn settings_window(window: &tauri::Webview, app: &AppHandle) -> Result<(), Strin
 }
 
 fn snapshot_of(app: &AppHandle, account: &str) -> Result<Snapshot, String> {
+    require_account(app, account)?;
     let settings = settings::load(app);
     let root = data_root(app)?;
     let store = load_store(&state_path(&root, account)?);
@@ -414,6 +452,7 @@ fn snapshot_of(app: &AppHandle, account: &str) -> Result<Snapshot, String> {
                 status: row.status.clone(),
                 aliases: row.aliases.clone(),
                 tokens: row.tokens.clone(),
+                answered_tokens: row.answered_tokens.clone(),
                 access: access_of(row).into(),
                 armed_at_ms: row.armed_at_ms,
                 log: row
@@ -1809,7 +1848,7 @@ pub fn autoreply_set_chat(
         }
     }
     if action == "pause" || action == "off" {
-        cancel_if(&app, &key);
+        cancel_if(&app, &account, &key);
     }
     snapshot_of(&app, &account)
 }
@@ -1884,15 +1923,19 @@ pub fn standin_agent_status(
 }
 
 fn resolved_chat(app: &AppHandle, account: &str, chat: &str) -> Result<String, String> {
+    require_account(app, account)?;
     let root = data_root(app)?;
     let store = load_store(&state_path(&root, account)?);
     Ok(stored_key(&store, chat))
 }
 
-fn cancel_if(app: &AppHandle, chat: &str) {
+fn cancel_if(app: &AppHandle, account: &str, chat: &str) {
     let state = app.state::<AutoreplyState>();
     let active = state.active.lock().unwrap_or_else(|err| err.into_inner());
-    if active.as_deref() == Some(chat) {
+    if active
+        .as_ref()
+        .is_some_and(|(owner, key)| owner == account && key == chat)
+    {
         state.cancel.store(true, Ordering::Relaxed);
     }
 }
@@ -2166,6 +2209,7 @@ pub async fn autoreply_turn(
     let prepared = {
         let state = app.state::<AutoreplyState>();
         let _gate = state.gate.lock().unwrap_or_else(|err| err.into_inner());
+        require_account(&app, &account)?;
         let root = data_root(&app)?;
         let path = state_path(&root, &account)?;
         let mut store = load_store(&path);
@@ -2203,7 +2247,7 @@ pub async fn autoreply_turn(
                 Err((name, reason))
             } else {
                 let chat_ids = chat_id_set(&key, &chat, &row.aliases);
-                Ok((key, name, armed_at, chat_ids))
+                Ok((key, name, armed_at, chat_ids, row.answered_tokens.clone()))
             }
         };
         save_store(&path, &store)?;
@@ -2218,7 +2262,7 @@ pub async fn autoreply_turn(
             Ok(ready) => ready,
         }
     };
-    let (key, name, armed_at, chat_ids) = prepared;
+    let (key, name, armed_at, chat_ids, answered) = prepared;
     let mut messages: Vec<ChatMessage> = messages
         .into_iter()
         .rev()
@@ -2232,6 +2276,7 @@ pub async fn autoreply_turn(
             incoming_ids.iter().any(|id| id == &message.id) || incoming_ids.is_empty()
         })
         .filter(|message| round > 0 || fresh(message, armed_at, now))
+        .filter(|message| !answered.contains(&message.msg_token))
         .cloned()
         .collect();
     if round == 0 && incoming.iter().all(|message| message.from_me) {
@@ -2267,29 +2312,27 @@ pub async fn autoreply_turn(
     let _one_turn = state.turn.lock().await;
     // The chat may have been paused, switched off, or replied for while this
     // turn waited its place in the queue; don't spend a model call on it.
-    let (armed_before, access) = {
+    let access = {
         let _gate = state.gate.lock().unwrap_or_else(|err| err.into_inner());
+        require_account(&app, &account)?;
         let store = load_store(&state_path(&data_root(&app)?, &account)?);
-        let row = store.chats.get(&key);
-        (
-            row.is_some_and(|row| row.status == "armed"),
-            row.map(access_of).unwrap_or("memory").to_string(),
-        )
-    };
-    if !armed_before {
-        return Ok(Step::Idle);
-    }
-    {
-        // Claiming the chat and clearing the flag happen under the same lock
-        // `cancel_if` takes, so a reply that arrives at this moment either
-        // cancels this turn or is seen by the next one, never lost.
+        let Some(row) = store
+            .chats
+            .get(&key)
+            .filter(|row| row.status == "armed" && row.armed_at_ms == armed_at)
+        else {
+            return Ok(Step::Idle);
+        };
+        // Claim the turn under the same gate used by account removal and chat
+        // updates. They can now cancel it without racing its registration.
         let mut active = state.active.lock().unwrap_or_else(|err| err.into_inner());
         state.cancel.store(false, Ordering::Relaxed);
-        *active = Some(key.clone());
-    }
+        *active = Some((account.clone(), key.clone()));
+        access_of(row).to_string()
+    };
     let vectors = crate::rag::prepare(&app, &settings, &docs, &queries).await;
     if state.cancel.load(Ordering::Relaxed) {
-        clear_active(&app, &key);
+        clear_active(&app, &account, &key);
         return Ok(Step::Idle);
     }
     let retrieved = if question.is_empty() {
@@ -2345,7 +2388,7 @@ pub async fn autoreply_turn(
             &settings.standin_backend,
             &settings.standin_hermes_url,
         ) {
-            clear_active(&app, &key);
+            clear_active(&app, &account, &key);
             let reason = agent_error_text(err);
             let about = quote_incoming(&incoming);
             log_skip(&app, &account, &key, &reason)?;
@@ -2363,7 +2406,7 @@ pub async fn autoreply_turn(
         match complete(&app, &settings, &system, &user, state.cancel.clone()).await {
             Ok(raw) => raw,
             Err(err) => {
-                clear_active(&app, &key);
+                clear_active(&app, &account, &key);
                 // A turn cancelled because the user replied or paused the chat is
                 // not a failure; pause_self already changed the state and told them.
                 if state.cancel.load(Ordering::Relaxed) {
@@ -2381,7 +2424,7 @@ pub async fn autoreply_turn(
         }
     };
     if state.cancel.load(Ordering::Relaxed) {
-        clear_active(&app, &key);
+        clear_active(&app, &account, &key);
         return Ok(Step::Idle);
     }
     if is_agent_backend(&settings.standin_backend) && incoming_is_stale(&incoming, now_ms()) {
@@ -2403,7 +2446,7 @@ pub async fn autoreply_turn(
         if let Ok(second) = complete(&app, &settings, &system, &repair, state.cancel.clone()).await
         {
             if state.cancel.load(Ordering::Relaxed) {
-                clear_active(&app, &key);
+                clear_active(&app, &account, &key);
                 return Ok(Step::Idle);
             }
             decision = verdict(&second, &lines, round);
@@ -2414,7 +2457,7 @@ pub async fn autoreply_turn(
             decision = Verdict::Skip(Why::BadDecision);
         }
     }
-    clear_active(&app, &key);
+    clear_active(&app, &account, &key);
     if state.cancel.load(Ordering::Relaxed) {
         return Ok(Step::Idle);
     }
@@ -2481,10 +2524,13 @@ fn chat_armed(app: &AppHandle, account: &str, key: &str) -> Result<bool, String>
         .is_some_and(|row| row.status == "armed"))
 }
 
-fn clear_active(app: &AppHandle, chat: &str) {
+fn clear_active(app: &AppHandle, account: &str, chat: &str) {
     let state = app.state::<AutoreplyState>();
     let mut active = state.active.lock().unwrap_or_else(|err| err.into_inner());
-    if active.as_deref() == Some(chat) {
+    if active
+        .as_ref()
+        .is_some_and(|(owner, key)| owner == account && key == chat)
+    {
         *active = None;
     }
 }
@@ -2500,7 +2546,7 @@ fn log_skip(app: &AppHandle, account: &str, chat: &str, reason: &str) -> Result<
 }
 
 fn stale_reply(app: &AppHandle, account: &str, key: &str, name: &str) -> Result<Step, String> {
-    clear_active(app, key);
+    clear_active(app, account, key);
     let reason = tr("The reply arrived too late.").into_owned();
     log_skip(app, account, key, &reason)?;
     crate::notify::show_for_account(
@@ -2538,6 +2584,7 @@ pub fn autoreply_record_sent(
     chat_id: String,
     turn_id: String,
     msg_token: String,
+    incoming_tokens: Option<Vec<String>>,
     text: String,
 ) -> Result<(), String> {
     let account = account_of(&window)?;
@@ -2550,6 +2597,15 @@ pub fn autoreply_record_sent(
             return Ok(());
         };
         remember_token(row, &msg_token);
+        for token in incoming_tokens.into_iter().flatten().take(25) {
+            if !token.is_empty() && token.len() <= 180 && !row.answered_tokens.contains(&token) {
+                row.answered_tokens.push(token);
+            }
+        }
+        if row.answered_tokens.len() > MAX_TOKENS {
+            let extra = row.answered_tokens.len() - MAX_TOKENS;
+            row.answered_tokens.drain(0..extra);
+        }
         row.sent_at.push(now);
         if row.sent_at.len() > MAX_SENT {
             let extra = row.sent_at.len() - MAX_SENT;
@@ -2585,7 +2641,7 @@ pub fn autoreply_pause_self(
     })?;
     if changed {
         if !key.is_empty() {
-            cancel_if(&app, &key);
+            cancel_if(&app, &account, &key);
         }
         notify_skip(&app, &account, &name, true, "");
     }

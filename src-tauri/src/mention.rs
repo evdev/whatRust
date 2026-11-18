@@ -8,6 +8,7 @@ use crate::lock;
 use crate::settings::{mention_alert_plan, MentionAccountPrefs, MentionAlertPlan, MentionMatch};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -33,8 +34,16 @@ pub struct Popups {
     inner: Mutex<Inner>,
     pending: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Result<(), String>>>>,
     audio: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Result<Heard, String>>>>,
+    opening: Mutex<HashMap<String, OpenWait>>,
+    next_open: AtomicU64,
     filters: Mutex<HashMap<String, FilterWait>>,
     media: Mutex<HashMap<String, OutgoingMedia>>,
+}
+
+struct OpenWait {
+    account: String,
+    popup: String,
+    tx: tokio::sync::oneshot::Sender<bool>,
 }
 
 struct FilterWait {
@@ -61,7 +70,6 @@ struct PhotoStamp {
     account: String,
     chat: String,
     sender: String,
-    body: String,
     preview: String,
     at_ms: u64,
     when: Instant,
@@ -456,7 +464,6 @@ struct Arrival<'a> {
     account: &'a str,
     chat: &'a str,
     sender: &'a str,
-    body: &'a str,
     preview: &'a str,
     at_ms: u64,
 }
@@ -467,7 +474,6 @@ impl<'a> Arrival<'a> {
             account: &card.account_label,
             chat: &card.chat_id,
             sender: &card.sender_name,
-            body: &card.body,
             preview: &card.preview,
             at_ms: card.at_ms,
         }
@@ -478,7 +484,6 @@ impl<'a> Arrival<'a> {
             account: &held.account_label,
             chat: &held.chat_id,
             sender: &held.sender_name,
-            body: &held.body,
             preview: &held.preview,
             at_ms: held.at_ms,
         }
@@ -489,7 +494,6 @@ impl<'a> Arrival<'a> {
             account: &stamp.account,
             chat: &stamp.chat,
             sender: &stamp.sender,
-            body: &stamp.body,
             preview: &stamp.preview,
             at_ms: stamp.at_ms,
         }
@@ -499,19 +503,10 @@ impl<'a> Arrival<'a> {
         if self.account != other.account || self.at_ms.abs_diff(other.at_ms) > 8_000 {
             return false;
         }
-        if !self.preview.is_empty() && self.preview == other.preview {
-            return true;
-        }
-        if self.body != other.body {
-            return false;
-        }
-        if self.preview.is_empty() && other.preview.is_empty() {
-            return false;
-        }
-        if !self.preview.is_empty() && !other.preview.is_empty() {
-            return false;
-        }
-        self.chat == other.chat || (!self.sender.is_empty() && self.sender == other.sender)
+        self.chat == other.chat
+            && self.sender == other.sender
+            && !self.preview.is_empty()
+            && self.preview == other.preview
     }
 }
 
@@ -677,9 +672,10 @@ fn send_script(chat_id: &str, msg_id: &str, text: &str, popup: &str, kind: &str)
     )
 }
 
-fn open_script(chat_id: &str) -> String {
+fn open_script(chat_id: &str, request: &str) -> String {
     let chat = serde_json::to_string(chat_id).unwrap_or_else(|_| "\"\"".into());
-    format!("window.__whatrustMentionOpen&&window.__whatrustMentionOpen({chat})")
+    let request = serde_json::to_string(request).unwrap_or_else(|_| "\"\"".into());
+    format!("window.__whatrustMentionOpen&&window.__whatrustMentionOpen({chat},{request})")
 }
 
 fn listen_script(msg_id: &str, label: &str) -> String {
@@ -815,7 +811,6 @@ pub fn mention_event(
                 account: held.account_label.clone(),
                 chat: held.chat_id.clone(),
                 sender: held.sender_name.clone(),
-                body: held.body.clone(),
                 preview: held.preview.clone(),
                 at_ms: held.at_ms,
                 when: now,
@@ -964,6 +959,7 @@ pub async fn mention_transcript(
             status: "disabled".into(),
             text: String::new(),
             translation: None,
+            translation_key: None,
             notice: None,
         });
     }
@@ -1143,7 +1139,7 @@ pub fn mention_media(
 }
 
 #[tauri::command]
-pub fn mention_open(window: tauri::Webview, app: AppHandle) -> Result<(), String> {
+pub async fn mention_open(window: tauri::Webview, app: AppHandle) -> Result<(), String> {
     if !local_popup(&window) {
         return Err("forbidden".into());
     }
@@ -1155,12 +1151,56 @@ pub fn mention_open(window: tauri::Webview, app: AppHandle) -> Result<(), String
         let card = inner.cards.get(&label).ok_or("closed")?;
         (card.account_label.clone(), card.chat_id.clone())
     };
-    let _ = ensure_view(&app, &account);
+    ensure_view(&app, &account)?;
     reveal_account(&app, &account);
-    if let Some(view) = app.get_webview(&account) {
-        let _ = view.eval(open_script(&chat));
+    let error = || tr("O WhatsApp ainda está abrindo. Tente de novo.").into_owned();
+    let view = app.get_webview(&account).ok_or_else(error)?;
+    let state = popups(&app);
+    let request = state.next_open.fetch_add(1, Ordering::Relaxed).to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    lock::guard(&state.opening).insert(
+        request.clone(),
+        OpenWait {
+            account,
+            popup: label.clone(),
+            tx,
+        },
+    );
+    if view.eval(open_script(&chat, &request)).is_err() {
+        lock::guard(&state.opening).remove(&request);
+        return Err(error());
     }
-    close_popup(&app, &label);
+    let opened = matches!(
+        tokio::time::timeout(Duration::from_secs(12), rx).await,
+        Ok(Ok(true))
+    );
+    lock::guard(&state.opening).remove(&request);
+    if opened {
+        close_popup(&app, &label);
+        Ok(())
+    } else {
+        Err(error())
+    }
+}
+
+#[tauri::command]
+pub fn mention_opened(
+    window: tauri::Webview,
+    app: AppHandle,
+    request: String,
+    ok: bool,
+) -> Result<(), String> {
+    crate::integration::remote(&window)?;
+    let state = popups(&app);
+    let mut opening = lock::guard(&state.opening);
+    if opening
+        .get(&request)
+        .is_some_and(|wait| wait.account == window.label())
+    {
+        if let Some(wait) = opening.remove(&request) {
+            let _ = wait.tx.send(ok);
+        }
+    }
     Ok(())
 }
 
@@ -1333,6 +1373,7 @@ pub fn on_lock(app: &AppHandle) {
         let _ = tx.send(Err(tr("Não foi possível enviar.").into_owned()));
     }
     lock::guard(&state.filters).clear();
+    lock::guard(&state.opening).clear();
     let audio = std::mem::take(&mut *lock::guard(&state.audio));
     for (_, tx) in audio {
         let _ = tx.send(Err(tr("Não foi possível reproduzir o áudio.").into_owned()));
@@ -1660,6 +1701,7 @@ fn forget(app: &AppHandle, label: &str, fill: bool) {
     fail_audio(app, label);
     let state = popups(app);
     lock::guard(&state.media).remove(label);
+    lock::guard(&state.opening).retain(|_, wait| wait.popup != label);
     layout(app);
     if fill {
         pump(app);
@@ -1851,8 +1893,8 @@ mod tests {
         first.body = "look".into();
         first.sender_name = "Ada".into();
         first.at_ms = 5_000;
-        let mut copy = sample("wa-default", "false_9@lid_B", Instant::now());
-        copy.chat_id = "9@lid".into();
+        let mut copy = sample("wa-default", "false_1@c.us_B", Instant::now());
+        copy.chat_id = first.chat_id.clone();
         copy.preview = first.preview.clone();
         copy.body = first.body.clone();
         copy.sender_name = first.sender_name.clone();
@@ -1866,6 +1908,8 @@ mod tests {
         waiting.push_back(first);
         assert!(duplicate_photo(&HashMap::new(), &waiting, &[], &copy));
         assert!(!duplicate_photo(&HashMap::new(), &waiting, &[], &other));
+        copy.chat_id = "different@g.us".into();
+        assert!(!duplicate_photo(&HashMap::new(), &waiting, &[], &copy));
     }
 
     #[test]

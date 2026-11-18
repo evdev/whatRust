@@ -42,6 +42,7 @@ pub struct VoicePrefs {
     pub video: bool,
     pub translate: bool,
     pub target: String,
+    pub translation_key: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -51,6 +52,8 @@ pub struct VoiceView {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub translation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translation_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
 }
@@ -88,6 +91,7 @@ fn prefs_for(app: &AppHandle, settings: &Settings) -> VoicePrefs {
         video: settings.video_transcribe && crate::lock::is_unlocked(app),
         translate: settings.translate_enabled,
         target: settings.translate_target_lang.clone(),
+        translation_key: translation_key(settings),
     }
 }
 
@@ -536,6 +540,7 @@ fn disabled(id: String) -> VoiceView {
         status: "disabled".into(),
         text: String::new(),
         translation: None,
+        translation_key: None,
         notice: None,
     }
 }
@@ -546,6 +551,7 @@ fn missing(id: String) -> VoiceView {
         status: "missing".into(),
         text: String::new(),
         translation: None,
+        translation_key: None,
         notice: None,
     }
 }
@@ -556,6 +562,7 @@ fn loading(id: String) -> VoiceView {
         status: "loading".into(),
         text: String::new(),
         translation: None,
+        translation_key: None,
         notice: None,
     }
 }
@@ -616,20 +623,8 @@ async fn lookup_stored(app: &AppHandle, account: &str, id: String) -> Result<Voi
         }
         return Ok(loading(id));
     }
-    // A stored transcript, even an empty one, is a finished result. The page
-    // must not download the voice note again.
-    let (translation, notice) = match ensure_translation(app, &settings, &dir, account, &note).await
-    {
-        Ok(translation) => (translation, None),
-        Err(code) => (None, Some(code.to_string())),
-    };
-    Ok(VoiceView {
-        id,
-        status: "ready".into(),
-        text: note.text,
-        translation,
-        notice,
-    })
+    // A stored transcript, even an empty one, is a finished result.
+    ready_note(app, &settings, &dir, account, id, note).await
 }
 
 async fn transcribe_locked(
@@ -729,6 +724,9 @@ async fn ready_note(
         status: "ready".into(),
         text: note.text,
         translation,
+        translation_key: settings
+            .translate_enabled
+            .then(|| translation_key(settings)),
         notice,
     })
 }

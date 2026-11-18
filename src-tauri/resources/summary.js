@@ -1382,12 +1382,7 @@
       currentRun = 0;
       inflight = false;
     }
-    if (run && run.drop) {
-      if (entry && entry.id) {
-        invoke("chat_summary_delete", { id: entry.id, updated_at: entry.updated_at }).catch(function () {});
-      }
-      return;
-    }
+    if (run && run.drop) return;
     if (!entry || entry.chat_id !== openId) return;
     remember(entry);
     paintAll();
@@ -1446,7 +1441,16 @@
           covered_from_ms: built.coveredFrom,
           sampled: built.sampled,
           message_count: built.count,
-        }).then(function (entry) { finish(runId, entry); });
+        }).then(function (draftId) {
+          var run = runs[runId];
+          if (!run || run.drop || currentRun !== runId || !sameChat(chat)) {
+            return finish(runId, null);
+          }
+          paintCard(L("Salvando…", "Saving…"), []);
+          return invoke("chat_summary_save", { draftId: draftId }).then(function (entry) {
+            finish(runId, entry);
+          });
+        });
         });
       });
     }).catch(function (error) {

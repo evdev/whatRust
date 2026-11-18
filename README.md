@@ -261,7 +261,7 @@ Yes. Open **Settings → Network**, pick **SOCKS5** or **HTTP**, enter the host 
 
 ### Does whatRust update itself? What does it send?
 
-Yes, by default. A minute after start and then every 6 hours, whatRust asks `api.github.com` for the latest published release of `karem505/whatRust` (one anonymous request that sends only a `whatRust/<version>` User-Agent, no account, identifiers or usage data). If there is a newer version you get a notification (on Windows clicking it opens the page), an **Update to X.Y.Z** item in the tray menu, and **Settings → Updates** shows the release notes with **Download and install**. Files are downloaded from `github.com` and checked against the `SHA256SUMS` published with the release before anything is replaced or started; a mismatch, or a release without `SHA256SUMS`, is refused and the installed copy stays as it is.
+Yes, by default. A minute after start and then every 6 hours, whatRust asks `api.github.com` for the latest published release of `evdev/whatRust` (one anonymous request that sends only a `whatRust/<version>` User-Agent, no account, identifiers or usage data). If there is a newer version you get a notification (on Windows clicking it opens the page), an **Update to X.Y.Z** item in the tray menu, and **Settings → Updates** shows the release notes with **Download and install**. Files are downloaded from `github.com` and checked against the `SHA256SUMS` published with the release before anything is replaced or started; a mismatch, or a release without `SHA256SUMS`, is refused and the installed copy stays as it is.
 
 How it installs depends on how you installed whatRust:
 

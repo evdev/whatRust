@@ -391,6 +391,8 @@ pub fn claim_translation(
     key: &str,
     now: u64,
 ) -> Result<bool, String> {
+    // A new target or model can replace an in-flight claim. Completion still
+    // checks the pending key, so the old request cannot overwrite the result.
     let pending = format!("pending:{key}");
     let stale_before = now.saturating_sub(TRANSLATION_STALE_MS);
     let conn = open_account(dir, account)?;
@@ -401,7 +403,7 @@ pub fn claim_translation(
              AND COALESCE(translation_key, '') != ?4
              AND (
                translation_claim_ms = 0
-               OR COALESCE(translation_key, '') NOT LIKE 'pending:%'
+               OR COALESCE(translation_key, '') != ?1
                OR translation_claim_ms < ?5
              )",
             params![pending, now, token, key, stale_before],
