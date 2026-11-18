@@ -44,53 +44,7 @@ pub fn sanitize_code(code: &str) -> String {
     Lang::from_code(code).code().to_string()
 }
 
-/// Default for a fresh install or a settings.json written before the language
-/// setting existed: Portuguese when the operating system is set to Portuguese,
-/// English otherwise. Existing users keep the language they had (English).
-pub fn system_default() -> &'static str {
-    Lang::from_code(&os_locale()).code()
-}
-
-#[cfg(windows)]
-fn os_locale() -> String {
-    use windows::Win32::Globalization::GetUserDefaultLocaleName;
-    // LOCALE_NAME_MAX_LENGTH
-    let mut buf = [0u16; 85];
-    let n = unsafe { GetUserDefaultLocaleName(&mut buf) };
-    if n > 1 {
-        String::from_utf16_lossy(&buf[..(n as usize - 1)])
-    } else {
-        String::new()
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn os_locale() -> String {
-    // Apps started from Finder or the Dock get no LANG; ask the user defaults.
-    std::process::Command::new("defaults")
-        .args(["read", "-g", "AppleLocale"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(env_locale)
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn os_locale() -> String {
-    env_locale()
-}
-
-#[cfg(not(windows))]
-fn env_locale() -> String {
-    ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .iter()
-        .filter_map(|k| std::env::var(k).ok())
-        .find(|v| !v.is_empty() && v != "C" && v != "POSIX")
-        .unwrap_or_default()
-}
-
-static CURRENT: AtomicU8 = AtomicU8::new(0);
+static CURRENT: AtomicU8 = AtomicU8::new(Lang::En as u8);
 
 pub fn set(lang: Lang) {
     CURRENT.store(lang as u8, Ordering::Relaxed);

@@ -59,8 +59,7 @@ pub struct Settings {
     /// Dock icon brings a hidden window back. Windows and Linux always show the
     /// tray icon, since there it is the only way back to a hidden window.
     pub menu_bar_icon: bool,
-    /// Interface language: `en` or `pt-BR`. Defaults to the OS language
-    /// (Portuguese for a Portuguese system, English otherwise).
+    /// Interface language: `en` by default, or `pt-BR` when selected.
     pub language: String,
     /// Transcribe WhatsApp voice notes with the local FluidVoice API.
     pub voice_transcribe: bool,
@@ -175,7 +174,7 @@ impl Default for Settings {
             zoom: 1.0,
             show_message_device: true,
             menu_bar_icon: true,
-            language: crate::i18n::system_default().to_string(),
+            language: crate::i18n::EN.to_string(),
             voice_transcribe: true,
             video_transcribe: false,
             fluidvoice_port: FLUIDVOICE_PORT_DEFAULT,
@@ -1325,6 +1324,7 @@ mod tests {
         assert!(!s.autostart);
         assert_eq!(s.zoom, 1.0);
         assert!(s.menu_bar_icon);
+        assert_eq!(s.language, "en");
     }
 
     #[test]
@@ -1409,6 +1409,8 @@ mod tests {
         assert_eq!(s.ai_provider, "openrouter");
         let on: Settings = serde_json::from_str(r#"{"video_transcribe": true}"#).unwrap();
         assert!(on.video_transcribe);
+        let portuguese: Settings = serde_json::from_str(r#"{"language":"pt-BR"}"#).unwrap();
+        assert_eq!(portuguese.sanitized().language, "pt-BR");
     }
 
     #[test]
