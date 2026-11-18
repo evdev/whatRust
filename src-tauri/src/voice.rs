@@ -27,12 +27,18 @@ pub const MAX_VIDEO: usize = 64 * 1024 * 1024;
 /// official `FluidVoice_*_x64-setup.exe`. The page cannot supply another address.
 const FLUIDVOICE_WINDOWS_SETUP: &str = "https://fluidvoice.com/fluid/download/windows";
 const FLUID_TRANSCRIBE_SECS: u64 = 180;
+const TRANSCRIBE_CLAIM_SECS: u64 = if cfg!(all(windows, target_arch = "aarch64")) {
+    3600
+} else {
+    FLUID_TRANSCRIBE_SECS
+};
 /// Two length bytes, a 180-byte id, and an 8-byte message time.
 const FRAME_SLACK: usize = 190;
 
 #[derive(Clone, Serialize)]
 pub struct VoicePrefs {
     pub enabled: bool,
+    pub geniex: bool,
     pub video: bool,
     pub translate: bool,
     pub target: String,
@@ -78,6 +84,7 @@ pub fn push_prefs(app: &AppHandle, settings: &Settings) {
 fn prefs_for(app: &AppHandle, settings: &Settings) -> VoicePrefs {
     VoicePrefs {
         enabled: settings.voice_transcribe && crate::lock::is_unlocked(app),
+        geniex: cfg!(all(windows, target_arch = "aarch64")),
         video: settings.video_transcribe && crate::lock::is_unlocked(app),
         translate: settings.translate_enabled,
         target: settings.translate_target_lang.clone(),
@@ -236,7 +243,10 @@ pub async fn transcribe_video(
     if !crate::lock::is_unlocked(&app) || !settings.video_transcribe {
         return Ok(disabled(framed.id));
     }
+    #[cfg(not(all(windows, target_arch = "aarch64")))]
     let audio = crate::mp4audio::aac_m4a(&framed.audio).map_err(|err| err.code().to_string())?;
+    #[cfg(all(windows, target_arch = "aarch64"))]
+    let audio = framed.audio;
     // The await below keeps every live local. Drop the picture before waiting
     // on FluidVoice, which can take minutes.
     let framed = Framed {
@@ -280,16 +290,61 @@ pub async fn summarize_voice(
 #[tauri::command]
 pub fn open_fluidvoice_windows(window: Webview, app: AppHandle) -> Result<(), String> {
     settings_window(&window, &app)?;
-    let url = fluidvoice_windows_setup_url().map_err(|_| "fluidvoice".to_string())?;
-    #[cfg(windows)]
+    #[cfg(all(windows, target_arch = "aarch64"))]
     {
-        crate::opener::open_url(&app, url);
+        crate::opener::open_url(
+            &app,
+            "https://github.com/qualcomm/GenieX/releases/latest"
+                .parse()
+                .map_err(|_| "geniex_missing")?,
+        );
         Ok(())
     }
-    #[cfg(not(windows))]
+    #[cfg(not(all(windows, target_arch = "aarch64")))]
     {
-        let _ = (app, url);
-        Err(tr("O instalador do FluidVoice só é oferecido no Windows.").into_owned())
+        let url = fluidvoice_windows_setup_url().map_err(|_| "fluidvoice".to_string())?;
+        #[cfg(windows)]
+        {
+            crate::opener::open_url(&app, url);
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (app, url);
+            Err(tr("O instalador do FluidVoice só é oferecido no Windows.").into_owned())
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn geniex_download(window: Webview, app: AppHandle) -> Result<(), String> {
+    settings_window(&window, &app)?;
+    #[cfg(all(windows, target_arch = "aarch64"))]
+    {
+        return tauri::async_runtime::spawn_blocking(crate::geniex::download_model)
+            .await
+            .map_err(|_| "geniex_download".to_string())?
+            .map_err(str::to_string);
+    }
+    #[cfg(not(all(windows, target_arch = "aarch64")))]
+    {
+        Err("geniex_unavailable".into())
+    }
+}
+
+#[tauri::command]
+pub async fn geniex_test(window: Webview, app: AppHandle) -> Result<(), String> {
+    settings_window(&window, &app)?;
+    #[cfg(all(windows, target_arch = "aarch64"))]
+    {
+        return tauri::async_runtime::spawn_blocking(crate::geniex::test_npu)
+            .await
+            .map_err(|_| "geniex_inference".to_string())?
+            .map_err(str::to_string);
+    }
+    #[cfg(not(all(windows, target_arch = "aarch64")))]
+    {
+        Err("geniex_unavailable".into())
     }
 }
 
@@ -304,23 +359,52 @@ pub async fn fluidvoice_status(
     port: Option<u16>,
 ) -> Result<FluidStatus, String> {
     settings_window(&window, &app)?;
-    let port =
-        settings::sanitize_port(port.unwrap_or_else(|| settings::load(&app).fluidvoice_port));
-    let probed = tauri::async_runtime::spawn_blocking(move || probe_health(port))
-        .await
-        .map_err(|_| "fluidvoice".to_string())?;
-    match probed {
-        Ok(version) => Ok(FluidStatus {
-            ok: true,
-            version,
-            detail: tr("FluidVoice respondeu.").into_owned(),
-        }),
-        Err(_) => Ok(FluidStatus {
-            ok: false,
-            version: String::new(),
-            detail: tr("FluidVoice não respondeu. Ative a API local e reinicie o FluidVoice.")
-                .into_owned(),
-        }),
+    #[cfg(all(windows, target_arch = "aarch64"))]
+    {
+        let _ = port;
+        let status = tauri::async_runtime::spawn_blocking(crate::geniex::model_present)
+            .await
+            .map_err(|_| "geniex_unavailable".to_string())?;
+        Ok(match status {
+            Ok(true) => FluidStatus {
+                ok: true,
+                version: String::new(),
+                detail: "GenieX and Qwen3-ASR Q8 are installed. The NPU starts when needed.".into(),
+            },
+            Ok(false) => FluidStatus {
+                ok: false,
+                version: String::new(),
+                detail: "GenieX is installed. Download the Qwen3-ASR Q8 model below.".into(),
+            },
+            Err(_) => FluidStatus {
+                ok: false,
+                version: String::new(),
+                detail:
+                    "Install GenieX CLI for Windows ARM64, then download the Qwen3-ASR Q8 model."
+                        .into(),
+            },
+        })
+    }
+    #[cfg(not(all(windows, target_arch = "aarch64")))]
+    {
+        let port =
+            settings::sanitize_port(port.unwrap_or_else(|| settings::load(&app).fluidvoice_port));
+        let probed = tauri::async_runtime::spawn_blocking(move || probe_health(port))
+            .await
+            .map_err(|_| "fluidvoice".to_string())?;
+        match probed {
+            Ok(version) => Ok(FluidStatus {
+                ok: true,
+                version,
+                detail: tr("FluidVoice respondeu.").into_owned(),
+            }),
+            Err(_) => Ok(FluidStatus {
+                ok: false,
+                version: String::new(),
+                detail: tr("FluidVoice não respondeu. Ative a API local e reinicie o FluidVoice.")
+                    .into_owned(),
+            }),
+        }
     }
 }
 
@@ -527,7 +611,7 @@ async fn lookup_stored(app: &AppHandle, account: &str, id: String) -> Result<Voi
     if note.state != "ready" {
         // A crashed transcription leaves a running row. Let the page start
         // again once the claim is older than a FluidVoice call.
-        if now_ms().saturating_sub(note.claimed_ms) >= FLUID_TRANSCRIBE_SECS * 1000 {
+        if now_ms().saturating_sub(note.claimed_ms) >= TRANSCRIBE_CLAIM_SECS * 1000 {
             return Ok(missing(id));
         }
         return Ok(loading(id));
@@ -567,7 +651,7 @@ async fn transcribe_locked(
             media,
         },
         now_ms(),
-        FLUID_TRANSCRIBE_SECS * 1000,
+        TRANSCRIBE_CLAIM_SECS * 1000,
     )?;
     match claim {
         Claim::Ready(note) => ready_note(app, settings, &dir, account, id, *note).await,
@@ -578,6 +662,12 @@ async fn transcribe_locked(
             let filename = audio_filename(&audio).to_string();
             let bytes = audio.len();
             let transcribed = tauri::async_runtime::spawn_blocking(move || {
+                #[cfg(all(windows, target_arch = "aarch64"))]
+                {
+                    let _ = (port, filename);
+                    crate::geniex::transcribe(&audio)
+                }
+                #[cfg(not(all(windows, target_arch = "aarch64")))]
                 fluid_transcribe(port, &audio, &filename)
             })
             .await

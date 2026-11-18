@@ -68,6 +68,11 @@ globalThis.__WHATRUST_TEST = true;
 globalThis.document = { createElement: (tag) => new El(tag) };
 eval(source);
 const api = globalThis.__whatrustVoiceApi;
+const wav = api.pcmWav(new Float32Array([-1, 0, 1]));
+const wavView = new DataView(wav.buffer);
+assert(String.fromCharCode(...wav.slice(0, 4)) === "RIFF" && String.fromCharCode(...wav.slice(8, 12)) === "WAVE", "GenieX audio is a WAV file");
+assert(wavView.getUint32(24, true) === 16000 && wavView.getUint16(22, true) === 1 && wavView.getUint16(34, true) === 16, "WAV is mono 16 kHz 16-bit PCM");
+assert(wavView.getInt16(44, true) === -32768 && wavView.getInt16(46, true) === 0 && wavView.getInt16(48, true) === 32767, "PCM samples use the correct signed range");
 
 const id = "false_123@c.us_ABC";
 assert(api.isMessageId(id), "accepts a WhatsApp message id");

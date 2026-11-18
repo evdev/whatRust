@@ -242,6 +242,7 @@ async function resetMentionSound() {
 }
 
 let hostPlatform = "";
+let hostGeniex = false;
 
 function paintChatSummaryConsent(on) {
   const state = document.getElementById("chat_summary_consent_state");
@@ -254,8 +255,12 @@ function paintChatSummaryConsent(on) {
 async function load() {
   const s = await invoke("get_settings");
   hostPlatform = s.platform;
+  hostGeniex = !!s.geniex_transcription;
   setMacRows(s.platform === "macos");
-  document.getElementById("fluidvoice_install_row").hidden = s.platform !== "windows";
+  document.getElementById("fluidvoice_install_row").hidden = s.platform !== "windows" || hostGeniex;
+  document.getElementById("fluidvoice_port_row").hidden = hostGeniex;
+  document.getElementById("geniex_install_row").hidden = !hostGeniex;
+  document.getElementById("geniex_model_row").hidden = !hostGeniex;
   // Title bar (Linux): auto hides it on tiling window managers like Hyprland.
   document.getElementById("title_bar_row").hidden = s.platform !== "linux";
   document.getElementById("title_bar").value = ["show", "hide"].includes(s.title_bar) ? s.title_bar : "auto";
@@ -297,6 +302,12 @@ async function load() {
   const lang = LANGS.includes(s.language) ? s.language : "en";
   document.getElementById("language").value = lang;
   if (I18n.lang() !== lang) I18n.setLang(lang);
+  if (hostGeniex) {
+    document.getElementById("voice_backend_desc").textContent = "Shows transcripts under voice notes using Qwen3-ASR Q8 locally on this computer.";
+    document.getElementById("video_backend_desc").textContent = "Shows a transcription button on videos using Qwen3-ASR Q8 locally.";
+    document.getElementById("test_fluidvoice").textContent = "Test NPU";
+    void refreshTranscriptionStatus();
+  }
   document.getElementById("fluidvoice_port").value = String(s.fluidvoice_port || 47733);
   document.getElementById("translate_target_lang").value = s.translate_target_lang || "English";
   translateModels = {
@@ -774,13 +785,24 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("install_fluidvoice").addEventListener("click", () => {
     offerFluidVoiceInstall(false);
   });
+  document.getElementById("install_geniex").addEventListener("click", async () => {
+    try { await invoke("open_fluidvoice_windows"); } catch (e) { document.getElementById("fluidvoice_status").textContent = errorText(e); }
+  });
+  document.getElementById("download_geniex_model").addEventListener("click", async () => {
+    const button = document.getElementById("download_geniex_model");
+    button.disabled = true;
+    document.getElementById("fluidvoice_status").textContent = "Downloading Qwen3-ASR Q8. This may take several minutes…";
+    try { await invoke("geniex_download"); await refreshTranscriptionStatus(); }
+    catch (e) { document.getElementById("fluidvoice_status").textContent = "Model download failed. Check that GenieX is installed, you have network access and sufficient disk space, then try again. (" + errorText(e) + ")"; }
+    finally { button.disabled = false; }
+  });
   document.getElementById("voice_transcribe").addEventListener("change", () => {
-    if (hostPlatform === "windows" && document.getElementById("voice_transcribe").checked) {
+    if (hostPlatform === "windows" && !hostGeniex && document.getElementById("voice_transcribe").checked) {
       offerFluidVoiceIfMissing();
     }
   });
   document.getElementById("video_transcribe").addEventListener("change", () => {
-    if (hostPlatform === "windows" && document.getElementById("video_transcribe").checked) {
+    if (hostPlatform === "windows" && !hostGeniex && document.getElementById("video_transcribe").checked) {
       offerFluidVoiceIfMissing();
     }
   });
@@ -1120,6 +1142,17 @@ async function offerFluidVoiceInstall(missing) {
 }
 
 async function testFluidVoice() {
+  if (hostGeniex) {
+    const status = document.getElementById("fluidvoice_status");
+    status.textContent = "Testing the NPU. Loading the model may take a minute…";
+    try { await invoke("geniex_test"); status.textContent = "GenieX and the Q8 model responded on the NPU."; }
+    catch (e) { status.textContent = "NPU test failed. Confirm GenieX and the Q8 model are installed and this computer has a supported Snapdragon NPU. (" + errorText(e) + ")"; }
+    return;
+  }
+  await refreshTranscriptionStatus();
+}
+
+async function refreshTranscriptionStatus() {
   const status = document.getElementById("fluidvoice_status");
   status.textContent = "Checking…";
   try {

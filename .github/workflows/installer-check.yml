@@ -1,0 +1,59 @@
+name: Windows installer check
+on:
+  push:
+    paths:
+      - 'installers/**'
+      - 'install.ps1'
+      - 'scripts/test-windows-bootstrap.ps1'
+      - '.github/workflows/installer-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x64
+            machine: 34404
+          - runner: windows-11-arm
+            arch: arm64
+            machine: 43620
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Test architecture selection and checksum verification
+        shell: pwsh
+        run: ./scripts/test-windows-bootstrap.ps1
+      - name: Check, install and start the packaged app
+        shell: pwsh
+        env:
+          INSTALL_ARCH: ${{ matrix.arch }}
+          PE_MACHINE: ${{ matrix.machine }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Get-ChildItem -Path installers -Filter "*_$env:INSTALL_ARCH-setup.exe"
+          if (@($setup).Count -ne 1) { throw "Expected one installer for $env:INSTALL_ARCH" }
+          $expected = (Get-Content installers/SHA256SUMS | Where-Object { $_ -match [regex]::Escape($setup.Name) }) -split '\s+' | Select-Object -First 1
+          if (-not $expected -or (Get-FileHash -Algorithm SHA256 $setup.FullName).Hash -ne $expected) { throw 'Installer checksum mismatch' }
+          $p = Start-Process -FilePath $setup.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Installer exited with $($p.ExitCode)" }
+          $exe = Join-Path $env:LOCALAPPDATA 'whatRust\whatrust.exe'
+          if (-not (Test-Path $exe)) { throw 'Installed app was not found' }
+          $fs = [System.IO.File]::OpenRead($exe)
+          try {
+            $reader = [System.IO.BinaryReader]::new($fs)
+            $fs.Position = 0x3c; $pe = $reader.ReadInt32()
+            $fs.Position = $pe; if ($reader.ReadUInt32() -ne 0x4550) { throw 'Invalid PE header' }
+            if ($reader.ReadUInt16() -ne [int]$env:PE_MACHINE) { throw 'Wrong executable architecture' }
+          } finally { $fs.Dispose() }
+          $app = Start-Process -FilePath $exe -WindowStyle Hidden -PassThru
+          try {
+            Start-Sleep -Seconds 12
+            $app.Refresh()
+            if ($app.HasExited) { throw "App exited during startup: $($app.ExitCode)" }
+          } finally { if (-not $app.HasExited) { Stop-Process -Id $app.Id -Force } }

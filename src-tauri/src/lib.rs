@@ -11,6 +11,8 @@ mod commands;
 mod decorations;
 mod dlog;
 mod downloads;
+#[cfg(all(windows, target_arch = "aarch64"))]
+mod geniex;
 #[cfg(target_os = "linux")]
 mod gpu;
 mod i18n;
@@ -26,6 +28,7 @@ mod mention;
 mod mention_sound;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod menubar;
+#[cfg_attr(all(windows, target_arch = "aarch64"), allow(dead_code))]
 mod mp4audio;
 mod native_icon;
 mod notif_icon;
@@ -45,6 +48,7 @@ mod ui_health;
 mod unread;
 mod update_service;
 mod updater;
+#[cfg_attr(all(windows, target_arch = "aarch64"), allow(dead_code))]
 mod voice;
 mod voice_ogg;
 #[cfg(target_os = "macos")]
@@ -208,6 +212,18 @@ pub fn run() {
 
     let builder = builder.manage(sessions::Sessions::default());
 
+    // Tauri exposes this hook only on Apple platforms.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let builder = builder.on_web_content_process_terminate(|webview| {
+        if webview.label().starts_with("mention-") {
+            crate::dlog::log("mention: popup webview terminated");
+            return;
+        }
+        if webview.reload().is_ok() {
+            crate::dlog::log("webview: terminated and reloaded");
+        }
+    });
+
     builder
         .manage(accounts::UnreadMap::default())
         .manage(downloads::Downloads::default())
@@ -219,17 +235,6 @@ pub fn run() {
         .manage(todo::TodoState::default())
         .manage(autoreply::AutoreplyState::default())
         .manage(mention::Popups::default())
-        // A dead web view is reloaded so an account comes back. A reply popup
-        // must not: reloading it drops the recording and shows the same card again.
-        .on_web_content_process_terminate(|webview| {
-            if webview.label().starts_with("mention-") {
-                crate::dlog::log("mention: popup webview terminated");
-                return;
-            }
-            if webview.reload().is_ok() {
-                crate::dlog::log("webview: terminated and reloaded");
-            }
-        })
         .invoke_handler(tauri::generate_handler![
             integration::integration_state,
             integration::report_integration,
@@ -296,6 +301,8 @@ pub fn run() {
             chat_summary::clear_chat_summary_consent,
             voice::fluidvoice_status,
             voice::open_fluidvoice_windows,
+            voice::geniex_download,
+            voice::geniex_test,
             voice::set_ai_key,
             voice::list_ai_models,
             todo::todo_list,
@@ -372,6 +379,11 @@ pub fn run() {
             i18n::set(i18n::Lang::from_code(&s.language));
             if smoke_mode {
                 s.start_minimized = true;
+                if std::env::var("WHATRUST_ASR_SMOKE").as_deref() == Ok("1") {
+                    s.voice_transcribe = true;
+                    s.video_transcribe = true;
+                    s.translate_enabled = false;
+                }
                 settings::save(handle, &s)?;
             }
             // Window model for this run (Linux/macOS opt-in; Windows always single).
@@ -514,6 +526,10 @@ pub fn run() {
         .build(context)
         .expect("error while building whatRust")
         .run(|_app_handle, _event| {
+            #[cfg(all(windows, target_arch = "aarch64"))]
+            if let tauri::RunEvent::Exit = &_event {
+                geniex::shutdown();
+            }
             // Give restyled panels their real geometry back before the exit
             // saves window state. The tray Quit path does the same.
             #[cfg(target_os = "macos")]

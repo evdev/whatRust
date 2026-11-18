@@ -243,7 +243,10 @@ doc.getElementById = function (id) {
 };
 assert(api.chooseAnchor(doc).el === switcher && api.chooseAnchor(doc).mode === "switcher", "the account switcher wins over Meta AI");
 switcher.parentNode.removeChild(switcher);
-assert(api.chooseAnchor(doc).el === controls, "the Windows account controls are the next choice");
+assert(api.chooseAnchor(doc).el === meta, "the left rail takes precedence over Windows header controls");
+rail.getBoundingClientRect = () => box(200, 100, 0);
+assert(api.chooseAnchor(doc).el === controls, "header controls remain available when no rail exists");
+rail.getBoundingClientRect = () => box(64, 800, 0);
 controls.parentNode.removeChild(controls);
 assert(api.anchorPlacement("switcher", "row", 64, 800) === "after", "a narrow rail keeps the button in the column");
 assert(api.anchorPlacement("switcher", "row", 420, 59) === "below", "a horizontal header puts the button under the switcher");

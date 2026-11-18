@@ -53,6 +53,8 @@ windows = { version = "0.61", features = [
   "Win32_Foundation",         # existing
   "Win32_System_Com",         # existing (webview2 permission handler)
   "Win32_System_Threading",   # OpenProcess: leave a live window's temp audio alone
+  "Win32_System_JobObjects",  # stop the private transcription server if the app exits
+  "Win32_NetworkManagement_IpHelper", # verify the private listener's owner
   "Security_Credentials_UI",  # UserConsentVerifier + result/availability enums
   "Win32_System_WinRT",       # IUserConsentVerifierInterop
   "Foundation",

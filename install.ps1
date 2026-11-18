@@ -1,11 +1,10 @@
 # whatRust one-line installer — Windows.
 #
-#   irm https://raw.githubusercontent.com/karem505/whatRust/master/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/evdev/whatRust/master/install.ps1 | iex
 #
-# Downloads the latest published GitHub release installer for this PC's CPU
-# (x64 or ARM64; NSIS .exe, falling back to the .msi) and runs it.
+# Downloads this fork's checked-in installer for this PC's CPU and runs it.
 $ErrorActionPreference = 'Stop'
-$repo = 'karem505/whatRust'
+$repo = 'evdev/whatRust'
 $app  = 'whatRust'
 
 # IsWow64Process2 reports the OS CPU even when this PowerShell is itself emulated.
@@ -57,52 +56,26 @@ public static class WhatRustArch {
   }
 }
 
-Write-Host "Installing $app (latest)..." -ForegroundColor Green
-
-try {
-  $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" `
-    -Headers @{ 'User-Agent' = 'whatrust-installer' }
-} catch {
-  throw "Couldn't reach the GitHub release. Is $repo public with a published release? ($_)"
-}
-
+Write-Host "Installing $app from $repo..." -ForegroundColor Green
 $arch = Get-InstallArch
 Write-Host "CPU architecture: $arch"
-$token = "_$arch"
-$asset = $rel.assets | Where-Object { $_.name -like "*$token-setup.exe" } | Select-Object -First 1
-if (-not $asset) {
-  $asset = $rel.assets | Where-Object { $_.name -like "*$token*.msi" } | Select-Object -First 1
+$name = "whatRust_0.6.13_${arch}-setup.exe"
+# Update these together with the checked-in installers and SHA256SUMS.
+$hashes = @{
+  arm64 = '67f3ff70f2c577121a3c739f915962a91216645d23919604fab9b8b07aa4c770'
+  x64 = 'b30a21f7ce5c508eb3526a9d61a99c5592713fe33336426821160f191c58788f'
 }
-if (-not $asset) {
-  $hint = if ($arch -eq 'arm64') {
-    ' ARM64 builds are attached a few minutes after each release. The x64 installer on the release page runs under emulation, and that copy keeps receiving x64 updates. Run this script again after the ARM64 file is up to install the native build.'
-  } else {
-    ' The build may still be running.'
-  }
-  throw "No $arch installer (.exe or .msi) in the latest release.$hint"
-}
-
-$out = Join-Path $env:TEMP $asset.name
-Write-Host "Downloading $($asset.name)..."
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $out -UseBasicParsing
-
-# GitHub publishes a SHA-256 digest for each release asset; refuse a mismatch.
-$expected = if ($asset.digest -match '^sha256:(?<h>[0-9a-fA-F]{64})$') { $Matches.h } else { $null }
+$expected = $hashes[$arch]
+$out = Join-Path $env:TEMP $name
+Write-Host "Downloading $name..."
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/$repo/master/installers/$name" -OutFile $out -UseBasicParsing
 $actual = (Get-FileHash -Algorithm SHA256 -Path $out).Hash
-if ($expected) {
-  if ($actual -ne $expected) {
-    Remove-Item -Force $out
-    throw "Checksum mismatch for $($asset.name): expected $expected, got $actual. Aborting."
-  }
-  Write-Host "SHA-256 verified: $actual"
-} else {
-  Write-Warning "GitHub published no digest for this asset; SHA-256 is $actual. Compare it with the release notes before trusting the installer."
+if ($actual -ne $expected) {
+  throw "Checksum mismatch for ${name}: expected $expected, got $actual. The installer was not started."
 }
+Write-Host "SHA-256 verified: $actual"
 
 Write-Host "Launching installer..."
-if ($asset.name -match '\.msi$') {
-  Start-Process msiexec.exe -ArgumentList "/i `"$out`"" -Wait
-} else {
-  Start-Process -FilePath $out -Wait
-}
+$process = Start-Process -FilePath $out -Wait -PassThru
+if ($process.ExitCode -ne 0) { throw "Installer exited with code $($process.ExitCode). It may have been cancelled or encountered an error." }
 Write-Host "Done. Launch '$app' from the Start menu." -ForegroundColor Green

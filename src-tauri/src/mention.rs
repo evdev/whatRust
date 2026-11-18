@@ -441,9 +441,15 @@ fn duplicate_photo(
     held: &Held,
 ) -> bool {
     let incoming = Arrival::from_held(held);
-    cards.values().any(|card| incoming.same_photo(&Arrival::from_card(card)))
-        || waiting.iter().any(|item| incoming.same_photo(&Arrival::from_held(item)))
-        || photos.iter().any(|item| incoming.same_photo(&Arrival::from_stamp(item)))
+    cards
+        .values()
+        .any(|card| incoming.same_photo(&Arrival::from_card(card)))
+        || waiting
+            .iter()
+            .any(|item| incoming.same_photo(&Arrival::from_held(item)))
+        || photos
+            .iter()
+            .any(|item| incoming.same_photo(&Arrival::from_stamp(item)))
 }
 
 struct Arrival<'a> {
@@ -646,9 +652,7 @@ fn hold_drop_account(queue: &mut VecDeque<Held>, account: &str) {
 /// keeps an alert that arrived after that send.
 fn hold_drop_chat(queue: &mut VecDeque<Held>, account: &str, chat: &str, sent_at: u64) {
     queue.retain(|held| {
-        !(held.account_label == account
-            && held.chat_id == chat
-            && answered_by(held.at_ms, sent_at))
+        !(held.account_label == account && held.chat_id == chat && answered_by(held.at_ms, sent_at))
     });
 }
 
@@ -799,7 +803,9 @@ pub fn mention_event(
             inner.seen.clear();
             inner.seen.insert(key, now);
         }
-        inner.photos.retain(|stamp| now.duration_since(stamp.when) <= Duration::from_secs(8));
+        inner
+            .photos
+            .retain(|stamp| now.duration_since(stamp.when) <= Duration::from_secs(8));
         if duplicate_photo(&inner.cards, &inner.waiting, &inner.photos, &held) {
             crate::dlog::log("mention: duplicate photo skipped");
             return Ok(());
@@ -1720,11 +1726,8 @@ fn reveal_account(app: &AppHandle, label: &str) {
 mod tests {
     use super::{
         answered_by, boot_script_from, duplicate_photo, hold_drop_chat, hold_push, message_token,
-        popup_origin,
-        prepare_reply,
-        release_of, reply_text,
-        send_script, shown_body, shown_name, shown_preview, Held, Release, FILE_MAX, POPUP_H,
-        POPUP_W,
+        popup_origin, prepare_reply, release_of, reply_text, send_script, shown_body, shown_name,
+        shown_preview, Held, Release, FILE_MAX, POPUP_H, POPUP_W,
     };
     use crate::settings::MentionAccountPrefs;
     use std::collections::{HashMap, VecDeque};
@@ -1868,16 +1871,16 @@ mod tests {
     #[test]
     fn a_picture_keeps_one_token_when_its_id_grows() {
         let token = "AbCdEfGh12345678";
-        assert_eq!(message_token(&format!("false_15551212@c.us_{token}")), token);
+        assert_eq!(
+            message_token(&format!("false_15551212@c.us_{token}")),
+            token
+        );
         assert_eq!(message_token(&format!("false_777@lid_{token}")), token);
         assert_eq!(
             message_token(&format!("false_15551212@c.us_{token}_15551212@c.us")),
             token
         );
-        assert_ne!(
-            message_token("false_15551212@c.us_ZzYyXxWw98765432"),
-            token
-        );
+        assert_ne!(message_token("false_15551212@c.us_ZzYyXxWw98765432"), token);
     }
 
     #[test]

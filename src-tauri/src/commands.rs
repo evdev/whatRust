@@ -164,6 +164,7 @@ pub struct SettingsView {
     /// The OS this build targets ("macos" | "linux" | "windows").
     /// The settings UI shows the platform-only rows only on macOS.
     pub platform: &'static str,
+    pub geniex_transcription: bool,
     /// Whether menu-bar-only mode works on this machine (macOS 14+; see
     /// `menubar::supported`). The UI disables the switch elsewhere rather
     /// than letting the user opt into a mode that would drop the session.
@@ -202,6 +203,7 @@ pub fn get_settings(window: tauri::Webview, app: tauri::AppHandle) -> Result<Set
         ai_key_anthropic: crate::keys::has_key(&app, "anthropic"),
         settings: crate::settings::load(&app),
         platform: std::env::consts::OS,
+        geniex_transcription: cfg!(all(windows, target_arch = "aarch64")),
         menubar_supported: crate::menubar::supported(),
         tiling_wm: crate::decorations::tiling_wm(),
         proxy_in_use: crate::proxy::in_use(),

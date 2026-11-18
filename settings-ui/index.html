@@ -90,15 +90,15 @@
         <div class="boxed-list">
           <label class="row">
             <span class="row-text"><span class="row-title">Transcribe voice notes</span>
-              <span class="row-subtitle">Shows the transcript under each voice note. The audio stays on this computer and is transcribed by FluidVoice.</span></span>
+              <span class="row-subtitle" id="voice_backend_desc">Shows the transcript under each voice note. The audio stays on this computer and is transcribed by FluidVoice.</span></span>
             <input type="checkbox" class="switch" id="voice_transcribe" />
           </label>
           <label class="row">
             <span class="row-text"><span class="row-title">Transcribe videos</span>
-              <span class="row-subtitle">Shows a button on each video. The audio stays on this computer and is transcribed by FluidVoice.</span></span>
+              <span class="row-subtitle" id="video_backend_desc">Shows a button on each video. The audio stays on this computer and is transcribed by FluidVoice.</span></span>
             <input type="checkbox" class="switch" id="video_transcribe" />
           </label>
-          <label class="row">
+          <label class="row" id="fluidvoice_port_row">
             <span class="row-text"><span class="row-title">FluidVoice port</span>
               <span class="row-subtitle">FluidVoice's local API. The default is 47733.</span></span>
             <input type="number" id="fluidvoice_port" min="1" max="65535" value="47733" aria-label="FluidVoice port" />
@@ -112,6 +112,14 @@
             <span class="row-text"><span class="row-title">FluidVoice on Windows</span>
               <span class="row-subtitle">Optional. Opens the official Windows beta installer. FluidVoice is a separate app.</span></span>
             <button type="button" id="install_fluidvoice" class="secondary">Install FluidVoice</button>
+          </div>
+          <div class="row" id="geniex_install_row" hidden>
+            <span class="row-text"><span class="row-title">GenieX CLI for Windows ARM64</span><span class="row-subtitle">Install Qualcomm's GenieX CLI, then return here. Requires a supported Snapdragon NPU.</span></span>
+            <button type="button" id="install_geniex" class="secondary">Open installer page</button>
+          </div>
+          <div class="row" id="geniex_model_row" hidden>
+            <span class="row-text"><span class="row-title">Qwen3-ASR 0.6B Q8</span><span class="row-subtitle">Download the local model (about 1.1 GiB). It may use about 2 GiB of memory while running.</span></span>
+            <button type="button" id="download_geniex_model" class="secondary">Download model</button>
           </div>
           <label class="row">
             <span class="row-text"><span class="row-title">Translate transcripts</span>

@@ -144,6 +144,7 @@ macro_rules! account_webview {
             // so the two never stack or drift apart.
             .zoom_hotkeys_enabled(false)
             .initialization_script(crate::i18n::init_script())
+            .initialization_script(if cfg!(debug_assertions) && std::env::var("WHATRUST_ASR_SMOKE").as_deref() == Ok("1") { "window.__WHATRUST_AUDIO_SMOKE=true;" } else { "" })
             .initialization_script(if cfg!(windows) {
                 format!("window.__WHATRUST_WINDOWS__=true;window.__whatrustNotificationEpoch={};window.__whatrustLocked={};",$app.state::<crate::notify::Recent>().epoch(),!crate::lock::is_unlocked($app))
             } else if crate::sessions::enabled() {
@@ -1634,7 +1635,6 @@ fn allow_popup_microphone_windows(webview: tauri::webview::PlatformWebview) {
         COREWEBVIEW2_PERMISSION_STATE_DENY,
     };
     use webview2_com::PermissionRequestedEventHandler;
-    use windows_core::Interface;
     unsafe {
         let controller = webview.controller();
         let core: ICoreWebView2 = match controller.CoreWebView2() {

@@ -30,6 +30,74 @@
   }
 
   var MAX_VIDEO_BYTES = 64 * 1024 * 1024;
+  var MAX_WAV_BYTES = 20 * 1024 * 1024;
+
+  // Mono 16 kHz PCM WAV, as required by GenieX. No audio leaves this webview
+  // until it is sent to the local application.
+  function pcmWav(samples) {
+    if (samples.length * 2 + 44 > MAX_WAV_BYTES) throw new Error("too_large");
+    var buffer = new ArrayBuffer(44 + samples.length * 2);
+    var view = new DataView(buffer);
+    function tag(at, text) { for (var i = 0; i < text.length; i++) view.setUint8(at + i, text.charCodeAt(i)); }
+    tag(0, "RIFF"); view.setUint32(4, 36 + samples.length * 2, true); tag(8, "WAVE");
+    tag(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true); view.setUint32(24, 16000, true);
+    view.setUint32(28, 32000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    tag(36, "data"); view.setUint32(40, samples.length * 2, true);
+    for (var n = 0; n < samples.length; n++) {
+      var s = Math.max(-1, Math.min(1, samples[n] || 0));
+      view.setInt16(44 + n * 2, s < 0 ? s * 32768 : s * 32767, true);
+    }
+    return new Uint8Array(buffer);
+  }
+
+  function checkAudioDuration(buffer) {
+    return new Promise(function (resolve, reject) {
+      var media = root.document.createElement("audio");
+      var url = root.URL.createObjectURL(new Blob([buffer]));
+      var timer = setTimeout(function () { finish("audio_decode"); }, 15000);
+      function finish(error) {
+        clearTimeout(timer);
+        media.onloadedmetadata = media.onerror = null;
+        media.removeAttribute("src");
+        media.load();
+        root.URL.revokeObjectURL(url);
+        if (error) reject(new Error(error)); else resolve();
+      }
+      media.preload = "metadata";
+      media.onloadedmetadata = function () {
+        var seconds = media.duration;
+        if (!isFinite(seconds) || seconds <= 0) return finish("audio_decode");
+        if (Math.ceil(seconds * 16000) * 2 + 44 > MAX_WAV_BYTES) return finish("too_large");
+        finish();
+      };
+      media.onerror = function () { finish("audio_decode"); };
+      media.src = url;
+    });
+  }
+
+  async function toWav(buffer) {
+    var Context = root.AudioContext || root.webkitAudioContext;
+    var Offline = root.OfflineAudioContext || root.webkitOfflineAudioContext;
+    if (!Context || !Offline) throw new Error("audio_decode");
+    await checkAudioDuration(buffer);
+    var context = new Context();
+    try {
+      var decoded = await context.decodeAudioData(buffer);
+      var frames = Math.ceil(decoded.duration * 16000);
+      if (!frames || frames * 2 + 44 > MAX_WAV_BYTES) throw new Error("too_large");
+      var offline = new Offline(1, frames, 16000);
+      var source = offline.createBufferSource();
+      source.buffer = decoded;
+      source.connect(offline.destination);
+      source.start(0);
+      var rendered = await offline.startRendering();
+      return pcmWav(rendered.getChannelData(0));
+    } catch (e) {
+      if (e && e.message === "too_large") throw e;
+      throw new Error("audio_decode");
+    } finally { await context.close().catch(function () {}); }
+  }
 
   function messageFlag(msg, name) {
     if (!msg) return false;
@@ -425,6 +493,9 @@
     var text = code && code.message ? code.message : code;
     text = String(text || "error");
     if (text.indexOf("fluidvoice") !== -1) return L("FluidVoice não respondeu. Abra o FluidVoice e ative a API local.", "FluidVoice did not respond. Open FluidVoice and turn on its local API.");
+    if (text.indexOf("geniex_missing") !== -1 || text.indexOf("geniex_model_missing") !== -1) return L("Instale o GenieX e o modelo Q8 em Configurações → Transcrição.", "Install GenieX and the Q8 model in Settings → Transcription.");
+    if (text.indexOf("geniex_") !== -1) return L("A transcrição local falhou. Verifique o GenieX e a NPU nas configurações.", "Local transcription failed. Check GenieX and NPU availability in Settings.");
+    if (text.indexOf("audio_decode") !== -1) return L("Não foi possível decodificar o áudio deste arquivo.", "Could not decode this audio on this computer.");
     if (text.indexOf("no_audio") !== -1) return L("Este vídeo não tem áudio para transcrever.", "This video has no audio to transcribe.");
     if (text.indexOf("too_large") !== -1) return L("Esta nota é longa demais para transcrever.", "This note is too long to transcribe.");
     if (text.indexOf("no_key") !== -1) return L("Falta a chave da API nas configurações.", "The API key is missing in Settings.");
@@ -583,11 +654,15 @@
       renderBox: renderBox,
       panelStyle: panelStyle,
       parseColor: parseColor,
+      pcmWav: pcmWav,
+      toWav: toWav,
     };
     return;
   }
 
-  var prefs = { enabled: false, video: false, translate: false, target: "English" };
+  if (root.__WHATRUST_AUDIO_SMOKE) root.__whatrustAudioSmoke = { toWav: toWav, pack: pack, view: function (id) { return known[id]; }, state: function (id) { return { checking: !!checking[id], queued: queue.state(id), retryAt: retryAt[id] || 0, enabled: prefs.enabled }; } };
+
+  var prefs = { enabled: false, video: false, translate: false, geniex: false, target: "English" };
   function crumb(msg) {
     var tauri = root.__TAURI__;
     if (!tauri || !tauri.core || typeof tauri.core.invoke !== "function") return;
@@ -655,9 +730,11 @@
     paint(id);
     return root.WPP.chat.downloadMedia(id).then(function (blob) {
       if (!blob || typeof blob.arrayBuffer !== "function") throw new Error("bad_audio");
+      if (typeof blob.size === "number" && blob.size > MAX_WAV_BYTES) throw new Error("too_large");
       return blob.arrayBuffer();
     }).then(function (buffer) {
-      var bytes = new Uint8Array(buffer);
+      return prefs.geniex ? toWav(buffer) : new Uint8Array(buffer);
+    }).then(function (bytes) {
       if (!bytes.length) throw new Error("bad_audio");
       return invoke("transcribe_voice", pack(id, bytes, times[id])).then(function (view) {
         crumb("voice: transcribed bytes=" + bytes.length);
@@ -687,7 +764,9 @@
       return blob.arrayBuffer();
     }).then(function (buffer) {
       if (!buffer || !prefs.video) return null;
-      var bytes = new Uint8Array(buffer);
+      return prefs.geniex ? toWav(buffer) : new Uint8Array(buffer);
+    }).then(function (bytes) {
+      if (!bytes || !prefs.video) return null;
       if (!bytes.length) throw new Error("bad_audio");
       if (bytes.length > MAX_VIDEO_BYTES) throw new Error("too_large");
       return invoke("transcribe_video", pack(id, bytes, times[id])).then(function (view) {
@@ -1035,6 +1114,7 @@
         enabled: !!next.enabled,
         video: !!next.video,
         translate: !!next.translate,
+        geniex: !!next.geniex,
         target: next.target || "English",
       };
     }

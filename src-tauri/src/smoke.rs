@@ -58,6 +58,10 @@ fn fills_client(app: &AppHandle, label: &str) -> bool {
 }
 pub fn start(app: &AppHandle) {
     let app = app.clone();
+    if std::env::var("WHATRUST_ASR_SMOKE").as_deref() == Ok("1") {
+        std::thread::spawn(move || asr_smoke(app));
+        return;
+    }
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(8));
         let mut result: Vec<Value> = vec![];
@@ -526,4 +530,190 @@ pub fn start(app: &AppHandle) {
         }
         app.exit(if passed { 0 } else { 1 });
     });
+}
+
+// Runs in the isolated smoke profile with a public test recording, never a
+// linked WhatsApp account. Exercises WebView2 conversion, remote IPC, model
+// startup, NPU inference and transcript persistence together.
+#[cfg(target_arch = "aarch64")]
+fn asr_smoke(app: AppHandle) {
+    let run = || -> Result<(), String> {
+        let source = std::env::var_os("WHATRUST_ASR_TEST_WAV").ok_or("missing test WAV")?;
+        let bytes = std::fs::read(source).map_err(|e| e.to_string())?;
+        let encoded = serde_json::to_string(&crate::window::base64_encode(&bytes))
+            .map_err(|e| e.to_string())?;
+        let missing_kind = std::env::var("WHATRUST_ASR_EXPECT_MISSING").unwrap_or_default();
+        let missing = missing_kind == "1" || missing_kind == "cli";
+        let expected_error = if missing_kind == "cli" {
+            "geniex_missing"
+        } else {
+            "geniex_model_missing"
+        };
+        let video = if missing {
+            String::new()
+        } else {
+            let path = std::env::var_os("WHATRUST_ASR_TEST_VIDEO").ok_or("missing test video")?;
+            crate::window::base64_encode(&std::fs::read(path).map_err(|e| e.to_string())?)
+        };
+        let video_encoded = serde_json::to_string(&video).map_err(|e| e.to_string())?;
+        let label = crate::accounts::window_label(&crate::accounts::load(&app).accounts[0].id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let mut ready = false;
+        while std::time::Instant::now() < deadline {
+            if eval(
+                &app,
+                &label,
+                "!!window.__whatrustAudioSmoke && !!window.__TAURI__",
+            )
+            .unwrap_or_default()
+                == "true"
+            {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if !ready {
+            return Err("remote webview did not become ready".into());
+        }
+        let script = r#"(async function() {
+          try {
+            const raw = Uint8Array.from(atob($ENCODED), c => c.charCodeAt(0));
+            const id = 'false_123@c.us_SMOKE' + Date.now();
+            const videoRaw = Uint8Array.from(atob($VIDEO), c => c.charCodeAt(0));
+            const videoId = 'false_123@c.us_VIDEO' + Date.now();
+            if (!window.WPP) window.WPP = { isReady:true, chat:{} };
+            if (!window.WPP.chat) window.WPP.chat = {};
+            let lookups = 0, downloads = 0;
+            window.WPP.chat.getMessageById = async () => { lookups++; return {type:'ptt', t:Date.now()}; };
+            window.WPP.chat.downloadMedia = async noteId => { downloads++; return new Blob([noteId === videoId ? videoRaw : raw]); };
+            window.WPP.isReady = true;
+            window.__whatrustVoicePrefs({enabled:true, video:true, geniex:true, translate:false});
+            async function waitView(noteId) {
+              const until = Date.now() + 45000;
+              while (Date.now() < until) {
+                const view = window.__whatrustAudioSmoke.view(noteId);
+                if (view && (view.status === 'ready' || view.status === 'error')) return view;
+                await new Promise(resolve => setTimeout(resolve, 200));
+              }
+              throw Error('queue timed out: ' + JSON.stringify({state:window.__whatrustAudioSmoke.state(noteId), view:window.__whatrustAudioSmoke.view(noteId), lookups, downloads}));
+            }
+            window.__whatrustVoiceEnsure(id);
+            const view = await waitView(id);
+            if (view.status === 'error') {
+              const after = await window.__TAURI__.core.invoke('voice_lookup', {id});
+              if ($MISSING && String(view.notice).includes($ERROR) && after.status === 'missing') { window.__asrSmokeResult = 'pass'; return; }
+              throw Error(view.notice);
+            }
+            const stored = await window.__TAURI__.core.invoke('voice_lookup', {id});
+            if (!(view.status === 'ready' && /country/i.test(view.text) && stored.status === 'ready' && stored.text === view.text)) throw Error('voice or persisted transcript incorrect');
+            window.__whatrustVideoTranscribe(videoId);
+            const videoView = await waitView(videoId);
+            const videoStored = await window.__TAURI__.core.invoke('voice_lookup', {id:videoId});
+            window.__asrSmokeResult = (videoView.status === 'ready' && /whatsapp/i.test(videoView.text) && videoStored.status === 'ready' && videoStored.text === videoView.text) ? 'pass' : 'unexpected video result';
+          } catch (e) { window.__asrSmokeResult = 'error: ' + String(e); }
+        })();"#.replace("$ENCODED", &encoded).replace("$VIDEO", &video_encoded).replace("$ERROR", &serde_json::to_string(expected_error).unwrap()).replace("$MISSING", if missing { "true" } else { "false" });
+        eval(&app, &label, &script)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(180);
+        loop {
+            let state = eval(&app, &label, "window.__asrSmokeResult || 'waiting'")?;
+            let state: String = serde_json::from_str(&state).unwrap_or(state);
+            if state == "pass" {
+                break;
+            }
+            if state != "waiting" {
+                return Err(state);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("transcription timed out".into());
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        crate::sessions::open_panel(&app, Some("main")).map_err(|e| e.to_string())?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut settings_ready = false;
+        while std::time::Instant::now() < deadline {
+            let check = if missing_kind == "cli" {
+                "document.getElementById('test_fluidvoice')?.textContent === 'Test NPU' && !document.getElementById('geniex_install_row').hidden && document.getElementById('fluidvoice_port_row').hidden && /Install GenieX CLI/.test(document.getElementById('fluidvoice_status').textContent)"
+            } else if missing {
+                "document.getElementById('test_fluidvoice')?.textContent === 'Test NPU' && !document.getElementById('geniex_model_row').hidden && document.getElementById('fluidvoice_port_row').hidden && /Download the Qwen3-ASR Q8 model/.test(document.getElementById('fluidvoice_status').textContent)"
+            } else {
+                "document.getElementById('test_fluidvoice')?.textContent === 'Test NPU' && !document.getElementById('geniex_model_row').hidden && document.getElementById('fluidvoice_port_row').hidden && /installed/.test(document.getElementById('fluidvoice_status').textContent)"
+            };
+            if eval(&app, "settings", check).unwrap_or_default() == "true" {
+                settings_ready = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if !settings_ready {
+            return Err("GenieX settings did not load correctly".into());
+        }
+        if !missing {
+            eval(
+                &app,
+                "settings",
+                "document.getElementById('download_geniex_model').click()",
+            )?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let status = eval(
+                    &app,
+                    "settings",
+                    "document.getElementById('fluidvoice_status').textContent",
+                )?;
+                if status.contains("GenieX and Qwen3-ASR Q8 are installed") {
+                    break;
+                }
+                if status.contains("Model download failed") {
+                    return Err(status);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err("model setup check timed out".into());
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+        eval(
+            &app,
+            "settings",
+            "document.getElementById('test_fluidvoice').click()",
+        )?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            let status = eval(
+                &app,
+                "settings",
+                "document.getElementById('fluidvoice_status').textContent",
+            )?;
+            if !missing && status.contains("responded on the NPU") {
+                return Ok(());
+            }
+            if status.contains("NPU test failed") {
+                return if missing && status.contains(expected_error) {
+                    Ok(())
+                } else {
+                    Err(status)
+                };
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("settings NPU test timed out".into());
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    };
+    let result = run();
+    if let Some(path) = std::env::var_os("WHATRUST_SMOKE_REPORT") {
+        let report = match &result {
+            Ok(()) => json!({"passed": true}),
+            Err(e) => json!({"passed": false, "error": e}),
+        };
+        let _ = std::fs::write(path, serde_json::to_string_pretty(&report).unwrap());
+    }
+    app.exit(if result.is_ok() { 0 } else { 1 });
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn asr_smoke(app: AppHandle) {
+    app.exit(1);
 }

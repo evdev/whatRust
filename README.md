@@ -153,6 +153,11 @@ OS supports it — before showing your chats. Enable it under **Settings → Sec
 
 ## Installation
 
+The Windows installers below are built from **this fork**. The Linux and macOS
+one-line installers in the next sections point to the upstream project, so
+they do not include this fork's changes; build this checkout from source on
+those platforms if you need the customized version.
+
 **Linux Flatpak (x86_64 or ARM64)** — one line:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/karem505/whatRust/master/install-flatpak.sh | sh
@@ -177,13 +182,21 @@ Installs the AppImage to `~/.local/bin` on Linux (with an application-menu entry
 >
 > Installing with the `install.sh` line above avoids this. Updates installed by whatRust itself are not affected.
 
-**Windows** — one line (PowerShell):
-```powershell
-irm https://raw.githubusercontent.com/karem505/whatRust/master/install.ps1 | iex
-```
-Downloads and runs the NSIS installer (`.exe`) that matches this PC (x64 or ARM64); an `.msi` for the same architecture is also on the release page. The ARM64 files are built separately and can appear a few minutes after the rest of the release. The NSIS setup program itself is x86 and installs a native ARM64 app.
+**Windows (this fork)** — download the installer for your PC:
 
-**Manual download** — grab a `.flatpak`, `.AppImage`/`.deb`, `.dmg`, `.exe`, or `.msi` from the [latest release](https://github.com/karem505/whatRust/releases/latest).
+- [Windows ARM64 setup](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.6.13_arm64-setup.exe) — Snapdragon and other ARM64 PCs
+- [Windows x64 setup](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.6.13_x64-setup.exe) — Intel and AMD PCs
+
+Or let PowerShell choose the architecture and verify its SHA-256 before opening
+the setup program:
+```powershell
+irm https://raw.githubusercontent.com/evdev/whatRust/master/install.ps1 | iex
+```
+The NSIS setup program itself is x86 and installs the native x64 or ARM64 app.
+The ARM64 transcription feature additionally needs Qualcomm GenieX CLI and
+the Qwen3-ASR Q8 model; Settings → Transcription guides you through that setup.
+
+**Upstream manual downloads** — the [upstream release](https://github.com/karem505/whatRust/releases/latest) has `.flatpak`, `.AppImage`/`.deb`, `.dmg`, `.exe`, and `.msi` files, but does not include this fork's customizations.
 
 <details>
 <summary><b>Build from source</b> (Rust + Cargo + Tauri CLI)</summary>
@@ -299,7 +312,7 @@ whatRust doesn't talk to WhatsApp's servers itself: it shows the official `web.w
 - **Linux launcher/dock badge**: the unread count is also sent to the launcher icon via the Unity `LauncherEntry` D-Bus API (.deb, AppImage with its `install.sh` desktop entry, and Flatpak). It shows on KDE Plasma's task manager, Dash to Dock / Ubuntu Dock, Plank and Latte; stock GNOME shows no app-icon badge without one of those extensions.
 - **Notification click** focuses the window on Windows only — elsewhere use the tray icon or the global shortcut.
 - **macOS** builds are unsigned and currently Apple Silicon (arm64) only. A `.dmg` downloaded with a browser shows "whatRust is damaged" until its quarantine flag is cleared (see Install).
-- **Windows ARM64** is a separate build attached after the rest of a release, so a brand-new release can lack the ARM64 installer for a few minutes. The one-line installer picks x64 or ARM64 from the PC's CPU. Voice-note transcription downloads FluidVoice's x64 Windows installer, which runs under emulation on ARM64.
+- **Windows ARM64** is a separate build attached after the rest of a release, so a brand-new release can lack the ARM64 installer for a few minutes. The one-line installer picks x64 or ARM64 from the PC's CPU. On ARM64, voice and video transcription use Qualcomm GenieX with Qwen3-ASR 0.6B Q8 locally; install GenieX CLI and download the model in Settings → Transcription. This requires a supported Snapdragon NPU, about 1.1 GiB of model storage, and additional memory while running. Audio is converted locally and sent to a private loopback server started by whatRust. Other platforms retain their FluidVoice setup.
 - **macOS and Windows file drops** go directly to WhatsApp through the native webview. Drag files from Finder/File Explorer onto the open conversation; use the attach (+) button if a drag source does not provide a file the webview can read.
 - **Linux drag-and-drop limits**: up to 200 files per drop, 500 MB per file, and 500 MB per drop total. Base64 transport is decoded incrementally while files stream in, but the page must still hold the final `File` data in memory. Larger batches can always be sent via WhatsApp's attach (+) → Document picker, which is not routed through these limits. Skipped files are reported in a notification. Native drops on macOS and Windows follow WhatsApp's own attachment limits.
 - **Multiple accounts on macOS** require macOS 14+ (older macOS runs a single account); Linux and Windows are unrestricted.

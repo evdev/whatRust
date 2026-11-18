@@ -41,6 +41,8 @@
     "allow-open-notification-settings",
     "allow-fluidvoice-status",
     "allow-open-fluidvoice-windows",
+    "allow-geniex-download",
+    "allow-geniex-test",
     "allow-set-ai-key",
     "allow-list-ai-models",
     "allow-clear-chat-summary-consent",

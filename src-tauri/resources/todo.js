@@ -195,15 +195,16 @@
     if (!doc || typeof doc.getElementById !== "function") return null;
     var switcher = doc.getElementById("__whatrust_accounts");
     if (switcher && switcher.parentNode) return { el: switcher, mode: "switcher" };
+    var rail = findRail(doc);
+    if (rail) {
+      var meta = findMetaButton(rail);
+      if (meta && meta.parentNode) return { el: meta, mode: "rail" };
+      var buttons = collectButtons(rail);
+      var last = buttons.length ? buttons[buttons.length - 1] : null;
+      if (last && last.parentNode) return { el: last, mode: "rail" };
+    }
     var controls = doc.getElementById("__whatrust_controls");
     if (controls && controls.parentNode) return { el: controls, mode: "switcher" };
-    var rail = findRail(doc);
-    if (!rail) return null;
-    var meta = findMetaButton(rail);
-    if (meta && meta.parentNode) return { el: meta, mode: "rail" };
-    var buttons = collectButtons(rail);
-    var last = buttons.length ? buttons[buttons.length - 1] : null;
-    if (last && last.parentNode) return { el: last, mode: "rail" };
     return null;
   }
 
@@ -1583,7 +1584,7 @@
     if (!replyButton || !replyButton.isConnected) replyButton = buildReplyTab();
     styleTab(tabButton, choice.mode);
     styleTab(replyButton, choice.mode);
-    if (choice.el.id === "__whatrust_accounts") stackUnder([tabButton, replyButton], choice.el);
+    if (choice.el.id === "__whatrust_accounts" || choice.mode === "rail") stackUnder([tabButton, replyButton], choice.el);
     else {
       insertAfter(choice.el, tabButton);
       insertAfter(tabButton, replyButton);

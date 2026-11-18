@@ -101,6 +101,8 @@ fn main() {
             "reset_app_lock",
             "fluidvoice_status",
             "open_fluidvoice_windows",
+            "geniex_download",
+            "geniex_test",
             "set_ai_key",
             "list_ai_models",
             "clear_chat_summary_consent",
