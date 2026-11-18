@@ -5,6 +5,10 @@ on:
       - 'installers/**'
       - 'install.ps1'
       - 'scripts/test-windows-bootstrap.ps1'
+      - 'scripts/test-transcription-setup.ps1'
+      - 'src-tauri/windows/transcription-setup.ps1'
+      - 'src-tauri/windows/transcription-hooks.nsh'
+      - 'src-tauri/windows/installer.nsi'
       - '.github/workflows/installer-check.yml'
   workflow_dispatch:
 
@@ -29,6 +33,9 @@ jobs:
       - name: Test architecture selection and checksum verification
         shell: pwsh
         run: ./scripts/test-windows-bootstrap.ps1
+      - name: Test transcription setup decisions
+        shell: pwsh
+        run: ./scripts/test-transcription-setup.ps1
       - name: Check, install and start the packaged app
         shell: pwsh
         env:

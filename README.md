@@ -193,8 +193,14 @@ the setup program:
 irm https://raw.githubusercontent.com/evdev/whatRust/master/install.ps1 | iex
 ```
 The NSIS setup program itself is x86 and installs the native x64 or ARM64 app.
-The ARM64 transcription feature additionally needs Qualcomm GenieX CLI and
-the Qwen3-ASR Q8 model; Settings → Transcription guides you through that setup.
+Its optional **Install transcription tools** choice is selected by default:
+on ARM64 it installs Qualcomm GenieX CLI and downloads Qwen3-ASR 0.6B Q8
+(about 1.2 GiB total, and a supported Snapdragon NPU is required). On x64 it
+installs FluidVoice; open FluidVoice afterward, download a speech model, and
+enable its local API. Existing installations and models are kept. If you skip
+this step or it fails, use Settings → Transcription to set it up later.
+Silent setup (`/S`) skips transcription downloads unless `/TRANSCRIBE` is
+explicitly supplied.
 
 **Upstream manual downloads** — the [upstream release](https://github.com/karem505/whatRust/releases/latest) has `.flatpak`, `.AppImage`/`.deb`, `.dmg`, `.exe`, and `.msi` files, but does not include this fork's customizations.
 

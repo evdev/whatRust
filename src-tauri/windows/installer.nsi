@@ -77,6 +77,9 @@ Var UpdateMode
 Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
+Var WantTranscription
+Var TranscriptionCheckbox
+Var TranscriptionPageVisited
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -409,6 +412,42 @@ Var AppStartMenuFolder
 !endif
 !insertmacro MUI_PAGE_STARTMENU Application $AppStartMenuFolder
 
+; Optional transcription dependencies. Silent/passive installs never download
+; them unless /TRANSCRIBE is explicitly supplied on the command line.
+Page custom TranscriptionPage TranscriptionPageLeave
+Function TranscriptionPage
+  ${If} ${Silent}
+  ${OrIf} $PassiveMode = 1
+  ${OrIf} $UpdateMode = 1
+    Abort
+  ${EndIf}
+  !insertmacro MUI_HEADER_TEXT "$(wrTranscriptionTitle)" "$(wrTranscriptionSubtitle)"
+  nsDialogs::Create 1018
+  Pop $0
+  ${If} $0 == error
+    Abort
+  ${EndIf}
+  ${NSD_CreateLabel} 0 0 100% 58u "$(wrTranscriptionDescription)"
+  Pop $0
+  ${NSD_CreateCheckbox} 0 66u 100% 18u "$(wrTranscriptionCheckbox)"
+  Pop $TranscriptionCheckbox
+  ${If} $TranscriptionPageVisited != 1
+  ${OrIf} $WantTranscription = 1
+    ${NSD_Check} $TranscriptionCheckbox
+  ${EndIf}
+  StrCpy $TranscriptionPageVisited 1
+  ${NSD_OnClick} $TranscriptionCheckbox TranscriptionCheckboxChanged
+  nsDialogs::Show
+FunctionEnd
+Function TranscriptionCheckboxChanged
+  Pop $0
+  ${NSD_GetState} $TranscriptionCheckbox $WantTranscription
+FunctionEnd
+Function TranscriptionPageLeave
+  ${NSD_GetState} $TranscriptionCheckbox $WantTranscription
+  StrCpy $TranscriptionPageVisited 1
+FunctionEnd
+
 ; 7. Installation page
 !insertmacro MUI_PAGE_INSTFILES
 
@@ -480,12 +519,34 @@ FunctionEnd
 {{#each languages}}
 !insertmacro MUI_LANGUAGE "{{this}}"
 {{/each}}
+LangString wrTranscriptionTitle ${LANG_ENGLISH} "Transcription tools"
+LangString wrTranscriptionSubtitle ${LANG_ENGLISH} "Optional local voice and video transcription"
+LangString wrTranscriptionCheckbox ${LANG_ENGLISH} "Install transcription tools"
+LangString wrTranscriptionFailed ${LANG_ENGLISH} "whatRust was installed, but transcription setup did not finish. Check the installation details and retry from Settings > Transcription."
+LangString wrFluidVoiceNext ${LANG_ENGLISH} "Open FluidVoice, complete its model setup, and enable its local API before using transcription in whatRust."
+LangString wrTranscriptionTitle ${LANG_PORTUGUESEBR} "Ferramentas de transcrição"
+LangString wrTranscriptionSubtitle ${LANG_PORTUGUESEBR} "Transcrição local opcional de áudio e vídeo"
+LangString wrTranscriptionCheckbox ${LANG_PORTUGUESEBR} "Instalar ferramentas de transcrição"
+LangString wrTranscriptionFailed ${LANG_PORTUGUESEBR} "O whatRust foi instalado, mas a configuração da transcrição não terminou. Consulte os detalhes e tente novamente em Configurações > Transcrição."
+LangString wrFluidVoiceNext ${LANG_PORTUGUESEBR} "Abra o FluidVoice, configure seu modelo e ative a API local antes de usar a transcrição no whatRust."
+!if "${ARCH}" == "arm64"
+  LangString wrTranscriptionDescription ${LANG_ENGLISH} "Installs Qualcomm GenieX CLI and Qwen3-ASR 0.6B Q8. Requires a supported Snapdragon NPU, an internet connection, and about 1.2 GiB of downloads. Existing installations and models are kept. You can also set this up later in Settings."
+  LangString wrTranscriptionDescription ${LANG_PORTUGUESEBR} "Instala o Qualcomm GenieX CLI e o Qwen3-ASR 0.6B Q8. Requer uma NPU Snapdragon compatível, internet e cerca de 1,2 GiB de downloads. Instalações e modelos existentes são mantidos. Também pode configurar depois."
+!else
+  LangString wrTranscriptionDescription ${LANG_ENGLISH} "Installs FluidVoice for Windows (about 12 MB). After setup, open FluidVoice, choose and download a speech model, and enable its local API. An existing installation is kept. You can also set this up later in Settings."
+  LangString wrTranscriptionDescription ${LANG_PORTUGUESEBR} "Instala o FluidVoice para Windows (cerca de 12 MB). Depois, abra o FluidVoice, escolha e baixe um modelo de fala e ative sua API local. Uma instalação existente é mantida. Também pode configurar depois."
+!endif
 !insertmacro MUI_RESERVEFILE_LANGDLL
 {{#each language_files}}
   !include "{{this}}"
 {{/each}}
 
 Function .onInit
+  StrCpy $WantTranscription 0
+  ${GetOptions} $CMDLINE "/TRANSCRIBE" $R0
+  ${IfNot} ${Errors}
+    StrCpy $WantTranscription 1
+  ${EndIf}
   ${GetOptions} $CMDLINE "/P" $PassiveMode
   ${IfNot} ${Errors}
     StrCpy $PassiveMode 1
@@ -779,6 +840,31 @@ Section Install
   ${If} $PassiveMode = 1
   ${OrIf} ${Silent}
     Call CreateOrUpdateDesktopShortcut
+  ${EndIf}
+
+  ${If} $WantTranscription = 1
+    DetailPrint "$(wrTranscriptionTitle)..."
+    SetDetailsView show
+    InitPluginsDir
+    File "/oname=$PLUGINSDIR\whatrust-transcription-setup.ps1" "${TRANSCRIPTION_SETUP_SOURCE}"
+    nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\whatrust-transcription-setup.ps1" -Architecture "${ARCH}"'
+    Pop $0
+    ${If} $0 != 0
+      DetailPrint "$(wrTranscriptionFailed)"
+      ${If} ${Silent}
+      ${OrIf} $PassiveMode = 1
+        SetErrorLevel 1
+      ${Else}
+        MessageBox MB_OK|MB_ICONEXCLAMATION "$(wrTranscriptionFailed)"
+      ${EndIf}
+    ${Else}
+      !if "${ARCH}" == "x64"
+        ${IfNot} ${Silent}
+        ${AndIf} $PassiveMode != 1
+          MessageBox MB_OK|MB_ICONINFORMATION "$(wrFluidVoiceNext)"
+        ${EndIf}
+      !endif
+    ${EndIf}
   ${EndIf}
 
   !ifmacrodef NSIS_HOOK_POSTINSTALL

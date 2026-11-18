@@ -62,8 +62,8 @@ Write-Host "CPU architecture: $arch"
 $name = "whatRust_0.6.13_${arch}-setup.exe"
 # Update these together with the checked-in installers and SHA256SUMS.
 $hashes = @{
-  arm64 = '67f3ff70f2c577121a3c739f915962a91216645d23919604fab9b8b07aa4c770'
-  x64 = 'b30a21f7ce5c508eb3526a9d61a99c5592713fe33336426821160f191c58788f'
+  arm64 = 'bb0cc2e0ba926551faba506c8cfcf4240216de01da1168ff8aa8980d09c3ae76'
+  x64 = '83bfeeb69afa04bd4ea1b68bd5f084e9b00cc0ea4384c47ae00084eb6d073edb'
 }
 $expected = $hashes[$arch]
 $out = Join-Path $env:TEMP $name

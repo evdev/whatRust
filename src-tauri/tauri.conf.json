@@ -58,7 +58,8 @@
         ],
         "installMode": "currentUser",
         "startMenuFolder": "whatRust",
-        "template": "windows/installer.nsi"
+        "template": "windows/installer.nsi",
+        "installerHooks": "windows/transcription-hooks.nsh"
       }
     }
   }
