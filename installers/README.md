@@ -1,4 +1,11 @@
-# Windows installers
+# Installers
+
+The macOS file is an unsigned Apple Silicon disk image,
+`whatRust_0.6.14_aarch64.dmg`. Open it, drag whatRust into Applications, and
+clear the quarantine flag once with
+`xattr -dr com.apple.quarantine /Applications/whatRust.app`.
+
+## Windows installers
 
 The checked-in setup files install this fork for the current Windows user.
 Choose `arm64` for a Windows-on-ARM PC or `x64` for an Intel/AMD PC. The

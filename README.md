@@ -153,10 +153,10 @@ OS supports it — before showing your chats. Enable it under **Settings → Sec
 
 ## Installation
 
-The Windows installers below are built from **this fork**. The Linux and macOS
-one-line installers in the next sections point to the upstream project, so
-they do not include this fork's changes; build this checkout from source on
-those platforms if you need the customized version.
+The Windows installers and the macOS disk image below are built from **this fork**.
+The Linux one-line installers in the next sections point to the upstream project,
+so they do not include this fork's changes; build this checkout from source on
+Linux if you need the customized version.
 
 **Linux Flatpak (x86_64 or ARM64)** — one line:
 ```bash
@@ -181,6 +181,13 @@ Installs the AppImage to `~/.local/bin` on Linux (with an application-menu entry
 > ```
 >
 > Installing with the `install.sh` line above avoids this. Updates installed by whatRust itself are not affected.
+
+**macOS (this fork, Apple Silicon)** — [whatRust 0.6.14 disk image](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.6.14_aarch64.dmg).
+Open it and drag whatRust into Applications, then clear the download quarantine once:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/whatRust.app
+```
 
 **Windows (this fork)** — download the installer for your PC:
 
