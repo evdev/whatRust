@@ -544,19 +544,29 @@ pub fn todo_toggle_done(
     let (_, snapshot) = with_file(&app, &account_id, |file| {
         let item = find_mut(file, &id)?;
         let done = done.unwrap_or(!item.done);
-        item.done = done;
-        if done {
-            item.completed_at = Some(now);
-            item.fired = true;
-        } else {
-            item.completed_at = None;
-            if effective_remind_at(item).is_some_and(|t| t > now) {
-                item.fired = false;
-            }
-        }
+        set_done(item, done, now);
         Ok(())
     })?;
     finish(&app, &account_id, snapshot)
+}
+
+fn set_done(item: &mut TodoItem, done: bool, now: u64) {
+    let was_done = item.done;
+    item.done = done;
+    if done {
+        item.completed_at = Some(now);
+        item.fired = true;
+    } else {
+        item.completed_at = None;
+        // Reopening a reply watch starts a new observation window. Without
+        // this, catch-up immediately clears it again using the old reply.
+        if was_done && item.kind.is_watch() {
+            item.created_at = now;
+        }
+        if effective_remind_at(item).is_some_and(|t| t > now) {
+            item.fired = false;
+        }
+    }
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -827,6 +837,9 @@ fn add_item(file: &mut TodoFile, draft: TodoDraft, now: u64) -> Result<(), EditE
             // it. Only an untitled item takes the message's first line.
             // Marking the other reply kind switches the open watch.
             if kind.is_watch() {
+                if existing.kind != kind {
+                    existing.created_at = now;
+                }
                 existing.kind = kind;
             }
             if existing.title.trim().is_empty() {
@@ -1586,8 +1599,23 @@ mod tests {
         add_item(&mut file, owe, 1_700_000_000_100).unwrap();
         assert_eq!(file.items.len(), 1);
         assert_eq!(file.items[0].kind, ItemKind::Owe);
+        assert_eq!(file.items[0].created_at, 1_700_000_000_100);
         assert_eq!(file.items[0].title, "keep the question");
         assert_eq!(file.items[0].remind_at, Some(1_700_000_100_000));
+    }
+
+    #[test]
+    fn reopening_a_watch_starts_a_new_observation_window() {
+        let mut file = TodoFile::default();
+        let mut draft = draft_message(&format!("false_15551212@c.us_{}", "A".repeat(20)));
+        draft.kind = Some(ItemKind::Waiting);
+        add_item(&mut file, draft, 1_700_000_000_000).unwrap();
+        let item = &mut file.items[0];
+        set_done(item, true, 1_700_000_010_000);
+        set_done(item, false, 1_700_000_020_000);
+        assert_eq!(item.created_at, 1_700_000_020_000);
+        set_done(item, false, 1_700_000_030_000);
+        assert_eq!(item.created_at, 1_700_000_020_000);
     }
 
     #[test]

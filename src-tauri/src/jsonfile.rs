@@ -77,7 +77,8 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         // Only a file that still parses may replace the backup, so a corrupt
         // main file never overwrites the last good copy.
         if let Ok(old) = std::fs::read(path) {
-            if serde_json::from_slice::<serde::de::IgnoredAny>(&old).is_ok() {
+            let json = old.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&old);
+            if serde_json::from_slice::<serde::de::IgnoredAny>(json).is_ok() {
                 let _ = std::fs::write(backup_path(path), old);
             }
         }
@@ -169,6 +170,14 @@ mod tests {
         let p = scratch("bom");
         std::fs::write(&p, b"\xEF\xBB\xBF{\"n\": 7}").unwrap();
         assert_eq!(read::<V>(&p), Loaded::Ok(V { n: 7 }));
+    }
+
+    #[test]
+    fn bom_file_is_preserved_as_backup_on_save() {
+        let p = scratch("bom-backup");
+        std::fs::write(&p, b"\xEF\xBB\xBF{\"n\": 7}").unwrap();
+        save(&p, &V { n: 8 }).unwrap();
+        assert_eq!(parse::<V>(&backup_path(&p)), Some(V { n: 7 }));
     }
 
     #[test]

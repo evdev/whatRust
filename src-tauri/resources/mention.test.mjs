@@ -574,7 +574,7 @@ pictures.emit("chat.new_message", incoming({
   t: clock,
 }));
 pictures.emit("chat.new_message", incoming({
-  id: "false_999@lid_MmNnBbVvCcXxZzLl",
+  id: "false_15551212@c.us_MmNnBbVvCcXxZzLl",
   type: "image",
   body: jpeg,
   caption: "",
@@ -590,6 +590,13 @@ assert(pictureHits.length === 3
   && pictureHits[1] === "false_15551212@c.us_QqWwEeRrTtYyUuIi"
   && pictureHits[2] === "false_15551212@c.us_ZzYyXxWw98765432",
   "the same photo under a new id alerts once, and a different photo still alerts");
+
+const separateChats = fakeWpp(true);
+const separateHits = [];
+api.attach(separateChats, { now: () => clock, selfIds: () => self, emit: hit => separateHits.push(hit), settle: () => {} });
+separateChats.emit("chat.new_message", incoming({ id: "false_111@c.us_PHOTOONE", from: "111@c.us", type: "image", body: jpeg, t: clock }));
+separateChats.emit("chat.new_message", incoming({ id: "false_222@c.us_PHOTOTWO", from: "222@c.us", type: "image", body: jpeg, t: clock }));
+assert(separateHits.length === 2, "the same image in different chats produces both alerts");
 
 const bundle = readFileSync(join(here, "wppconnect-wa.js"), "utf8");
 assert(bundle.includes("t.sendTextMessage=async function"), "wa-js can send a text message");

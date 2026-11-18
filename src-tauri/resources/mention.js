@@ -393,6 +393,7 @@
         var media = field(msg, "mediaData");
         return {
           chat: hit.chatId,
+          senderId: hit.senderId,
           sender: personName(msg, hit.senderId),
           caption: textOf(msg).slice(0, 180),
           hash: String(field(msg, "filehash") || field(media, "filehash") || ""),
@@ -401,6 +402,10 @@
         };
       }
       function samePhoto(a, b) {
+        // Content can be forwarded to multiple chats (or sent by multiple
+        // people in a group); those are separate notifications.
+        if (!a.chat || !b.chat || a.chat !== b.chat) return false;
+        if (a.senderId && b.senderId && a.senderId !== b.senderId) return false;
         if (Math.abs((a.at || 0) - (b.at || 0)) > 8000) return false;
         if (a.hash && b.hash && a.hash !== b.hash) return false;
         if (a.thumb && b.thumb && a.thumb !== b.thumb) return false;
