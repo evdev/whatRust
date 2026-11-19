@@ -88,6 +88,15 @@ const icon = new El("span");
 icon.setAttribute("data-icon", "audio-play");
 row.appendChild(icon);
 assert(api.looksLikeVoiceRow(row), "a play icon marks the row");
+const chat = { getMessageById: function () {}, downloadMedia: function () {} };
+assert(api.chatApiReady({ chat: chat, isReady: true }), "a ready chat api can transcribe");
+assert(api.chatApiReady({ chat: chat, isReady: false, conn: { isMainReady: function () { return true; } } }), "an already-connected account can transcribe without the loader flag");
+assert(!api.chatApiReady({ chat: chat, isReady: false, conn: { isMainReady: function () { return false; } } }), "a signed-out page waits");
+assert(!api.chatApiReady({ isReady: true }), "missing chat methods wait");
+assert(!api.chatApiReady({
+  get chat() { throw new Error("chat"); },
+  isReady: true,
+}), "a throwing chat lookup does not stick the watcher");
 row.getBoundingClientRect = () => ({ top: 10, bottom: 40, left: 0, right: 80, width: 80, height: 30 });
 assert(api.intersectsViewport(row, { width: 400, height: 300 }), "on-screen row is visible");
 assert(!api.intersectsViewport(row, { width: 400, height: 5 }), "a row below the viewport is not visible");

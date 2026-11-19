@@ -115,7 +115,27 @@ fn wajs_when_ready() -> String {
         r#"(function(){function start(){if(!document.getElementById("pane-side")){setTimeout(start,500);return;}"#,
     );
     script.push_str(include_str!("../resources/wppconnect-wa.js"));
-    script.push_str("\nwindow.__wrScheduleDeliveryStart?.();}start();})();");
+    // conn.main_init is listened for, not replayed. A second account often
+    // reaches main ready while this script is still evaluating, so isReady
+    // stays false and every feature waiting on it (voice included) never arms.
+    // The chat API is already on the page once the loader has injected.
+    script.push_str(
+        r#"
+window.__wrScheduleDeliveryStart?.();
+(function releaseStuckLoader(){
+  try{
+    var w=window.WPP;
+    if(w&&w.loader&&w.isInjected&&!w.isReady&&w.conn&&typeof w.conn.isMainReady==="function"&&w.conn.isMainReady()){
+      w.loader.isReady=true;
+      var t=window.__TAURI__;
+      if(t&&t.core&&typeof t.core.invoke==="function")t.core.invoke("dlog",{msg:"wajs: released stuck loader"}).catch(function(){});
+    }
+  }catch(e){}
+  try{if(window.WPP&&window.WPP.isReady)return;}catch(e){}
+  setTimeout(releaseStuckLoader,500);
+})();
+}start();})();"#,
+    );
     script
 }
 

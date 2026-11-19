@@ -651,6 +651,7 @@
       isVoiceMessage: isVoiceMessage,
       isVideoMessage: isVideoMessage,
       looksLikeVoiceRow: looksLikeVoiceRow,
+      chatApiReady: chatApiReady,
       looksLikeVideoRow: looksLikeVideoRow,
       intersectsViewport: intersectsViewport,
       pack: pack,
@@ -1126,14 +1127,40 @@
     crumb("voice: watching");
   }
 
+  // isReady waits on conn.main_init. That event is not replayed, so a page
+  // that was already connected — the usual case for a second account — leaves
+  // the flag false forever. The chat methods and the live connection are enough.
+  function chatApiReady(wpp) {
+    try {
+      if (!wpp || !wpp.chat) return false;
+      if (typeof wpp.chat.getMessageById !== "function") return false;
+      if (typeof wpp.chat.downloadMedia !== "function") return false;
+    } catch (e) {
+      return false;
+    }
+    var loaderReady = false;
+    try { loaderReady = !!wpp.isReady; } catch (e) { loaderReady = false; }
+    if (loaderReady) return true;
+    try {
+      var conn = wpp.conn;
+      return !!(conn && typeof conn.isMainReady === "function" && conn.isMainReady());
+    } catch (e) {
+      return false;
+    }
+  }
+
   function whenReady(done) {
+    var waits = 0;
     (function tick() {
-      var wpp = root.WPP;
-      if (wpp && wpp.isReady && wpp.chat && typeof wpp.chat.getMessageById === "function" && typeof wpp.chat.downloadMedia === "function") {
+      var ready = false;
+      try { ready = chatApiReady(root.WPP); } catch (e) { ready = false; }
+      if (ready) {
         done();
-      } else {
-        setTimeout(tick, 400);
+        return;
       }
+      waits += 1;
+      if (waits === 25) crumb("voice: waiting for chat api");
+      setTimeout(tick, 400);
     })();
   }
 
