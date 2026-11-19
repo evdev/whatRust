@@ -63,11 +63,11 @@ Write-Host "CPU architecture: $arch"
 $installers = @{
   arm64 = @{
     name = 'whatRust_0.6.16_arm64-setup.exe'
-    sha256 = '77a75e904e83c47ae4196f00295da1be539a75797ede031e391404366313da64'
+    sha256 = '30f59145e8f74db9b8408b177eceb74dcc93fbee94b718d10113962547808d8f'
   }
   x64 = @{
     name = 'whatRust_0.6.16_x64-setup.exe'
-    sha256 = '961accdfd28c072bf165dea02e19b5174b2ed80f2a4f933445800ce00de60930'
+    sha256 = '074d6c4e9cdff6589aeda5ed2a9d3bc7ba2feac1f3191e77596ec9ac1b46c1b3'
   }
 }
 $name = $installers[$arch].name
