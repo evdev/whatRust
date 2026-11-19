@@ -1481,6 +1481,13 @@ fn post_once(
 }
 
 fn fluid_transcribe(port: u16, audio: &[u8], filename: &str) -> Result<String, &'static str> {
+    // A WhatsApp note with a silent gap inside a multi-frame packet is valid
+    // Opus, and it plays, but FluidVoice's decoder rejects the whole file.
+    let repaired = crate::voice_ogg::repair_opus(audio);
+    if repaired.is_some() {
+        crate::dlog::log("voice: repaired opus");
+    }
+    let audio = repaired.as_deref().unwrap_or(audio);
     sweep_note_files();
     #[cfg(windows)]
     if let Some((port, token)) = windows_fluidvoice(port) {

@@ -157,6 +157,259 @@ fn ogg_packets(data: &[u8]) -> Result<Vec<Vec<u8>>, VoiceError> {
     Ok(packets)
 }
 
+/// WhatsApp packs several Opus frames into one packet, and a silent moment is a
+/// frame of length zero. Apple's decoder, which FluidVoice uses, stops on that
+/// packet (`OSStatus -39`) and refuses the whole note. A note that parses
+/// cleanly is returned unchanged. Otherwise the real frames are written back
+/// as ordinary single-frame packets.
+pub(crate) fn repair_opus(data: &[u8]) -> Option<Vec<u8>> {
+    let packets = ogg_packets(data).ok()?;
+    let head = packets
+        .iter()
+        .find(|packet| packet.starts_with(b"OpusHead"))?;
+    let tags = packets
+        .iter()
+        .find(|packet| packet.starts_with(b"OpusTags"))?;
+    let mut frames = Vec::new();
+    let mut repair = false;
+    for packet in &packets {
+        if packet.starts_with(b"OpusHead") || packet.starts_with(b"OpusTags") {
+            continue;
+        }
+        match split_opus_packet(packet) {
+            Ok(split) => {
+                if split.iter().any(|frame| frame.data.is_empty()) {
+                    repair = true;
+                }
+                frames.extend(split.into_iter().filter(|frame| !frame.data.is_empty()));
+            }
+            Err(()) => repair = true,
+        }
+    }
+    if !repair || frames.is_empty() {
+        return None;
+    }
+    remux_opus(head, tags, &frames).ok()
+}
+
+struct OpusFrame {
+    toc: u8,
+    data: Vec<u8>,
+    samples: i64,
+}
+
+fn frame_samples(toc: u8) -> i64 {
+    let config = usize::from(toc >> 3);
+    const SILK: [i64; 4] = [480, 960, 1920, 2880];
+    const SHORT: [i64; 2] = [480, 960];
+    const CELT: [i64; 4] = [120, 240, 480, 960];
+    match config {
+        0..=11 => SILK[config % 4],
+        12..=15 => SHORT[config % 2],
+        _ => CELT[config % 4],
+    }
+}
+
+fn split_opus_packet(packet: &[u8]) -> Result<Vec<OpusFrame>, ()> {
+    let toc = *packet.first().ok_or(())?;
+    let samples = frame_samples(toc);
+    let plain = toc & 0xFC;
+    let code = toc & 0x03;
+    let frame = |data: &[u8]| OpusFrame {
+        toc: plain,
+        data: data.to_vec(),
+        samples,
+    };
+    if code == 0 {
+        return Ok(vec![frame(&packet[1..])]);
+    }
+    if code == 1 {
+        let body = &packet[1..];
+        if body.len() < 2 || !body.len().is_multiple_of(2) {
+            return Err(());
+        }
+        let half = body.len() / 2;
+        return Ok(vec![frame(&body[..half]), frame(&body[half..])]);
+    }
+    if code == 2 {
+        let (size, pos) = parse_frame_size(packet, 1)?;
+        let end = pos.checked_add(size).ok_or(())?;
+        if end > packet.len() {
+            return Err(());
+        }
+        return Ok(vec![frame(&packet[pos..end]), frame(&packet[end..])]);
+    }
+    let flags = *packet.get(1).ok_or(())?;
+    let count = usize::from(flags & 0x3F);
+    if count == 0 {
+        return Err(());
+    }
+    let mut pos = 2usize;
+    let mut sizes = Vec::new();
+    if flags & 0x80 != 0 {
+        for _ in 0..count - 1 {
+            let (size, next) = parse_frame_size(packet, pos)?;
+            sizes.push(size);
+            pos = next;
+        }
+    }
+    let mut padding = 0usize;
+    if flags & 0x40 != 0 {
+        loop {
+            let byte = *packet.get(pos).ok_or(())?;
+            pos += 1;
+            if byte == 255 {
+                padding += 254;
+            } else {
+                padding += usize::from(byte);
+                break;
+            }
+        }
+    }
+    let end = packet.len().checked_sub(padding).ok_or(())?;
+    if end < pos {
+        return Err(());
+    }
+    let body = &packet[pos..end];
+    if flags & 0x80 != 0 {
+        let used: usize = sizes.iter().sum();
+        if used > body.len() {
+            return Err(());
+        }
+        let mut frames = Vec::with_capacity(count);
+        let mut offset = 0usize;
+        for size in sizes {
+            frames.push(frame(&body[offset..offset + size]));
+            offset += size;
+        }
+        frames.push(frame(&body[offset..]));
+        return Ok(frames);
+    }
+    if !body.len().is_multiple_of(count) {
+        return Err(());
+    }
+    let each = body.len() / count;
+    Ok((0..count)
+        .map(|index| frame(&body[index * each..(index + 1) * each]))
+        .collect())
+}
+
+/// A frame shorter than 252 bytes uses one length byte. A longer frame uses
+/// two: `first + 4 * second`.
+fn parse_frame_size(data: &[u8], pos: usize) -> Result<(usize, usize), ()> {
+    let first = usize::from(*data.get(pos).ok_or(())?);
+    if first < 252 {
+        return Ok((first, pos + 1));
+    }
+    let second = usize::from(*data.get(pos + 1).ok_or(())?);
+    Ok((first + 4 * second, pos + 2))
+}
+
+fn remux_opus(head: &[u8], tags: &[u8], frames: &[OpusFrame]) -> Result<Vec<u8>, VoiceError> {
+    let packets: Vec<Vec<u8>> = frames
+        .iter()
+        .map(|frame| {
+            let mut packet = Vec::with_capacity(1 + frame.data.len());
+            packet.push(frame.toc);
+            packet.extend_from_slice(&frame.data);
+            packet
+        })
+        .collect();
+    let mut out = Vec::new();
+    let serial = 0x5752_5553u32;
+    let mut sequence = 0u32;
+    write_packets(&mut out, 0x02, 0, serial, sequence, &[head])?;
+    sequence += 1;
+    write_packets(&mut out, 0x00, 0, serial, sequence, &[tags])?;
+    sequence += 1;
+    let mut granule = if head.len() >= 12 {
+        i64::from(u16::from_le_bytes([head[10], head[11]]))
+    } else {
+        0
+    };
+    let mut index = 0usize;
+    while index < packets.len() {
+        let mut lacing = 0usize;
+        let mut end = index;
+        let mut page_granule = granule;
+        while end < packets.len() {
+            let needed = lacing_segments(&packets[end]);
+            if end > index && (lacing + needed > 255 || end - index >= 48) {
+                break;
+            }
+            if needed > 255 {
+                return Err(VoiceError::Encode);
+            }
+            lacing += needed;
+            page_granule += frames[end].samples;
+            end += 1;
+        }
+        if end == index {
+            return Err(VoiceError::Encode);
+        }
+        let flags = if end == packets.len() { 0x04 } else { 0x00 };
+        let page: Vec<&[u8]> = packets[index..end].iter().map(Vec::as_slice).collect();
+        write_packets(&mut out, flags, page_granule, serial, sequence, &page)?;
+        sequence += 1;
+        granule = page_granule;
+        index = end;
+    }
+    Ok(out)
+}
+
+fn lacing_segments(packet: &[u8]) -> usize {
+    if packet.is_empty() {
+        1
+    } else {
+        packet.len().div_ceil(255)
+    }
+}
+
+fn write_packets(
+    out: &mut Vec<u8>,
+    header_type: u8,
+    granule: i64,
+    serial: u32,
+    sequence: u32,
+    packets: &[&[u8]],
+) -> Result<(), VoiceError> {
+    if packets.is_empty() {
+        return Err(VoiceError::Encode);
+    }
+    let mut lacing = Vec::new();
+    for packet in packets {
+        let mut rest = packet.len();
+        if rest == 0 {
+            lacing.push(0);
+        } else {
+            while rest >= 255 {
+                lacing.push(255);
+                rest -= 255;
+            }
+            lacing.push(rest as u8);
+        }
+    }
+    if lacing.len() > 255 {
+        return Err(VoiceError::Encode);
+    }
+    let start = out.len();
+    out.extend_from_slice(b"OggS");
+    out.push(0);
+    out.push(header_type);
+    out.extend_from_slice(&granule.to_le_bytes());
+    out.extend_from_slice(&serial.to_le_bytes());
+    out.extend_from_slice(&sequence.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.push(lacing.len() as u8);
+    out.extend_from_slice(&lacing);
+    for packet in packets {
+        out.extend_from_slice(packet);
+    }
+    let crc = ogg_crc(&out[start..]);
+    out[start + 22..start + 26].copy_from_slice(&crc.to_le_bytes());
+    Ok(())
+}
+
 /// 16-bit little-endian PCM in a plain RIFF WAVE container.
 pub(crate) fn pcm_wav(samples: &[i16], rate: u32, channels: u16) -> Vec<u8> {
     let channels = channels.max(1);
@@ -291,34 +544,7 @@ fn write_page(
     sequence: u32,
     packet: &[u8],
 ) -> Result<(), VoiceError> {
-    let mut lacing = Vec::new();
-    let mut rest = packet.len();
-    if packet.is_empty() {
-        lacing.push(0u8);
-    } else {
-        while rest >= 255 {
-            lacing.push(255);
-            rest -= 255;
-        }
-        lacing.push(rest as u8);
-    }
-    if lacing.len() > 255 {
-        return Err(VoiceError::Encode);
-    }
-    let start = out.len();
-    out.extend_from_slice(b"OggS");
-    out.push(0);
-    out.push(header_type);
-    out.extend_from_slice(&granule.to_le_bytes());
-    out.extend_from_slice(&serial.to_le_bytes());
-    out.extend_from_slice(&sequence.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.push(lacing.len() as u8);
-    out.extend_from_slice(&lacing);
-    out.extend_from_slice(packet);
-    let crc = ogg_crc(&out[start..]);
-    out[start + 22..start + 26].copy_from_slice(&crc.to_le_bytes());
-    Ok(())
+    write_packets(out, header_type, granule, serial, sequence, &[packet])
 }
 
 const fn crc_table() -> [u32; 256] {
@@ -427,6 +653,97 @@ mod tests {
             i = end;
         }
         assert_eq!(i, data.len());
+    }
+
+    fn tone_ogg() -> Vec<u8> {
+        let mut samples = Vec::new();
+        for i in 0..3200 {
+            let t = i as f32 / RATE as f32;
+            let tone = (t * 440.0 * std::f32::consts::TAU).sin();
+            samples.push((tone * 8000.0) as i16);
+        }
+        ogg_opus_from_wav(&pcm_wav(&samples, RATE, 1)).unwrap()
+    }
+
+    fn one_frame(ogg: &[u8]) -> Vec<u8> {
+        ogg_packets(ogg)
+            .unwrap()
+            .into_iter()
+            .find(|packet| !packet.starts_with(b"Opus"))
+            .unwrap()
+    }
+
+    fn wrap_packets(ogg: &[u8], audio: &[&[u8]]) -> Vec<u8> {
+        let packets = ogg_packets(ogg).unwrap();
+        let head = packets
+            .iter()
+            .find(|packet| packet.starts_with(b"OpusHead"))
+            .unwrap();
+        let tags = packets
+            .iter()
+            .find(|packet| packet.starts_with(b"OpusTags"))
+            .unwrap();
+        let mut out = Vec::new();
+        write_page(&mut out, 0x02, 0, 1, 0, head).unwrap();
+        write_page(&mut out, 0x00, 0, 1, 1, tags).unwrap();
+        for (index, packet) in audio.iter().enumerate() {
+            let flags = if index + 1 == audio.len() { 0x04 } else { 0x00 };
+            write_page(&mut out, flags, 0, 1, 2 + index as u32, packet).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn a_normal_note_and_a_packed_note_without_silence_are_left_alone() {
+        let ogg = tone_ogg();
+        assert!(repair_opus(&ogg).is_none());
+        let frame_packet = one_frame(&ogg);
+        assert!(frame_packet.len() > 1 && frame_packet.len() < 252);
+        assert_eq!(frame_packet[0] & 0x03, 0);
+        let frame = &frame_packet[1..];
+        let mut packed = vec![frame_packet[0] | 0x03, 0x80 | 2, frame.len() as u8];
+        packed.extend_from_slice(frame);
+        packed.extend_from_slice(frame);
+        assert!(repair_opus(&wrap_packets(&ogg, &[&packed])).is_none());
+        let mut cbr = vec![frame_packet[0] | 0x03, 2];
+        cbr.extend_from_slice(frame);
+        cbr.extend_from_slice(frame);
+        assert!(repair_opus(&wrap_packets(&ogg, &[&cbr])).is_none());
+    }
+
+    #[test]
+    fn a_two_byte_frame_length_is_not_treated_as_silence() {
+        let ogg = tone_ogg();
+        let frame_packet = one_frame(&ogg);
+        let frame = &frame_packet[1..];
+        let mut packed = vec![frame_packet[0] | 0x03, 0x80 | 2, 252, 0];
+        packed.extend(std::iter::repeat(0x11).take(252));
+        packed.extend_from_slice(frame);
+        // 252 followed by 0 means 252 bytes, so neither frame is empty.
+        assert!(repair_opus(&wrap_packets(&ogg, &[&packed])).is_none());
+    }
+
+    #[test]
+    fn a_silent_frame_packed_into_a_voice_note_is_removed_and_the_speech_decodes() {
+        let ogg = tone_ogg();
+        let frame_packet = one_frame(&ogg);
+        let frame = &frame_packet[1..];
+        let mut packed = vec![frame_packet[0] | 0x03, 0x80 | 3, 0, frame.len() as u8];
+        packed.extend_from_slice(frame);
+        packed.extend_from_slice(frame);
+        let repaired = repair_opus(&wrap_packets(&ogg, &[&packed])).unwrap();
+        assert_pages_crc(&repaired);
+        let audio: Vec<_> = ogg_packets(&repaired)
+            .unwrap()
+            .into_iter()
+            .filter(|packet| !packet.starts_with(b"Opus"))
+            .collect();
+        assert_eq!(audio.len(), 2);
+        assert!(audio
+            .iter()
+            .all(|packet| packet[0] & 0x03 == 0 && packet.len() > 1));
+        let wav = wav_from_ogg(&repaired).unwrap();
+        assert!(wav.len() > 44);
     }
 
     fn audio_packets(data: &[u8]) -> Vec<Vec<u8>> {
