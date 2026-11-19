@@ -59,6 +59,7 @@
           <span id="voice-wave" aria-hidden="true"></span>
         </div>
         <textarea id="text" rows="2" maxlength="4096" placeholder="Write a reply"></textarea>
+        <p id="error" role="status"></p>
         <div class="actions">
           <button id="attach" type="button" aria-label="Attach a file">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M10.5 4.5h3v6h6v3h-6v6h-3v-6h-6v-3h6z"/></svg>
@@ -71,7 +72,7 @@
               <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/>
             </svg>
           </button>
-          <span id="error" role="status"></span>
+          <button id="mark-read" type="button">Mark as read</button>
           <button id="send" type="submit">Send</button>
         </div>
       </form>

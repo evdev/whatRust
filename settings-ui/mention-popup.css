@@ -189,8 +189,21 @@ textarea {
   color: var(--fg);
   font: inherit;
 }
-.actions { display: flex; align-items: center; gap: 8px; }
-#error { flex: 1; min-width: 0; color: var(--danger); font-size: 12px; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+#error { margin: 0; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+#error:empty { position: absolute; }
+#mark-read {
+  margin-inline-start: auto;
+  border: 0;
+  border-radius: 10px;
+  padding: 7px 9px;
+  background: var(--field);
+  color: var(--fg);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+#mark-read:hover:not(:disabled) { outline: 1px solid var(--line); }
 #send {
   border: 0;
   border-radius: 10px;
@@ -201,7 +214,7 @@ textarea {
   font-weight: 650;
   cursor: pointer;
 }
-#send:disabled { opacity: 0.55; cursor: default; }
+#mark-read:disabled, #send:disabled { opacity: 0.55; cursor: default; }
 #attach, #voice, #attachment-clear {
   display: grid;
   place-items: center;

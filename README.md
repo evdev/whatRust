@@ -44,6 +44,8 @@ When whatRust opens, scan the QR code from **WhatsApp → Linked Devices → Lin
 
 Open **Settings → Notifications**, choose an account, and turn on alerts for the events you care about: a personal mention, a reply to one of your messages, a direct message, or a group `@everyone` tag. You can choose the sound and reply popup separately for each account, and use a custom sound. These alerts work in muted chats and while whatRust is in the foreground.
 
+Choose **Mark as read** on a reply popup to mark its WhatsApp chat as read without opening it.
+
 On Windows and macOS, reply popups appear in the top-right corner of the display containing the foreground window. They float above other app windows and leave keyboard focus where it is until you interact with the popup.
 Drag the title bar to move a popup, or drag an edge or corner to resize it.
 
@@ -79,13 +81,13 @@ Open **To-Do** or **Replies** near the account switcher to see what's outstandin
 
 ### Schedule a message
 
-In a source build, click the clock beside **Send** to schedule a draft or select photos, videos, and files. If whatRust cannot verify the files in WhatsApp’s attachment preview, select them again in the scheduling dialog. Choose a one-time send or a repeat in days, weeks, months, or years. A repeat keeps the time zone saved with it and can end on a date or after a set number of successful sends. Open **Scheduled messages** from the account controls to review, edit, or cancel upcoming messages.
+Click the clock beside **Send** to schedule a draft. Use **+** to pick files and preview photos, videos, and supported PDFs before scheduling. The microphone records a voice note of up to two minutes. If whatRust cannot verify the files in WhatsApp’s attachment preview, select them again in the scheduling dialog. Choose a one-time send or a repeat in days, weeks, months, or years. A repeat keeps the time zone saved with it and can end on a date or after a set number of successful sends. Open **Scheduled messages** below **Create summary** in a chat’s menu for that conversation, or below **Replies** in the sidebar for the entire account.
 
 Schedules and attachment copies stay on this computer across restarts. whatRust can deliver through its connected WhatsApp session while open or in the tray. If a send comes due while the app is closed or the session is unavailable, whatRust asks you to send or skip it when you return. For repeats, the review shows the latest missed send.
 
 ### Let the stand-in answer while you're away
 
-Turn on **Allow stand-in** in **Settings → Stand-in**, then enable it from the header of an individual chat. Each chat starts off. You can write general instructions for how you like to reply and add notes for that particular conversation. In each chat, choose an AI reply or a canned reply using the shared default or a custom message. Edit the default in Stand-in settings. Canned replies are sent at most once every two hours per chat; messages arriving during that interval do not trigger a later reply.
+Turn on **Allow stand-in** in **Settings → Stand-in**, then enable it from the header of an individual chat. Each chat starts off. You can write general instructions for how you like to reply and add notes for that particular conversation. In each chat, choose an AI reply or a canned reply using the shared default or a custom message. Edit the default in Stand-in settings. Canned replies are sent at most once every two hours per chat; messages arriving during that interval do not trigger a later reply. You can also restrict canned replies in each chat to a daily window in your computer’s local time, including overnight windows. Messages received outside that window are not answered later.
 
 The stand-in can search available chat history and transcripts. It pauses when you reply yourself and can stay quiet and alert you when it isn't sure what to say. You can set a reply delay and hourly limit. Messages it sends are marked in the conversation. If WhatsApp rejects a send, the app shows an error and leaves the incoming message unanswered. When the app starts, it checks for recent replies before answering anything that came in while it was opening.
 

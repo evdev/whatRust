@@ -71,10 +71,11 @@ const PAGE_COMMANDS: &[&str] = &[
     "autoreply_open_chat_doc",
     "autoreply_turn",
     "autoreply_record_sent",
+    "autoreply_record_outside_hours",
     "autoreply_pause_self",
     "mention_event",
     "mention_sent",
-    "mention_opened",
+    "mention_chat_action_done",
     "mention_settled",
     "mention_filter",
     "mention_media",
@@ -362,6 +363,7 @@ fn local_windows_keep_exactly_their_own_commands() {
         "mention_listen",
         "mention_transcript",
         "mention_open",
+        "mention_mark_read",
         "mention_dismiss",
     ] {
         assert!(
@@ -374,8 +376,15 @@ fn local_windows_keep_exactly_their_own_commands() {
         );
     }
     assert!(!allowed(&app, "mention-3", local, "mention_event"));
+    assert!(!allowed(
+        &app,
+        "mention-3",
+        local,
+        "mention_chat_action_done"
+    ));
     assert!(!allowed(&app, "mention-3", local, "mention_media"));
     assert!(!allowed(&app, "mention-3", local, "mention_heard"));
     assert!(allowed(&app, "wa-default", PAGE, "mention_heard"));
     assert!(!allowed(&app, "settings", local, "mention_reply"));
+    assert!(!allowed(&app, "settings", local, "mention_mark_read"));
 }

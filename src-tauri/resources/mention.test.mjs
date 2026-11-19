@@ -607,6 +607,41 @@ assert(bundle.includes("t.getMyUserLid=function"), "wa-js can read the lid self 
 assert(bundle.includes('emit("conn.main_ready"'), "catch-up is conn.main_ready");
 assert(bundle.includes('emit("chat.new_message"'), "live messages use chat.new_message");
 
+const chatCalls = [];
+const acknowledgements = [];
+let failRead = false;
+const bridge = vm.createContext({
+  location: { origin: "https://web.whatsapp.com" },
+  WPP: {
+    isReady: true,
+    chat: {
+      async markIsRead(id) {
+        chatCalls.push(["read", id]);
+        if (failRead) throw new Error("Chat unavailable");
+        return { wid: id, unreadCount: 2 };
+      },
+      async openChatBottom(id) { chatCalls.push(["open", id]); },
+    },
+  },
+  __TAURI__: { core: { invoke(cmd, args) {
+    acknowledgements.push([cmd, args.request, args.ok]);
+    return Promise.resolve();
+  } } },
+});
+vm.runInContext(source, bridge, { filename: "mention.js" });
+await bridge.__whatrustMentionChatAction("999@g.us", "read-1", "markIsRead");
+assert(JSON.stringify(chatCalls) === JSON.stringify([["read", "999@g.us"]]),
+  "marking the alert's chat as read does not open the chat");
+assert(JSON.stringify(acknowledgements.pop()) === JSON.stringify(["mention_chat_action_done", "read-1", true]),
+  "mark as read acknowledges success after WhatsApp completes it");
+failRead = true;
+await bridge.__whatrustMentionChatAction("999@g.us", "read-2", "markIsRead");
+assert(JSON.stringify(acknowledgements.pop()) === JSON.stringify(["mention_chat_action_done", "read-2", false]),
+  "a failed mark as read acknowledges failure so the popup can stay open");
+await bridge.__whatrustMentionChatAction("999@g.us", "open-1", "openChatBottom");
+assert(chatCalls.at(-1)?.[0] === "open" && acknowledgements.at(-1)?.[2] === true,
+  "opening the chat still works through the shared action bridge");
+
 const settingsPage = readFileSync(join(here, "../../settings-ui/index.html"), "utf8");
 const settingsI18n = readFileSync(join(here, "../../settings-ui/i18n.js"), "utf8");
 assert(settingsPage.includes(api.SETTINGS_COPY.en), "settings shows the @everyone line");

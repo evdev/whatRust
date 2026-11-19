@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use store::{
-    Action, Attachment, Candidate, FileInput, Outcome, PendingAccount, Review, SaveInput, Schedule,
-    Store,
+    Action, Attachment, Candidate, FileInput, Mode, Outcome, PendingAccount, Review, SaveInput,
+    Schedule, Store,
 };
 use tauri::{AppHandle, Manager, Webview};
 
@@ -22,6 +22,8 @@ const MAX_FILE: u64 = 100 * 1024 * 1024;
 const MAX_TOTAL: u64 = 500 * 1024 * 1024;
 const MAX_FILES: usize = 200;
 const MAX_TEXT: usize = 256 * 1024;
+const MAX_VOICE: u64 = 4 * 1024 * 1024;
+const MAX_VOICE_SECONDS: u64 = 120;
 const WARM_MS: i64 = 60_000;
 const GRACE_MS: i64 = 15_000;
 const STAGE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -174,6 +176,15 @@ impl Inner {
     fn settle(&mut self, app: &AppHandle, job: &Job, outcome: Outcome) -> Result<(), String> {
         self.storage(app)?
             .finish(&job.candidate, outcome, job.message_id.is_some())?;
+        let operation = if job.candidate.reconciliation {
+            "reconciliation"
+        } else {
+            "delivery"
+        };
+        crate::dlog::log(&format!(
+            "scheduler: {operation} {outcome:?}, prepared={}",
+            job.message_id.is_some()
+        ));
         self.jobs.remove(&job.candidate.account);
         self.notify = true;
         self.collect_files = true;
@@ -391,13 +402,26 @@ fn tick(app: &AppHandle, inner: &mut Inner, now: i64, mono: Instant) -> Result<T
     let unlocked = inner.unlocked;
     let store = inner.store.as_mut().ok_or("schedule_storage")?;
     if store.due(now, |account, identity, due| {
-        unlocked
-            && due > awake_since
-            && now.saturating_sub(due) <= GRACE_MS
-            && views.get(account).is_some_and(|view| {
-                view.identity.as_deref() == Some(identity)
-                    && view.ready_since.is_some_and(|since| since <= due)
-            })
+        let linked = views
+            .get(account)
+            .filter(|view| view.identity.as_deref() == Some(identity));
+        let reason = if !unlocked {
+            "app locked"
+        } else if due <= awake_since || now.saturating_sub(due) > GRACE_MS {
+            "deadline passed while unavailable"
+        } else if linked.is_none() {
+            "linked session unavailable"
+        } else if !linked
+            .and_then(|view| view.ready_since)
+            .is_some_and(|since| since <= due)
+        {
+            "WhatsApp connection not ready at deadline"
+        } else {
+            return true;
+        };
+        // No recipient, content, or account identifiers go into diagnostics.
+        crate::dlog::log(&format!("scheduler: moved to review, {reason}"));
+        false
     })? {
         inner.notify = true;
         inner.collect_files = true;
@@ -812,18 +836,36 @@ pub fn schedule_save(window: Webview, app: AppHandle, input: SaveInput) -> Resul
         File::open(path.join("files"))
             .and_then(|dir| dir.sync_all())
             .map_err(|_| "attachment_storage")?;
-        attachments.clone_from(&stage.files);
+        attachments = prepare_staged_files(path, stage)?;
     }
     let identity = identity.to_owned();
     let saved = inner
-        .storage(&app)?
-        .save(&account, &identity, &input, &attachments, now_ms());
+        .storage(&app)
+        .and_then(|store| store.save(&account, &identity, &input, &attachments, now_ms()));
     if saved.is_err() {
+        // Keep original upload bytes and sizes intact for a transaction retry.
+        if let Some(stage) = input.stage_id.as_ref().and_then(|id| inner.stages.get(id)) {
+            for attachment in &attachments {
+                if !stage
+                    .files
+                    .iter()
+                    .any(|original| original.id == attachment.id)
+                {
+                    let _ = fs::remove_file(file_path(inner.path()?, &attachment.id));
+                }
+            }
+        }
         state.signal(&mut inner);
         return saved;
     }
     if let Some(id) = input.stage_id {
-        inner.stages.remove(&id);
+        if let Some(stage) = inner.stages.remove(&id) {
+            for original in stage.files {
+                if !attachments.iter().any(|saved| saved.id == original.id) {
+                    let _ = fs::remove_file(file_path(inner.path()?, &original.id));
+                }
+            }
+        }
     }
     inner.notify = true;
     inner.collect_files = true;
@@ -890,6 +932,128 @@ pub fn schedule_decide(
     Ok(())
 }
 
+fn valid_voice_stage(files: &[FileInput]) -> bool {
+    !files.iter().any(|file| matches!(file.mode, Mode::Voice))
+        || (files.len() == 1
+            && files[0].name == "voice-note.wav"
+            && files[0].mime == "audio/wav"
+            && files[0].caption.is_empty()
+            && files[0].size > 0
+            && files[0].size <= MAX_VOICE)
+}
+
+// Bound duration before the encoder allocates or resamples PCM. Reject
+// truncated chunks and partial frames rather than persisting repaired audio.
+fn validate_voice_wav(data: &[u8]) -> Result<(), String> {
+    let invalid = || "invalid_voice_message".to_owned();
+    if data.len() < 44
+        || data.len() as u64 > MAX_VOICE
+        || &data[..4] != b"RIFF"
+        || &data[8..12] != b"WAVE"
+        || u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize + 8 != data.len()
+    {
+        return Err(invalid());
+    }
+    let mut offset = 12usize;
+    let mut format = None;
+    let mut audio = None;
+    while offset + 8 <= data.len() {
+        let len = u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        let start = offset + 8;
+        let end = start
+            .checked_add(len)
+            .filter(|end| *end <= data.len())
+            .ok_or_else(invalid)?;
+        match &data[offset..offset + 4] {
+            b"fmt " if format.is_none() && len >= 16 => {
+                let pcm = u16::from_le_bytes(data[start..start + 2].try_into().unwrap());
+                let channels = u16::from_le_bytes(data[start + 2..start + 4].try_into().unwrap());
+                let rate = u32::from_le_bytes(data[start + 4..start + 8].try_into().unwrap());
+                let bits = u16::from_le_bytes(data[start + 14..start + 16].try_into().unwrap());
+                if pcm != 1
+                    || bits != 16
+                    || !(1..=2).contains(&channels)
+                    || !(8000..=192000).contains(&rate)
+                {
+                    return Err(invalid());
+                }
+                format = Some((u64::from(rate), u64::from(channels) * 2));
+            }
+            b"data" if audio.is_none() => audio = Some(len as u64),
+            b"fmt " | b"data" => return Err(invalid()),
+            _ => {}
+        }
+        offset = end
+            .checked_add(len & 1)
+            .filter(|end| *end <= data.len())
+            .ok_or_else(invalid)?;
+    }
+    let (rate, frame) = format.ok_or_else(invalid)?;
+    let len = audio.ok_or_else(invalid)?;
+    if offset != data.len()
+        || len == 0
+        || len % frame != 0
+        || len / frame > rate * MAX_VOICE_SECONDS
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn prepare_staged_files(path: &Path, stage: &Stage) -> Result<Vec<Attachment>, String> {
+    if !stage
+        .files
+        .iter()
+        .any(|a| matches!(a.file.mode, Mode::Voice))
+    {
+        return Ok(stage.files.clone());
+    }
+    if !valid_voice_stage(
+        &stage
+            .files
+            .iter()
+            .map(|a| a.file.clone())
+            .collect::<Vec<_>>(),
+    ) {
+        return Err("invalid_voice_message".into());
+    }
+    let wav = fs::read(file_path(path, &stage.files[0].id)).map_err(|_| "attachment_storage")?;
+    validate_voice_wav(&wav)?;
+    let ogg = crate::voice_ogg::ogg_opus_from_wav(&wav).map_err(|_| "invalid_voice_message")?;
+    if ogg.is_empty() || ogg.len() as u64 > MAX_VOICE {
+        return Err("invalid_voice_message".into());
+    }
+    let id = new_id()?;
+    let target = file_path(path, &id);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .map_err(|_| "attachment_storage")?;
+    let write = (|| -> std::io::Result<()> {
+        file.write_all(&ogg)?;
+        file.sync_all()?;
+        #[cfg(unix)]
+        File::open(path.join("files"))?.sync_all()?;
+        Ok(())
+    })();
+    drop(file);
+    if write.is_err() {
+        let _ = fs::remove_file(target);
+        return Err("attachment_storage".into());
+    }
+    Ok(vec![Attachment {
+        id,
+        file: FileInput {
+            name: "voice-note.ogg".into(),
+            mime: "audio/ogg; codecs=opus".into(),
+            size: ogg.len() as u64,
+            mode: Mode::Voice,
+            caption: String::new(),
+        },
+    }])
+}
+
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn schedule_stage_begin(
     window: Webview,
@@ -897,7 +1061,8 @@ pub fn schedule_stage_begin(
     files: Vec<FileInput>,
 ) -> Result<String, String> {
     let account = auth(&app, &window)?;
-    if files.is_empty()
+    if !valid_voice_stage(&files)
+        || files.is_empty()
         || files.len() > MAX_FILES
         || files.iter().any(|file| {
             file.size == 0
@@ -1158,6 +1323,105 @@ pub fn schedule_delivery_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn voice_stage(path: &Path) -> Stage {
+        fs::create_dir_all(path.join("files")).unwrap();
+        let wav = crate::voice_ogg::pcm_wav(&vec![0; 320], 16_000, 1);
+        fs::write(file_path(path, "upload"), &wav).unwrap();
+        Stage {
+            account: "default".into(),
+            identity: "111@c.us".into(),
+            session: "session".into(),
+            files: vec![Attachment {
+                id: "upload".into(),
+                file: FileInput {
+                    name: "voice-note.wav".into(),
+                    mime: "audio/wav".into(),
+                    size: wav.len() as u64,
+                    mode: Mode::Voice,
+                    caption: String::new(),
+                },
+            }],
+            received: vec![wav.len() as u64],
+            expires: Instant::now() + STAGE_TTL,
+        }
+    }
+
+    #[test]
+    fn voice_staging_accepts_only_one_uncaptioned_bounded_wav() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = voice_stage(dir.path());
+        let mut files = vec![stage.files[0].file.clone()];
+        assert!(valid_voice_stage(&files));
+        files[0].caption = "caption".into();
+        assert!(!valid_voice_stage(&files));
+        files[0].caption.clear();
+        files[0].size = MAX_VOICE + 1;
+        assert!(!valid_voice_stage(&files));
+        files[0].size = 100;
+        files.push(files[0].clone());
+        assert!(!valid_voice_stage(&files));
+    }
+
+    #[test]
+    fn voice_wav_duration_and_integrity_are_checked_before_encoding() {
+        let short = crate::voice_ogg::pcm_wav(&vec![0; 320], 16_000, 1);
+        assert!(validate_voice_wav(&short).is_ok());
+        assert!(validate_voice_wav(&short[..short.len() - 1]).is_err());
+        assert!(validate_voice_wav(&crate::voice_ogg::pcm_wav(&[], 16_000, 1)).is_err());
+        let limit = crate::voice_ogg::pcm_wav(&vec![0; 16_000 * 120], 16_000, 1);
+        assert!(validate_voice_wav(&limit).is_ok());
+        let too_long = crate::voice_ogg::pcm_wav(&vec![0; 16_000 * 120 + 1], 16_000, 1);
+        assert!(validate_voice_wav(&too_long).is_err());
+        let mut huge_resample = short.clone();
+        huge_resample[24..28].copy_from_slice(&1u32.to_le_bytes());
+        assert!(validate_voice_wav(&huge_resample).is_err());
+    }
+
+    #[test]
+    fn voice_conversion_keeps_stage_retryable_and_restart_collects_orphans() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = voice_stage(dir.path());
+        let original = fs::read(file_path(dir.path(), "upload")).unwrap();
+        let first = prepare_staged_files(dir.path(), &stage).unwrap();
+        let input: SaveInput = serde_json::from_value(serde_json::json!({
+            "id": null, "revision": null, "chat_id": "222@c.us", "chat_name": "Test",
+            "text": "", "local_at": "2030-01-01T09:00", "time_zone": "UTC",
+            "repeat": null, "stage_id": "stage", "keep_attachment_ids": [], "first_caption": null
+        }))
+        .unwrap();
+        let db_path = dir.path().join("test.sqlite");
+        let mut store = Store::open(&db_path).unwrap();
+        store.db.execute_batch("CREATE TRIGGER fail_save BEFORE INSERT ON schedule_file BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+        assert!(store
+            .save("default", "111@c.us", &input, &first, 0)
+            .is_err());
+        assert!(store.schedules("default", "111@c.us").unwrap().is_empty());
+        assert!(!store.has_attachment(&first[0].id).unwrap());
+        store.db.execute_batch("DROP TRIGGER fail_save").unwrap();
+        let second = prepare_staged_files(dir.path(), &stage).unwrap();
+        assert_ne!(first[0].id, second[0].id);
+        assert_eq!(stage.received[0], original.len() as u64);
+        assert_eq!(stage.files[0].file.size, original.len() as u64);
+        assert_eq!(fs::read(file_path(dir.path(), "upload")).unwrap(), original);
+        let ogg = fs::read(file_path(dir.path(), &first[0].id)).unwrap();
+        assert!(ogg.starts_with(b"OggS"));
+        assert_eq!(first[0].file.size, ogg.len() as u64);
+        assert_eq!(first[0].file.mime, "audio/ogg; codecs=opus");
+        assert_eq!(first[0].file.name, "voice-note.ogg");
+        store
+            .save("default", "111@c.us", &input, &second, 0)
+            .unwrap();
+        drop(store);
+        let store = Store::open(&db_path).unwrap();
+        collect_startup_files(dir.path(), &store).unwrap();
+        assert_eq!(fs::read_dir(dir.path().join("files")).unwrap().count(), 1);
+        assert!(!file_path(dir.path(), "upload").exists());
+        assert!(!file_path(dir.path(), &first[0].id).exists());
+        assert!(fs::read(file_path(dir.path(), &second[0].id))
+            .unwrap()
+            .starts_with(b"OggS"));
+    }
 
     fn candidate() -> Candidate {
         Candidate {

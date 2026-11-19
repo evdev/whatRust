@@ -153,6 +153,12 @@ select option { background: var(--bg); color: var(--fg); }
 
 .row select { max-width:min(280px,100%);text-overflow:ellipsis;white-space:nowrap;overflow:hidden; }
 .model-choice { width: min(280px, 100%); }
+/* Leave room for readable labels even when the sidebar narrows this pane. */
+#sec-standin .row { flex-wrap: wrap; }
+#sec-standin .row-text { flex: 1 1 200px; }
+#sec-standin .row > input[type=text] { width: min(280px, 100%); min-width: 0; }
+/* A full-width textarea needs its own line instead of squeezing its label. */
+#sec-standin .standin-canned-row { display: block; }
 #startup_account { width:clamp(150px,35vw,280px); }
 
 .row-subtitle,.group-note,.hotkey-hint { overflow-wrap:anywhere; }

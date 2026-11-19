@@ -789,6 +789,14 @@
     button.type = "button";
     button.setAttribute("data-wr-summary-menu", "1");
     button.setAttribute("data-wr-summary-action", action);
+    // Pointer actions are handled on pointerdown below. Native button clicks
+    // with detail 0 also cover keyboard and assistive technology activation.
+    button.addEventListener("click", function (event) {
+      if (event.detail !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onCompanionAction(action);
+    });
     var paint = colors();
     button.style.cssText = "display:block;width:100%;text-align:start;padding:10px 14px;border:0;border-top:1px solid " + paint.line + ";background:transparent;color:" + paint.fg + ";font:14px system-ui;cursor:pointer";
     var label = document.createElement("div");
@@ -825,6 +833,7 @@
       return;
     }
     companion.appendChild(buttonRow(L("Criar resumo", "Create summary"), "", "open"));
+    companion.appendChild(buttonRow(L("Mensagens agendadas", "Scheduled messages"), "", "scheduled"));
   }
 
   function findMenu(point) {
@@ -918,7 +927,7 @@
 
   function arm(button, explicit, x, y) {
     var rect = button && button.getBoundingClientRect ? button.getBoundingClientRect() : { left: x, top: y, right: x + 32, bottom: y + 32, width: 240 };
-    pending = { at: Date.now(), x: x, y: y, explicit: explicit, mode: "create", button: pinRect(rect) };
+    pending = { at: Date.now(), x: x, y: y, explicit: explicit, mode: "create", button: pinRect(rect), chat: activeChat() };
     hold(true);
     clearTimeout(menuTimer);
     pumpCompanion();
@@ -1523,6 +1532,15 @@
 
   function onCompanionAction(action) {
     if (!pending) return;
+    if (action === "scheduled") {
+      var chat = pending.chat;
+      var matches = sameChat(chat);
+      hideCompanion();
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+      document.dispatchEvent(new KeyboardEvent("keyup", { key: "Escape", code: "Escape", bubbles: true }));
+      if (matches && typeof root.__whatrustScheduleOpen === "function") root.__whatrustScheduleOpen(true, { id: chat.id, name: chat.name });
+      return;
+    }
     if (action === "open") {
       pending.mode = "ranges";
       showCompanion();

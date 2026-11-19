@@ -79,3 +79,4 @@ modules:
       - install -Dm644 io.github.karem505.whatRust.metainfo.xml /app/share/metainfo/io.github.karem505.whatRust.metainfo.xml
       - install -Dm644 io.github.karem505.whatRust.svg /app/share/icons/hicolor/scalable/apps/io.github.karem505.whatRust.svg
       - install -Dm644 LICENSE /app/share/licenses/io.github.karem505.whatRust/LICENSE
+      - install -Dm644 src-tauri/resources/schedule-pdf-vendor.LICENSE /app/share/licenses/io.github.karem505.whatRust/PDF.js-LICENSE

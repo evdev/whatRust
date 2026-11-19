@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{
     AppHandle, LogicalPosition, LogicalSize, Manager, Monitor, PhysicalPosition, PhysicalSize,
     WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
@@ -39,16 +39,22 @@ pub struct Popups {
     inner: Mutex<Inner>,
     pending: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Result<(), String>>>>,
     audio: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Result<Heard, String>>>>,
-    opening: Mutex<HashMap<String, OpenWait>>,
-    next_open: AtomicU64,
+    chat_actions: Mutex<HashMap<String, ChatActionWait>>,
+    next_chat_action: AtomicU64,
     filters: Mutex<HashMap<String, FilterWait>>,
     media: Mutex<HashMap<String, OutgoingMedia>>,
 }
 
-struct OpenWait {
+struct ChatActionWait {
     account: String,
     popup: String,
     tx: tokio::sync::oneshot::Sender<bool>,
+}
+
+#[derive(Clone, Copy)]
+enum ChatAction {
+    Open,
+    MarkRead,
 }
 
 struct FilterWait {
@@ -694,10 +700,14 @@ fn send_script(chat_id: &str, msg_id: &str, text: &str, popup: &str, kind: &str)
     )
 }
 
-fn open_script(chat_id: &str, request: &str) -> String {
+fn chat_action_script(chat_id: &str, request: &str, action: ChatAction) -> String {
     let chat = serde_json::to_string(chat_id).unwrap_or_else(|_| "\"\"".into());
     let request = serde_json::to_string(request).unwrap_or_else(|_| "\"\"".into());
-    format!("window.__whatrustMentionOpen&&window.__whatrustMentionOpen({chat},{request})")
+    let method = match action {
+        ChatAction::Open => "openChatBottom",
+        ChatAction::MarkRead => "markIsRead",
+    };
+    format!("window.__whatrustMentionChatAction&&window.__whatrustMentionChatAction({chat},{request},'{method}')")
 }
 
 fn listen_script(msg_id: &str, label: &str) -> String {
@@ -1168,51 +1178,85 @@ pub fn mention_media(
 
 #[tauri::command]
 pub async fn mention_open(window: tauri::Webview, app: AppHandle) -> Result<(), String> {
-    if !local_popup(&window) {
+    request_chat_action(&window, &app, ChatAction::Open).await
+}
+
+#[tauri::command]
+pub async fn mention_mark_read(window: tauri::Webview, app: AppHandle) -> Result<(), String> {
+    request_chat_action(&window, &app, ChatAction::MarkRead).await
+}
+
+async fn request_chat_action(
+    window: &tauri::Webview,
+    app: &AppHandle,
+    action: ChatAction,
+) -> Result<(), String> {
+    if !local_popup(window) {
         return Err("forbidden".into());
     }
-    lock::require_unlocked(&app)?;
+    lock::require_unlocked(app)?;
     let label = window.label().to_string();
-    let (account, chat) = {
-        let state = popups(&app);
+    let (account, chat, at_ms) = {
+        let state = popups(app);
         let inner = lock::guard(&state.inner);
         let card = inner.cards.get(&label).ok_or("closed")?;
-        (card.account_label.clone(), card.chat_id.clone())
+        (card.account_label.clone(), card.chat_id.clone(), card.at_ms)
     };
-    ensure_view(&app, &account)?;
-    reveal_account(&app, &account);
-    let error = || tr("O WhatsApp ainda está abrindo. Tente de novo.").into_owned();
+    // Keep newer alerts that arrive while WhatsApp is handling the request.
+    let read_through = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64)
+        .max(at_ms);
+    ensure_view(app, &account)?;
+    if matches!(action, ChatAction::Open) {
+        reveal_account(app, &account);
+    }
+    let error = || match action {
+        ChatAction::Open => tr("O WhatsApp ainda está abrindo. Tente de novo.").into_owned(),
+        ChatAction::MarkRead => {
+            tr("Não foi possível marcar a conversa como lida. Tente de novo.").into_owned()
+        }
+    };
     let view = app.get_webview(&account).ok_or_else(error)?;
-    let state = popups(&app);
-    let request = state.next_open.fetch_add(1, Ordering::Relaxed).to_string();
+    let state = popups(app);
+    let request = state
+        .next_chat_action
+        .fetch_add(1, Ordering::Relaxed)
+        .to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    lock::guard(&state.opening).insert(
+    lock::guard(&state.chat_actions).insert(
         request.clone(),
-        OpenWait {
-            account,
+        ChatActionWait {
+            account: account.clone(),
             popup: label.clone(),
             tx,
         },
     );
-    if view.eval(open_script(&chat, &request)).is_err() {
-        lock::guard(&state.opening).remove(&request);
+    if view
+        .eval(chat_action_script(&chat, &request, action))
+        .is_err()
+    {
+        lock::guard(&state.chat_actions).remove(&request);
         return Err(error());
     }
-    let opened = matches!(
+    let succeeded = matches!(
         tokio::time::timeout(Duration::from_secs(12), rx).await,
         Ok(Ok(true))
     );
-    lock::guard(&state.opening).remove(&request);
-    if opened {
-        close_popup(&app, &label);
-        Ok(())
-    } else {
-        Err(error())
+    lock::guard(&state.chat_actions).remove(&request);
+    if !succeeded {
+        return Err(error());
     }
+    match action {
+        ChatAction::Open => close_popup(app, &label),
+        ChatAction::MarkRead => settle(app, &account, &chat, "", read_through),
+    }
+    Ok(())
 }
 
 #[tauri::command]
-pub fn mention_opened(
+pub fn mention_chat_action_done(
     window: tauri::Webview,
     app: AppHandle,
     request: String,
@@ -1220,12 +1264,12 @@ pub fn mention_opened(
 ) -> Result<(), String> {
     crate::integration::remote(&window)?;
     let state = popups(&app);
-    let mut opening = lock::guard(&state.opening);
-    if opening
+    let mut requests = lock::guard(&state.chat_actions);
+    if requests
         .get(&request)
         .is_some_and(|wait| wait.account == window.label())
     {
-        if let Some(wait) = opening.remove(&request) {
+        if let Some(wait) = requests.remove(&request) {
             let _ = wait.tx.send(ok);
         }
     }
@@ -1408,7 +1452,7 @@ pub fn on_lock(app: &AppHandle) {
         let _ = tx.send(Err(tr("Não foi possível enviar.").into_owned()));
     }
     lock::guard(&state.filters).clear();
-    lock::guard(&state.opening).clear();
+    lock::guard(&state.chat_actions).clear();
     let audio = std::mem::take(&mut *lock::guard(&state.audio));
     for (_, tx) in audio {
         let _ = tx.send(Err(tr("Não foi possível reproduzir o áudio.").into_owned()));
@@ -1986,7 +2030,7 @@ fn forget(app: &AppHandle, label: &str, fill: bool) {
     fail_audio(app, label);
     let state = popups(app);
     lock::guard(&state.media).remove(label);
-    lock::guard(&state.opening).retain(|_, wait| wait.popup != label);
+    lock::guard(&state.chat_actions).retain(|_, wait| wait.popup != label);
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let (placements, scale) = popup_layout(&handle);

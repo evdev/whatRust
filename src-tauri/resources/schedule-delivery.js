@@ -17,10 +17,20 @@
     if (!value) return "";
     return typeof value === "string" ? value : value._serialized || String(value);
   }
+  var observedSocket = null, observedStream = null, diagnostics = new Set(), lastDiagnostic = "";
+  function read(fn) { try { return fn(); } catch (_) { return undefined; } }
+  function socketValue(value, enumName, name) {
+    var enums = read(function () { return root.WPP.whatsapp.enums[enumName]; });
+    return value != null && (enums && enums[name] != null ? value === enums[name] : value === name);
+  }
+  function streamData() { return read(function () { return root.WPP.conn.getStreamData(); }) || {}; }
+  function socket() { return read(function () { return root.WPP.whatsapp.Socket; }); }
   function identity() {
     try {
       if (authBlocked || root.WPP.conn.isAuthenticated() !== true) return null;
-      if (root.WPP.conn.getStreamData().mode === "QR") return null;
+      if (streamData().mode === "QR") return null;
+      var sock = socket(), value = sock && sock.state;
+      if (socketValue(value, "SOCKET_STATE", "UNPAIRED") || socketValue(value, "SOCKET_STATE", "UNPAIRED_IDLE")) return null;
       // Always the phone WID; never switch to LID when it later becomes known.
       var id = wid(root.WPP.conn.getMyUserWid());
       var m = /^(\d+)(?::\d+)?@(c\.us|s\.whatsapp\.net)$/.exec(id);
@@ -30,21 +40,56 @@
   function state() {
     var nowLocked = root.__whatrustLocked !== false;
     if (locked !== nowLocked) { locked = nowLocked; epoch++; }
-    var ready = false, id = identity();
-    try {
-      var w = root.WPP;
-      var stream = w.conn.getStreamData();
-      // isMainReady is a historical latch and isOnline reads NetworkStatus.
-      // Stream MAIN/NORMAL is the bundled public live connection predicate.
-      ready = alive && !locked && !authBlocked && !!id && w.isFullReady === true &&
-        w.conn.isAuthenticated() === true && w.conn.isMainReady() === true && w.conn.isOnline() === true &&
-        stream.mode === "MAIN" && stream.info === "NORMAL";
-    } catch (_) {}
-    return { session_id: session, identity: id, ready: !!ready };
+    var id = identity(), stream = streamData(), sock = socket();
+    var socketState = read(function () { return sock.state; });
+    var socketStream = read(function () { return sock.stream; });
+    var online = read(function () { return root.WPP.conn.isOnline(); });
+    var connected = socketValue(socketState, "SOCKET_STATE", "CONNECTED");
+    var transport = socketValue(socketStream, "SOCKET_STREAM", "CONNECTED");
+    // Socket.stream is optional and not consumed by this WA-JS bundle. Only
+    // recognized negative values can veto state; an unknown hint cannot.
+    var transportBlocked = ["DISCONNECTED", "DISCONNECTING", "CONNECTING", "OPENING", "RESUMING", "OFFLINE", "SYNCING", "PAIRING"].some(function (name) {
+      return socketValue(socketStream, "SOCKET_STREAM", name);
+    });
+    var hasSocket = socketState != null;
+    // The real Socket model is current connection evidence. Loader completion
+    // and isMainReady are historical latches; neither can authorize or veto it.
+    // If a runtime has no socket signals, retain the strict public fallback.
+    var live = hasSocket ? connected && !transportBlocked && online !== false :
+      online === true && stream.mode === "MAIN" && stream.info === "NORMAL";
+    var reason = !alive ? "document_closed" : locked ? "locked" : authBlocked ? "authentication_blocked" : !id ? "identity_unavailable" :
+      !live ? (online === false ? "network_offline" : hasSocket ? "socket_unavailable" : "stream_unavailable") : hasSocket ? "ready_socket" : "ready_stream";
+    // All diagnostic values are fixed labels. Never serialize runtime strings,
+    // identity, message keys, chat IDs, or message contents to the log.
+    lastDiagnostic = "reason=" + reason + " socket=" + (socketState == null ? "absent" : connected ? "connected" : "other") +
+      " transport=" + (socketStream == null ? "absent" : transport ? "connected" : "other") +
+      " public=" + (stream.mode === "MAIN" && stream.info === "NORMAL" ? "ready" : "other") +
+      " loader=" + (read(function () { return root.WPP.isFullReady; }) === true ? "full" : "pending") +
+      " main=" + (read(function () { return root.WPP.conn.isMainReady(); }) === true ? "ready" : "pending");
+    return { session_id: session, identity: id, ready: reason === "ready_socket" || reason === "ready_stream" };
+  }
+  function diagnose() {
+    if (diagnostics.has(lastDiagnostic) || diagnostics.size >= 24) return;
+    diagnostics.add(lastDiagnostic);
+    try { Promise.resolve(invoke("dlog", { msg: "scheduler readiness: " + lastDiagnostic })).catch(function () {}); } catch (_) {}
+  }
+  function observeModels() {
+    var sock = socket(), stream = read(function () { return root.WPP.whatsapp.Stream; });
+    function changed() { epoch++; report(); }
+    if (sock && sock !== observedSocket && typeof sock.on === "function") {
+      observedSocket = sock;
+      sock.on("change:state", changed); sock.on("change:stream", changed);
+    }
+    if (stream && stream !== observedStream && typeof stream.on === "function") {
+      observedStream = stream;
+      stream.on("change:mode", changed); stream.on("change:info", changed);
+    }
   }
   async function report(force) {
     if (reporting) { reportAgain = reportAgain || force === true; return; }
+    observeModels();
     var s = state(), key = JSON.stringify(s);
+    diagnose();
     if (key === lastReport && force !== true) return;
     reporting = true;
     lastReport = key;
@@ -59,10 +104,11 @@
     }
   }
   root.__wrScheduleDeliveryRefresh = function (force) {
+    if (!started) root.__wrScheduleDeliveryStart();
     return report(force === true);
   };
   root.__wrScheduleDeliveryStart = function () {
-    if (started || !root.WPP) return;
+    if (started || !root.WPP || typeof root.WPP.on !== "function") return;
     started = true;
     var w = root.WPP;
     ["conn.authenticated", "conn.main_ready", "conn.online", "conn.logout", "conn.require_auth", "conn.stream_mode_changed", "conn.stream_info_changed"].forEach(function (event) {
@@ -72,9 +118,11 @@
         epoch++; report();
       });
     });
-    // These loader callbacks only observe future events in the bundled version.
-    if (typeof w.onInjected === "function" && !w.isInjected) w.onInjected(report);
-    if (typeof w.onFullReady === "function" && !w.isFullReady) w.onFullReady(report);
+    // Register before the immediate snapshot: these callbacks observe future
+    // loader events only. Rebind models as exports become available.
+    ["onInjected", "onReady", "onFullReady"].forEach(function (name) {
+      if (typeof w[name] === "function") w[name](function () { epoch++; report(); });
+    });
     report();
   };
   function allowed(job, generation) {
@@ -122,7 +170,8 @@
   }
   async function fileFor(job, generation) {
     var a = job.attachment;
-    if (!a || !["image", "video", "document"].includes(a.mode) || !Number.isSafeInteger(a.size) || a.size <= 0 || a.size > MAX_FILE || typeof a.name !== "string" || !a.name || typeof a.mime !== "string") throw new Error("invalid_attachment");
+    if (!a || !["image", "video", "document", "voice"].includes(a.mode) || !Number.isSafeInteger(a.size) || a.size <= 0 || a.size > MAX_FILE || typeof a.name !== "string" || !a.name || typeof a.mime !== "string") throw new Error("invalid_attachment");
+    if (a.mode === "voice" && (a.name !== "voice-note.ogg" || a.mime !== "audio/ogg; codecs=opus" || a.size > 4 * 1024 * 1024 || a.caption || job.text)) throw new Error("invalid_voice_message");
     if ((a.mode === "image" && !a.mime.startsWith("image/")) || (a.mode === "video" && !a.mime.startsWith("video/"))) throw new Error("invalid_media_type");
     var pieces = [];
     for (var offset = 0; offset < a.size;) {
@@ -180,7 +229,11 @@
       outcome = "unknown";
       if (job.kind === "text") sending = root.WPP.chat.sendTextMessage(chat, job.text, opts);
       else {
-        opts.type = job.attachment.mode; opts.caption = job.attachment.caption || "";
+        if (job.attachment.mode === "voice") {
+          opts.type = "audio"; opts.isPtt = true;
+        } else {
+          opts.type = job.attachment.mode; opts.caption = job.attachment.caption || "";
+        }
         opts.filename = job.attachment.name; opts.mimetype = job.attachment.mime;
         sending = root.WPP.chat.sendFileMessage(chat, file, opts);
       }

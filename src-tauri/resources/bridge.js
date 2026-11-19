@@ -378,17 +378,6 @@
           row.appendChild(item);
           list.appendChild(row);
         });
-        if (typeof window.__whatrustScheduleOpen === "function") {
-          var messages = document.createElement("button");
-          messages.type = "button";
-          messages.textContent = L("Mensagens agendadas", "Scheduled messages");
-          messages.style.cssText = "display:block;width:100%;text-align:left;padding:10px;border:0;border-radius:8px;background:white;color:#222;cursor:pointer";
-          messages.addEventListener("click", function () { dialog.close(); window.__whatrustScheduleOpen(false); });
-          var schedules = document.createElement("div");
-          schedules.setAttribute("role", "listitem");
-          schedules.appendChild(messages);
-          list.appendChild(schedules);
-        }
         if (!dialog.open) dialog.showModal();
         trigger.setAttribute("aria-expanded", "true");
         var first = list.querySelector("button"); if (first) first.focus(); else close.focus();

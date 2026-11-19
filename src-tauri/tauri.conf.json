@@ -25,6 +25,7 @@
   },
   "bundle": {
     "active": true,
+    "resources": ["resources/schedule-pdf-vendor.LICENSE"],
     "targets": [
       "deb",
       "appimage",

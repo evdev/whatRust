@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, "todo.js"), "utf8");
@@ -52,6 +53,162 @@ globalThis.__WR_LANG = "en";
 globalThis.document = { getElementById: () => null, body: null };
 eval(source);
 const api = globalThis.__whatrustTodoApi;
+
+// Exercise the real rail mount with a small DOM, including late schedule-ui
+// initialization. Only startup is skipped; placement and click handlers run.
+class RailEl extends El {
+  constructor(tag) {
+    super(tag);
+    this.style = { setProperty(key, value) { this[key] = value; }, removeProperty(key) { delete this[key]; } };
+    this.dataset = {};
+    this.listeners = {};
+    this.classList = { toggle: (name, on) => {
+      const names = new Set((this.className || "").split(/\s+/).filter(Boolean));
+      if (on) names.add(name);
+      else names.delete(name);
+      this.className = [...names].join(" ");
+    } };
+  }
+  addEventListener(name, fn) { this.listeners[name] = fn; }
+  attachShadow() {
+    this.shadowRoot = new RailEl("shadow");
+    this.shadowRoot.parentNode = this;
+    return this.shadowRoot;
+  }
+  append(...children) { children.forEach((child) => this.appendChild(child)); }
+  replaceChildren(...children) {
+    for (const child of this.children) child.parentNode = null;
+    this.children = [];
+    this.append(...children);
+  }
+  insertBefore(child, next) {
+    if (child.parentNode) child.parentNode.removeChild(child);
+    const index = next ? this.children.indexOf(next) : -1;
+    child.parentNode = this;
+    this.children.splice(index < 0 ? this.children.length : index, 0, child);
+    return child;
+  }
+  contains(child) { return child === this || this.children.some((node) => node.contains(child)); }
+  get firstChild() { return this.children[0] || null; }
+  get nextSibling() { return this.parentNode?.children[this.parentNode.children.indexOf(this) + 1] || null; }
+  get nextElementSibling() { return this.nextSibling; }
+  get isConnected() { return this === railRoot || !!this.parentNode?.isConnected; }
+  getAttribute(key) { return super.getAttribute(key) ?? (key.startsWith("data-") ? this.dataset[key.slice(5)] ?? null : null); }
+  matches(selector) {
+    if (selector.startsWith(".")) return (this.className || "").split(/\s+/).includes(selector.slice(1));
+    const [tag, attr] = selector.split("[");
+    if (tag && tag !== this.tagName) return false;
+    if (!attr) return true;
+    const [key, expected] = attr.slice(0, -1).split("=");
+    const value = this.getAttribute(key);
+    return expected === undefined ? value != null : value === expected;
+  }
+  querySelectorAll(selector) {
+    return this.children.flatMap((child) => [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)]);
+  }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+}
+const railRoot = new RailEl("html");
+const railBody = new RailEl("body");
+railRoot.appendChild(railBody);
+const railDoc = {
+  documentElement: railRoot, body: railBody,
+  createElement: (tag) => new RailEl(tag),
+  createTextNode: (value) => Object.assign(new RailEl("#text"), { textContent: value }),
+  getElementById(id) {
+    let found = null;
+    function visit(node) { if (node.id === id) found = node; node.children.forEach(visit); }
+    visit(railRoot);
+    return found;
+  },
+  querySelectorAll: () => [], querySelector: () => null, addEventListener() {},
+};
+const railTimers = [];
+const railEvents = {};
+const railContext = {
+  location: { origin: "https://web.whatsapp.com" }, document: railDoc,
+  __WR_LANG: "en", setTimeout: (fn) => { railTimers.push(fn); return railTimers.length; },
+  clearTimeout() {}, addEventListener(name, handler) { railEvents[name] = handler; },
+  setInterval() {}, getComputedStyle: () => ({ flexDirection: "column", backgroundColor: "white" }),
+};
+railContext.window = railContext;
+runInNewContext(source.replace(/  if \(document\.readyState === "loading"\) document\.addEventListener\("DOMContentLoaded", arm\);\r?\n  else arm\(\);/,
+  '  root.railTest = { mountRail: mountRail, sync: syncScheduleAvailability, paint: paintBadge };'), railContext);
+const mountTestRail = () => railContext.railTest.mountRail();
+const accountAnchor = new RailEl("button");
+accountAnchor.id = "__whatrust_accounts";
+accountAnchor.getBoundingClientRect = () => box(36, 36, 14, 330);
+railBody.appendChild(accountAnchor);
+const chatColumn = new RailEl("div");
+chatColumn.id = "side";
+chatColumn.getBoundingClientRect = () => box(400, 700, 70, 0);
+railBody.appendChild(chatColumn);
+mountTestRail();
+assert(!railDoc.getElementById("__whatrust_todo_scheduled"), "an unavailable scheduler leaves To-Do and Replies usable");
+const scheduledCalls = [];
+let scheduledCleanups = 0;
+railContext.__wrMountScheduledPage = (container, options, close) => {
+  const page = container.appendChild(new RailEl("section"));
+  scheduledCalls.push({ container, options, close });
+  return () => { scheduledCleanups++; page.parentNode.removeChild(page); };
+};
+railEvents["whatrust-schedule-ready"]();
+assert(railTimers.length === 1, "late schedule-ui initialization schedules a rail refresh without a DOM mutation");
+railTimers.shift()();
+const scheduledTab = railDoc.getElementById("__whatrust_todo_scheduled");
+const todoTab = railDoc.getElementById("__whatrust_todo_tab");
+const replyTab = railDoc.getElementById("__whatrust_todo_replies");
+const railStack = accountAnchor.parentNode;
+assert(railStack.children.map((node) => node.id).join() === "__whatrust_accounts,__whatrust_todo_tab,__whatrust_todo_replies,__whatrust_todo_scheduled", "Scheduled messages follows Replies in the same vertical stack");
+assert(scheduledTab.getAttribute("aria-label") === "Scheduled messages" && scheduledTab.type === "button", "Scheduled messages has an accessible English button label");
+let scheduleClickStopped = false;
+const clickRail = (tab) => tab.listeners.click({ preventDefault() {}, stopPropagation() { scheduleClickStopped = true; } });
+clickRail(scheduledTab);
+const leftHost = railDoc.getElementById("__whatrust_todo");
+const taskPage = leftHost.shadowRoot.querySelector(".wrap");
+const scheduledSlot = leftHost.shadowRoot.querySelector(".schedule-slot");
+assert(scheduleClickStopped && scheduledCalls.length === 1 && scheduledCalls[0].container === scheduledSlot, "the rail entry mounts Scheduled messages inside the existing left-column host");
+assert(leftHost.style.display === "block" && leftHost.style.left === "70px" && leftHost.style.width === "400px" && leftHost.style.height === "700px", "the host follows the chat-list column bounds");
+assert(scheduledCalls[0].options.chatOnly === false && scheduledCalls[0].options.chat === null && scheduledCalls[0].options.missedOnly === false, "the rail entry requests the account-wide schedule view");
+assert(scheduledTab.getAttribute("aria-pressed") === "true" && taskPage.hidden && !scheduledSlot.hidden, "Scheduled messages has the active tab treatment and owns the left column");
+clickRail(replyTab);
+assert(leftHost === railDoc.getElementById("__whatrust_todo") && !taskPage.hidden && scheduledSlot.hidden && scheduledCleanups === 1, "Replies uses the same host and unmounts Scheduled messages");
+assert(replyTab.getAttribute("aria-pressed") === "true" && scheduledTab.getAttribute("aria-pressed") === "false", "switching to Replies updates both rail buttons");
+clickRail(scheduledTab);
+clickRail(todoTab);
+assert(todoTab.getAttribute("aria-pressed") === "true" && scheduledSlot.hidden && scheduledCleanups === 2, "To-Do also unmounts Scheduled messages when selected");
+clickRail(scheduledTab);
+clickRail(scheduledTab);
+assert(leftHost.style.display === "none" && scheduledTab.getAttribute("aria-pressed") === "false" && scheduledCleanups === 3, "a second click on Scheduled messages closes the page");
+const reviewOptions = { chatOnly: true, chat: { id: "123@c.us", name: "Ada" }, missedOnly: true };
+railContext.__wrShowScheduledPage(reviewOptions);
+assert(scheduledCalls.at(-1).options === reviewOptions && scheduledTab.getAttribute("aria-pressed") === "true", "a programmatic schedule request selects the rail tab and forwards the requested view");
+scheduledCalls.at(-1).close();
+assert(leftHost.style.display === "none" && scheduledCleanups === 4, "the schedule page can close its own host");
+mountTestRail();
+assert(railStack.children.length === 4, "remounting keeps a single Scheduled messages entry");
+railContext.__WR_LANG = "pt";
+railContext.railTest.paint();
+assert(scheduledTab.getAttribute("aria-label") === "Mensagens agendadas", "the Scheduled messages label follows Portuguese localization");
+railStack.parentNode.removeChild(railStack);
+for (let attempt = 0; attempt < 10; attempt++) mountTestRail();
+const scheduledFallback = railDoc.getElementById("__whatrust_todo_schedule_fallback");
+assert(scheduledFallback.style.display === "inline-flex" && scheduledFallback.textContent === "Mensagens agendadas", "a missing rail exposes the localized scheduled-list fallback");
+assert(railDoc.getElementById("__whatrust_todo_fallback").style.bottom === "100px" && scheduledFallback.style.cssText.includes("bottom:12px"), "the fallback puts To-Do above Replies and Scheduled messages below Replies");
+clickRail(scheduledFallback);
+assert(scheduledCalls.length === 5 && scheduledCalls.at(-1).container === scheduledSlot && scheduledCalls.at(-1).options.chatOnly === false, "the fallback opens the same account-wide schedule page");
+railBody.appendChild(railStack);
+mountTestRail();
+assert(scheduledFallback.style.display === "none" && railStack.children.length === 4, "a recovered rail hides the fallback and restores the entry after Replies");
+delete railContext.__wrMountScheduledPage;
+mountTestRail();
+assert(!railDoc.getElementById("__whatrust_todo_scheduled") && scheduledFallback.style.display === "none", "removing scheduler availability removes its controls without changing the existing rail entries");
+assert(leftHost.style.display === "none" && scheduledCleanups === 5, "scheduler unavailability unmounts the active page");
+clickRail(scheduledTab);
+assert(scheduledCalls.length === 5 && railStack.children.length === 3, "a stale schedule click safely tolerates an unavailable API");
+railStack.parentNode.removeChild(railStack);
+for (let attempt = 0; attempt < 10; attempt++) mountTestRail();
+assert(railDoc.getElementById("__whatrust_todo_fallback").style.bottom === "12px", "without the scheduler the To-Do fallback returns to its original position");
 
 const star = { item_ids: ["a", "b"], state: "pending" };
 const openStars = [{ id: "a", done: false }, { id: "b", done: false }];
@@ -283,6 +440,7 @@ assert(api.clearanceFor(332, 375, 0, 141, 640) === 63, "the stack drops to a gap
 assert(api.clearanceFor(400, 375, 0, 141, 640) === 0, "a stack already below Meta AI stays put");
 assert(api.clearanceFor(393, 375, 61, 141, 640) === 63, "measuring after a shift does not add the margin twice");
 assert(api.clearanceFor(332, 600, 0, 141, 692) === 219, "the drop stops before the next rail icon");
+assert(api.clearanceFor(332, 600, 0, 183, 692) === 177, "the taller Scheduled messages stack reserves clearance before the next rail icon");
 
 const openItem = { id: "a", title: "send file", note: "", done: false, due_at: now - day, priority: "high", created_at: 2, message: { sender: "Ada", chat_name: "Ada", snippet: "file" } };
 const todayItem = { id: "b", title: "today", note: "note", done: false, due_at: now, priority: "low", created_at: 3, remind_at: now + 2 * day };

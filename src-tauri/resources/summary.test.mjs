@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, "summary.js"), "utf8");
@@ -229,6 +230,89 @@ const wideMenu = { left: 8, top: 100, right: 1272, bottom: 400, width: 1264, hei
 const belowWide = api.placeBesideMenu(wideMenu, 280, 80, 1280, 800);
 assert(belowWide.side === "below", "a full-width header menu uses the free space under it");
 assert(!coversMenu(belowWide, wideMenu), "the summary menu under a full-width menu does not cover its rows");
+
+function menuFixture(lang = "en") {
+  class MenuEl extends El {
+    constructor(tag) { super(tag); this.style = {}; this.listeners = {}; }
+    replaceChildren() { this.children = []; }
+    addEventListener(type, handler) { this.listeners[type] = handler; }
+    closest(selector) {
+      for (let node = this; node; node = node.parentNode) {
+        if (selector === "[data-wr-summary-menu]" && node.getAttribute("data-wr-summary-menu")) return node;
+        if (selector === "button, [role='button']" && node.tagName === "button") return node;
+      }
+      return null;
+    }
+    getBoundingClientRect() { return { left: 1100, top: 48, right: 1132, bottom: 80, width: 32, height: 32 }; }
+  }
+  const handlers = {};
+  const nativeMenu = { getBoundingClientRect() { return { ...rightMenu, bottom: 448, height: 400 }; } };
+  const doc = {
+    readyState: "loading",
+    documentElement: new MenuEl("html"),
+    createElement: (tag) => new MenuEl(tag),
+    querySelector: () => null,
+    querySelectorAll: () => [nativeMenu],
+    getElementById: () => null,
+    addEventListener(type, handler) { (handlers[type] ||= []).push(handler); },
+    dispatchEvent(event) { for (const handler of handlers[event.type] || []) handler(event); },
+  };
+  const calls = [];
+  const holds = [];
+  let chat = { id: "1555@c.us", formattedTitle: "Ada" };
+  const context = {
+    location: { origin: "https://web.whatsapp.com" },
+    __WR_LANG: lang,
+    document: doc,
+    WPP: { chat: { getActiveChat: () => chat } },
+    setTimeout: () => 1,
+    clearTimeout() {},
+    KeyboardEvent: class { constructor(type, options) { this.type = type; Object.assign(this, options); } },
+    __whatrustMenuHold: (key, held) => holds.push([key, held]),
+    __whatrustScheduleOpen(onlyChat, current) {
+      const companion = doc.documentElement.children[0];
+      calls.push({ onlyChat, current, closed: companion.style.display === "none", escaped: escapes.length });
+    },
+  };
+  const escapes = [];
+  doc.addEventListener("keydown", (event) => { if (event.key === "Escape") escapes.push(event.type); });
+  context.window = context;
+  runInNewContext(source, context);
+  const main = new MenuEl("div");
+  main.id = "main";
+  const header = main.appendChild(new MenuEl("header"));
+  const button = header.appendChild(new MenuEl("button"));
+  button.setAttribute("data-icon", "menu");
+  const event = (target, detail = 1) => ({ target, detail, clientX: 1110, clientY: 60, preventDefault() {}, stopPropagation() {} });
+  doc.dispatchEvent({ type: "pointerdown", ...event(button) });
+  const companion = doc.documentElement.children[0];
+  return {
+    companion, calls, holds,
+    setChat(value) { chat = value; },
+    pointer(row) { doc.dispatchEvent({ type: "pointerdown", ...event(row) }); },
+    keyboard(row) { row.listeners.click(event(row, 0)); },
+  };
+}
+const menu = menuFixture();
+const rows = menu.companion.children;
+assert(rows.length === 2 && rows[0].children[0].textContent === "Create summary" && rows[1].children[0].textContent === "Scheduled messages", "scheduled messages sits immediately below Create summary");
+assert(rows[1].tagName === "button" && rows[1].type === "button", "the scheduled list entry is a native keyboard accessible button");
+menu.pointer(rows[1]);
+assert(menu.calls.length === 1 && menu.calls[0].onlyChat === true && menu.calls[0].current.id === "1555@c.us" && menu.calls[0].current.name === "Ada", "the entry opens only the captured chat's scheduled messages");
+assert(menu.calls[0].closed && menu.calls[0].escaped === 1 && menu.holds.at(-1)[1] === false, "native and companion menus close and release their hold before opening the list");
+const keyboardMenu = menuFixture();
+keyboardMenu.keyboard(keyboardMenu.companion.children[1]);
+assert(keyboardMenu.calls.length === 1, "keyboard activation opens the scheduled list");
+const translatedMenu = menuFixture("pt");
+assert(translatedMenu.companion.children[1].children[0].textContent === "Mensagens agendadas", "the scheduled list entry is localized in Portuguese");
+const switchedMenu = menuFixture();
+switchedMenu.setChat({ id: "other@g.us", formattedTitle: "Other" });
+switchedMenu.pointer(switchedMenu.companion.children[1]);
+assert(switchedMenu.calls.length === 0, "a chat switch does not open another chat's scheduled messages");
+const unavailableMenu = menuFixture();
+unavailableMenu.setChat(null);
+unavailableMenu.pointer(unavailableMenu.companion.children[1]);
+assert(unavailableMenu.calls.length === 0, "an unavailable active chat cannot open the account-wide list");
 
 if (failures) {
   console.error(failures + " failed");

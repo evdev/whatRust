@@ -35,10 +35,6 @@
       });
       b.setAttribute("aria-current",String(a.id===state.current_id));b.dataset.item=a.id;menu.appendChild(b);
     });
-    if(own && typeof window.__whatrustScheduleOpen==="function"){
-      var messages=button(L("Mensagens agendadas","Scheduled messages"),function(){menu.close();window.__whatrustScheduleOpen(false);});
-      messages.dataset.item="scheduled";menu.appendChild(messages);
-    }
     var manage=button(L("Gerenciar contas e configurações","Manage accounts and settings"),openPanel);manage.dataset.item="manage";menu.appendChild(manage);
     var close=button(L("Fechar","Close"),function(){menu.close();});close.dataset.item="close";menu.appendChild(close);
     status=document.createElement("p");status.setAttribute("role","status");status.textContent=own?L("Conta atual: ","Current account: ")+own.name:L("Escolha uma conta","Choose an account");menu.appendChild(status);

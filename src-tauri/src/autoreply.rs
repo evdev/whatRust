@@ -97,6 +97,7 @@ pub struct ChatView {
     pub access: String,
     pub reply_mode: String,
     pub canned_text: String,
+    pub canned_hours: Option<CannedHours>,
     pub log: Vec<LogView>,
 }
 
@@ -108,6 +109,7 @@ pub struct Snapshot {
     pub video: bool,
     pub backend: String,
     pub backend_id: String,
+    pub canned_default: String,
     pub agent: bool,
     /// Host of the saved Grok Bot webhook, with no path and no key.
     pub grok_host: String,
@@ -186,6 +188,12 @@ struct Store {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CannedHours {
+    start: String,
+    end: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChatRow {
     #[serde(default)]
     name: String,
@@ -217,6 +225,8 @@ struct ChatRow {
     canned_text: String,
     #[serde(default)]
     canned_sent_at: u64,
+    #[serde(default)]
+    canned_hours: Option<CannedHours>,
 }
 
 fn access_memory() -> String {
@@ -240,6 +250,7 @@ impl Default for ChatRow {
             reply_mode: String::new(),
             canned_text: String::new(),
             canned_sent_at: 0,
+            canned_hours: None,
         }
     }
 }
@@ -252,6 +263,80 @@ struct LogRow {
     action: String,
     #[serde(default)]
     text: String,
+}
+
+fn time_minutes(value: &str) -> Option<u32> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 5
+        || bytes[2] != b':'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(i, c)| i == 2 || c.is_ascii_digit())
+    {
+        return None;
+    }
+    let hour = u32::from(bytes[0] - b'0') * 10 + u32::from(bytes[1] - b'0');
+    let minute = u32::from(bytes[3] - b'0') * 10 + u32::from(bytes[4] - b'0');
+    (hour < 24 && minute < 60).then_some(hour * 60 + minute)
+}
+
+fn within_canned_hours(hours: &CannedHours, minute: u32) -> bool {
+    let (Some(start), Some(end)) = (time_minutes(&hours.start), time_minutes(&hours.end)) else {
+        return false;
+    };
+    if start < end {
+        minute >= start && minute < end
+    } else if start > end {
+        minute >= start || minute < end
+    } else {
+        false
+    }
+}
+
+fn canned_hours_allow(hours: &Option<CannedHours>, timestamp_ms: u64) -> bool {
+    use chrono::Timelike;
+    let Some(hours) = hours else {
+        return true;
+    };
+    let Ok(timestamp) = i64::try_from(timestamp_ms) else {
+        return false;
+    };
+    let Some(utc) = chrono::DateTime::from_timestamp_millis(timestamp) else {
+        return false;
+    };
+    let local = utc.with_timezone(&chrono::Local);
+    within_canned_hours(hours, local.hour() * 60 + local.minute())
+}
+
+fn remember_answered(row: &mut ChatRow, tokens: impl IntoIterator<Item = String>) {
+    for token in tokens.into_iter().take(25) {
+        if !token.is_empty() && token.len() <= 180 && !row.answered_tokens.contains(&token) {
+            row.answered_tokens.push(token);
+        }
+    }
+    if row.answered_tokens.len() > MAX_TOKENS {
+        row.answered_tokens
+            .drain(0..row.answered_tokens.len() - MAX_TOKENS);
+    }
+}
+
+fn canned_candidate(
+    row: &ChatRow,
+    messages: &[ChatMessage],
+    incoming_ids: &[String],
+    now: u64,
+    limit: usize,
+    round: u8,
+) -> bool {
+    messages.iter().rev().take(limit).any(|message| {
+        (incoming_ids.is_empty() || incoming_ids.contains(&message.id))
+            && (round > 0 || fresh(message, row.armed_at_ms, now))
+            && !row.answered_tokens.contains(&message.msg_token)
+            && !canned_suppressed(row.canned_sent_at, message.timestamp_ms, now)
+            && canned_hours_allow(&row.canned_hours, message.timestamp_ms)
+            && canned_hours_allow(&row.canned_hours, now)
+    })
 }
 
 fn canned_suppressed(last: u64, received: u64, now: u64) -> bool {
@@ -456,6 +541,7 @@ fn snapshot_of(app: &AppHandle, account: &str) -> Result<Snapshot, String> {
         video: settings.video_transcribe,
         backend: prefs_label(&settings),
         backend_id: settings.standin_backend.clone(),
+        canned_default: settings.standin_canned_default.clone(),
         agent: crate::agents::is_agent(&settings.standin_backend),
         grok_host: agent.grok_host,
         privacy_ack: ack_covers(&store, &settings.standin_backend),
@@ -477,6 +563,7 @@ fn snapshot_of(app: &AppHandle, account: &str) -> Result<Snapshot, String> {
                 }
                 .into(),
                 canned_text: row.canned_text.clone(),
+                canned_hours: row.canned_hours.clone(),
                 armed_at_ms: row.armed_at_ms,
                 log: row
                     .log
@@ -1819,12 +1906,21 @@ pub fn autoreply_set_reply_mode(
     chat_id: String,
     mode: String,
     text: String,
+    canned_hours: Option<CannedHours>,
 ) -> Result<Snapshot, String> {
     crate::lock::require_unlocked(&app)?;
     let account = account_of(&window)?;
     let chat = direct_chat(&chat_id).ok_or_else(|| tr("That chat is not valid.").to_string())?;
     if !matches!(mode.as_str(), "ai" | "canned") || text.encode_utf16().count() > 10000 {
         return Err("Invalid reply settings.".into());
+    }
+    if let Some(hours) = &canned_hours {
+        if time_minutes(&hours.start).is_none()
+            || time_minutes(&hours.end).is_none()
+            || hours.start == hours.end
+        {
+            return Err("Choose two different valid times.".into());
+        }
     }
     let backend = settings::load(&app).standin_backend;
     let key = with_store(&app, &account, |store| {
@@ -1836,6 +1932,7 @@ pub fn autoreply_set_reply_mode(
         }
         row.reply_mode = mode;
         row.canned_text = text.trim().to_string();
+        row.canned_hours = canned_hours;
         row.armed_at_ms = now_ms().max(row.armed_at_ms.saturating_add(1));
         Ok(key)
     })?;
@@ -2207,8 +2304,18 @@ pub async fn autoreply_turn(
             {
                 return Ok(Step::Idle);
             }
-            let burst = burst_tripped(&row.sent_at, now);
-            let hourly = over_hourly(&row.sent_at, now, settings.standin_hourly_limit);
+            // Messages that cannot produce a canned reply must not pause the chat.
+            let eligible = !canned
+                || canned_candidate(
+                    row,
+                    &messages,
+                    &incoming_ids,
+                    now,
+                    history_limit(&settings.standin_backend),
+                    round,
+                );
+            let burst = eligible && burst_tripped(&row.sent_at, now);
+            let hourly = eligible && over_hourly(&row.sent_at, now, settings.standin_hourly_limit);
             let agent_capped = !burst
                 && !hourly
                 && !canned
@@ -2239,6 +2346,7 @@ pub async fn autoreply_turn(
                     canned,
                     row.canned_text.clone(),
                     row.canned_sent_at,
+                    row.canned_hours.clone(),
                 ))
             }
         };
@@ -2254,7 +2362,17 @@ pub async fn autoreply_turn(
             Ok(ready) => ready,
         }
     };
-    let (key, name, armed_at, chat_ids, answered, canned, canned_text, canned_sent_at) = prepared;
+    let (
+        key,
+        name,
+        armed_at,
+        chat_ids,
+        answered,
+        canned,
+        canned_text,
+        canned_sent_at,
+        canned_hours,
+    ) = prepared;
     let mut messages: Vec<ChatMessage> = messages
         .into_iter()
         .rev()
@@ -2280,22 +2398,19 @@ pub async fn autoreply_turn(
     if canned {
         let suppressed: Vec<_> = incoming
             .iter()
-            .filter(|message| canned_suppressed(canned_sent_at, message.timestamp_ms, now))
+            .filter(|message| {
+                canned_suppressed(canned_sent_at, message.timestamp_ms, now)
+                    || !canned_hours_allow(&canned_hours, message.timestamp_ms)
+                    || !canned_hours_allow(&canned_hours, now)
+            })
             .collect();
         if !suppressed.is_empty() {
             with_store(&app, &account, |store| {
                 if let Some(row) = store.chats.get_mut(&key) {
-                    for message in &suppressed {
-                        if !message.msg_token.is_empty()
-                            && !row.answered_tokens.contains(&message.msg_token)
-                        {
-                            row.answered_tokens.push(message.msg_token.clone());
-                        }
-                    }
-                    if row.answered_tokens.len() > MAX_TOKENS {
-                        row.answered_tokens
-                            .drain(0..row.answered_tokens.len() - MAX_TOKENS);
-                    }
+                    remember_answered(
+                        row,
+                        suppressed.iter().map(|message| message.msg_token.clone()),
+                    );
                 }
                 Ok(())
             })?;
@@ -2609,6 +2724,32 @@ fn record_agent_run(app: &AppHandle, account: &str, chat: &str) -> Result<(), St
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub fn autoreply_record_outside_hours(
+    window: tauri::Webview,
+    app: AppHandle,
+    chat_id: String,
+    armed_at_ms: u64,
+    incoming_tokens: Vec<String>,
+) -> Result<(), String> {
+    let account = account_of(&window)?;
+    let Some(chat) = direct_chat(&chat_id) else {
+        return Ok(());
+    };
+    with_store(&app, &account, |store| {
+        if let Some((_, row)) = find_row(store, &chat) {
+            if row.status == "armed"
+                && row.armed_at_ms == armed_at_ms
+                && row.reply_mode == "canned"
+                && !canned_hours_allow(&row.canned_hours, now_ms())
+            {
+                remember_answered(row, incoming_tokens);
+            }
+        }
+        Ok(())
+    })
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub fn autoreply_record_sent(
     window: tauri::Webview,
     app: AppHandle,
@@ -2628,15 +2769,7 @@ pub fn autoreply_record_sent(
             return Ok(());
         };
         remember_token(row, &msg_token);
-        for token in incoming_tokens.into_iter().flatten().take(25) {
-            if !token.is_empty() && token.len() <= 180 && !row.answered_tokens.contains(&token) {
-                row.answered_tokens.push(token);
-            }
-        }
-        if row.answered_tokens.len() > MAX_TOKENS {
-            let extra = row.answered_tokens.len() - MAX_TOKENS;
-            row.answered_tokens.drain(0..extra);
-        }
+        remember_answered(row, incoming_tokens.into_iter().flatten());
         if turn_id.starts_with("canned-") {
             row.canned_sent_at = now;
         }
@@ -2703,6 +2836,7 @@ pub fn push_prefs(app: &AppHandle, settings: &Settings) {
             "video": settings.video_transcribe,
             "backend": prefs_label(settings),
             "backend_id": settings.standin_backend,
+            "canned_default": settings.standin_canned_default,
             "agent": agent,
             "grok_host": grok_host,
             "privacy_ack": privacy_ack,
@@ -3222,6 +3356,80 @@ mod tests {
         assert!(repairs_a_bad_decision("claude_cli"));
         assert!(repairs_a_bad_decision("api"));
         assert!(!starts_agent_run("api", 0));
+    }
+
+    #[test]
+    fn only_eligible_canned_messages_can_trigger_reply_limits() {
+        use chrono::Timelike;
+        let now = now_ms();
+        let local = chrono::DateTime::from_timestamp_millis(now as i64)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        let minute = local.hour() * 60 + local.minute();
+        let format_time = |m: u32| format!("{:02}:{:02}", (m % 1440) / 60, m % 60);
+        let mut row = ChatRow::default();
+        row.armed_at_ms = now.saturating_sub(1000);
+        row.canned_hours = Some(CannedHours {
+            start: format_time(minute + 1),
+            end: format_time(minute + 2),
+        });
+        let message: ChatMessage = serde_json::from_value(
+            serde_json::json!({"id":"incoming", "msg_token":"ABC", "timestamp_ms": now}),
+        )
+        .unwrap();
+        let messages = vec![message];
+        assert!(!canned_candidate(&row, &messages, &[], now, 25, 0));
+        row.canned_hours = Some(CannedHours {
+            start: format_time(minute),
+            end: format_time(minute + 1),
+        });
+        assert!(canned_candidate(&row, &messages, &[], now, 25, 0));
+        row.canned_sent_at = now.saturating_sub(1000);
+        assert!(!canned_candidate(&row, &messages, &[], now, 25, 0));
+        row.canned_sent_at = 0;
+        remember_answered(&mut row, vec!["ABC".into(), "ABC".into(), "".into()]);
+        assert_eq!(row.answered_tokens, vec!["ABC"]);
+        assert!(!canned_candidate(&row, &messages, &[], now, 25, 0));
+    }
+
+    #[test]
+    fn canned_hours_validate_and_cover_day_and_overnight_windows() {
+        let day = CannedHours {
+            start: "09:00".into(),
+            end: "17:00".into(),
+        };
+        assert!(!within_canned_hours(&day, 8 * 60 + 59));
+        assert!(within_canned_hours(&day, 9 * 60));
+        assert!(within_canned_hours(&day, 16 * 60 + 59));
+        assert!(!within_canned_hours(&day, 17 * 60));
+        let night = CannedHours {
+            start: "22:00".into(),
+            end: "06:00".into(),
+        };
+        assert!(within_canned_hours(&night, 23 * 60));
+        assert!(within_canned_hours(&night, 0));
+        assert!(!within_canned_hours(&night, 6 * 60));
+        assert!(!within_canned_hours(&night, 12 * 60));
+        assert_eq!(time_minutes("24:00"), None);
+        assert_eq!(time_minutes("9:00"), None);
+        assert!(!within_canned_hours(
+            &CannedHours {
+                start: "09:00".into(),
+                end: "09:00".into()
+            },
+            540
+        ));
+        let old: ChatRow = serde_json::from_str("{}").unwrap();
+        assert!(old.canned_hours.is_none());
+        let mut row = old;
+        row.canned_hours = Some(night);
+        let restored: ChatRow =
+            serde_json::from_str(&serde_json::to_string(&row).unwrap()).unwrap();
+        assert!(within_canned_hours(
+            restored.canned_hours.as_ref().unwrap(),
+            0
+        ));
+        assert!(canned_hours_allow(&None, 0));
     }
 
     #[test]

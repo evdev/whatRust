@@ -412,6 +412,7 @@
     "Close": "Fechar",
     "Write a reply": "Escreva uma resposta",
     "Write a reply.": "Escreva uma resposta.",
+    "Mark as read": "Marcar como lida",
     "Send": "Enviar",
     "New message": "Nova mensagem",
     "Photo": "Foto",

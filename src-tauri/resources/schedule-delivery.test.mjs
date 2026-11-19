@@ -6,13 +6,41 @@ import { File } from 'node:buffer';
 const source = fs.readFileSync(new URL('./schedule-delivery.js', import.meta.url), 'utf8');
 const chat = '222@c.us', id = 'true_222@c.us_ABC';
 class WPPError extends Error { constructor(code) { super(code); this.code = code; } }
+
+test('scheduled voice sends Ogg Opus as PTT with durable preparation and no caption', async () => {
+  const f = fixture({ size: 15 });
+  f.job.kind = 'file'; f.job.text = '';
+  f.job.attachment = { id: 'voice', name: 'voice-note.ogg', mime: 'audio/ogg; codecs=opus', mode: 'voice', size: 15, caption: '' };
+  f.w.chat.sendFileMessage = async (...args) => {
+    assert.equal(f.calls.at(-1).cmd, 'schedule_delivery_prepare');
+    f.sends.push(args); return { id, ack: 1 };
+  };
+  await f.root.__wrScheduleDeliver(f.job);
+  const [, file, opts] = f.sends[0];
+  assert.equal(file.size, 15); assert.equal(file.name, 'voice-note.ogg');
+  assert.equal(file.type, 'audio/ogg; codecs=opus');
+  assert.equal(opts.type, 'audio'); assert.equal(opts.isPtt, true);
+  assert.equal(opts.mimetype, 'audio/ogg; codecs=opus');
+  assert.equal('caption' in opts, false); assert.equal(opts.messageId, id);
+  assert.equal(f.result().outcome, 'sent');
+});
+
+test('scheduled voice rejects WAV, oversized payloads, text, and captions before preparing', async () => {
+  for (const override of [{ mime: 'audio/wav' }, { name: 'voice-note.wav' }, { size: 4 * 1024 * 1024 + 1 }, { caption: 'caption' }, { text: 'draft' }]) {
+    const f = fixture({ size: 15 }); f.job.kind = 'file'; f.job.text = override.text || '';
+    f.job.attachment = { id: 'voice', name: 'voice-note.ogg', mime: 'audio/ogg; codecs=opus', mode: 'voice', size: 15, caption: '', ...override };
+    await f.root.__wrScheduleDeliver(f.job);
+    assert.equal(f.result().outcome, 'rejected'); assert.equal(f.sends.length, 0);
+    assert.equal(f.calls.some(c => c.cmd === 'schedule_delivery_prepare'), false);
+  }
+});
 function fixture(options = {}) {
   const calls = [], handlers = {}, sends = [];
   let identity = '111@c.us';
   const w = {
     isFullReady: true, isInjected: true,
     on: (e, fn) => { handlers[e] = fn; },
-    whatsapp: { enums: { SendMsgResult: { OK: 'OK' } } },
+    whatsapp: { enums: { SendMsgResult: { OK: 'OK' }, ...options.enums }, Socket: options.socket },
     util: { WPPError },
     conn: { getMyUserWid: () => identity, isAuthenticated: () => true, isMainReady: () => true, isOnline: () => true, getStreamData: () => ({ mode: 'MAIN', info: 'NORMAL' }) },
     chat: {
@@ -168,10 +196,89 @@ test('late WA-JS startup is event driven and readiness reports force refresh', a
   const f = fixture({ late: true }); assert.equal(f.calls.length, 0);
   f.root.WPP = f.w; f.root.__wrScheduleDeliveryStart();
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(f.calls[0].ready, true);
+  assert.equal(f.calls.find(c => c.cmd === 'schedule_report').ready, true);
   f.root.__whatrustLocked = true; await f.root.__wrScheduleDeliveryRefresh();
   assert.equal(f.calls.at(-1).ready, false);
   const count = f.calls.length; await f.root.__wrScheduleDeliveryRefresh(true); assert.equal(f.calls.length, count + 1);
   f.handlers.pagehide(); await new Promise(resolve => setImmediate(resolve));
   await f.root.__wrScheduleDeliver(f.job); assert.equal(f.sends.length, 0);
+});
+
+test('connected real socket overrides absent or stale loader and public stream hints', async () => {
+  for (const transport of [undefined, 'CONNECTED', 'unrecognized-hint', null]) {
+    const f = fixture({ socket: { state: 'CONNECTED', stream: transport } });
+    f.w.isFullReady = false; f.w.conn.isMainReady = () => false;
+    f.w.conn.getStreamData = () => ({ mode: 'OFFLINE', info: 'RESUMING' });
+    await f.root.__wrScheduleDeliveryRefresh(true);
+    assert.equal(f.calls.filter(c => c.cmd === 'schedule_report').at(-1).ready, true);
+    await f.root.__wrScheduleDeliver(f.job); assert.equal(f.result().outcome, 'sent');
+  }
+});
+
+test('absent public stream export does not hide identity or block a connected socket', async () => {
+  const f = fixture({ socket: { state: 'CONNECTED' } });
+  f.w.conn.getStreamData = () => { throw Error('not materialized'); };
+  delete f.w.conn.isMainReady; delete f.w.isFullReady; delete f.w.conn.isOnline;
+  await f.root.__wrScheduleDeliveryRefresh(true);
+  const s = f.calls.filter(c => c.cmd === 'schedule_report').at(-1);
+  assert.equal(s.ready, true); assert.equal(s.identity, '111@c.us');
+});
+
+test('socket offline, reconnecting, unpaired and explicit network offline veto stale ready hints', async () => {
+  for (const sock of [{ state: 'OPENING' }, { state: 'UNPAIRED' }, { state: 'UNPAIRED_IDLE' }, { state: 'CONNECTED', stream: 'DISCONNECTED' }, { state: 'CONNECTED', stream: 'RESUMING' }, { state: 'unknown-pii-value' }]) {
+    const f = fixture({ socket: sock });
+    await f.root.__wrScheduleDeliver(f.job); assert.equal(f.sends.length, 0);
+    await f.root.__wrScheduleDeliveryRefresh(true);
+    assert.equal(f.calls.filter(c => c.cmd === 'schedule_report').at(-1).ready, false);
+    assert.equal(f.calls.filter(c => c.cmd === 'dlog').some(c => c.msg.includes('unknown-pii-value')), false);
+  }
+  const f = fixture({ socket: { state: 'CONNECTED' } }); f.w.conn.isOnline = () => false;
+  await f.root.__wrScheduleDeliver(f.job); assert.equal(f.sends.length, 0);
+});
+
+test('socket readiness uses exported runtime enums including non-string values', async () => {
+  const f = fixture({ socket: { state: 9, stream: 3 }, enums: { SOCKET_STATE: { CONNECTED: 9 }, SOCKET_STREAM: { CONNECTED: 3 } } });
+  await f.root.__wrScheduleDeliver(f.job); assert.equal(f.result().outcome, 'sent');
+  f.w.whatsapp.Socket.state = 'CONNECTED'; f.job.token = 'second';
+  await f.root.__wrScheduleDeliver(f.job); assert.equal(f.sends.length, 1);
+});
+
+test('socket model changes report readiness immediately without loader events or polling', async () => {
+  const modelEvents = {};
+  const sock = { state: 'OPENING', stream: 'DISCONNECTED', on: (name, fn) => { modelEvents[name] = fn; } };
+  const f = fixture({ socket: sock });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.calls.filter(c => c.cmd === 'schedule_report').at(-1).ready, false);
+  sock.state = 'CONNECTED'; sock.stream = 'CONNECTED'; modelEvents['change:state']();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.calls.filter(c => c.cmd === 'schedule_report').at(-1).ready, true);
+  sock.stream = 'DISCONNECTED'; modelEvents['change:stream']();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.calls.filter(c => c.cmd === 'schedule_report').at(-1).ready, false);
+});
+
+test('loader callbacks register before snapshot and bind models that appear later', async () => {
+  const f = fixture({ late: true }), callbacks = {}, events = {};
+  for (const name of ['onInjected', 'onReady', 'onFullReady']) f.w[name] = fn => { callbacks[name] = fn; };
+  f.w.isInjected = true; f.w.isFullReady = true; f.root.WPP = f.w;
+  await f.root.__wrScheduleDeliveryRefresh();
+  assert.equal(Object.keys(callbacks).length, 3);
+  f.w.whatsapp.Socket = { state: 'OPENING', on: (name, fn) => { events[name] = fn; } };
+  callbacks.onReady(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(typeof events['change:state'], 'function');
+  assert.equal(f.calls.filter(c => c.cmd === 'schedule_report').at(-1).ready, false);
+});
+
+test('readiness diagnostics contain fixed labels, deduplicate repeated states and bound churn', async () => {
+  const f = fixture({ socket: { state: 'CONNECTED' } });
+  for (let i = 0; i < 50; i++) {
+    f.w.whatsapp.Socket.state = i % 2 ? 'CONNECTED' : 'private-state-' + i;
+    await f.root.__wrScheduleDeliveryRefresh(true);
+  }
+  const logs = f.calls.filter(c => c.cmd === 'dlog');
+  assert.equal(logs.length, 2);
+  for (const log of logs) {
+    assert.equal(/111|222|ABC|hello|private-state/.test(log.msg), false);
+    assert.match(log.msg, /^scheduler readiness: reason=[a-z_]+ socket=(absent|connected|other) transport=(absent|connected|other) public=(ready|other) loader=(full|pending) main=(ready|pending)$/);
+  }
 });

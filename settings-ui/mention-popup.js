@@ -103,13 +103,26 @@ async function watchTranscript() {
   if (transcriptPlaceholder) node.hidden = true;
 }
 
-async function openChat() {
-  const button = document.getElementById("open");
-  if (button.disabled) return;
-  button.disabled = true;
+const openButton = document.getElementById("open");
+const markReadButton = document.getElementById("mark-read");
+const sendButton = document.getElementById("send");
+
+function setActionPending(pending) {
+  openButton.disabled = pending;
+  markReadButton.disabled = pending;
+  sendButton.disabled = pending;
+}
+
+async function chatAction(command) {
+  if (sendButton.disabled) return;
+  setActionPending(true);
   showError("");
-  try { await invoke("mention_open"); } catch (error) { showError(String(error)); }
-  finally { button.disabled = false; }
+  try {
+    await invoke(command);
+  } catch (error) {
+    showError(String(error));
+    setActionPending(false);
+  }
 }
 
 const FILE_MAX = 8 * 1024 * 1024;
@@ -284,27 +297,18 @@ async function payload() {
 
 async function send(event) {
   event.preventDefault();
-  if (recorder && recorder.state === "recording") await finishRecording();
-  const text = document.getElementById("text");
-  const button = document.getElementById("send");
-  let body;
-  try {
-    body = await payload();
-  } catch (error) {
-    showError(String(error.message || error));
-    return;
-  }
-  if (body.kind === "text" && !body.text) {
-    showError("Write a reply.");
-    return;
-  }
-  button.disabled = true;
+  if (sendButton.disabled) return;
+  setActionPending(true);
   showError("");
+  const text = document.getElementById("text");
   try {
+    if (recorder && recorder.state === "recording") await finishRecording();
+    const body = await payload();
+    if (body.kind === "text" && !body.text) throw new Error("Write a reply.");
     await invoke("mention_reply", body);
   } catch (error) {
-    showError(String(error));
-    button.disabled = false;
+    showError(String(error?.message || error));
+    setActionPending(false);
     text.focus();
   }
 }
@@ -692,8 +696,9 @@ heardAudio.addEventListener("ended", () => {
   paintHeard();
 });
 
-document.getElementById("open").addEventListener("click", openChat);
-document.getElementById("body").addEventListener("click", openChat);
+openButton.addEventListener("click", () => chatAction("mention_open"));
+document.getElementById("body").addEventListener("click", () => chatAction("mention_open"));
+markReadButton.addEventListener("click", () => chatAction("mention_mark_read"));
 const close = document.getElementById("close");
 close.hidden = window.__MENTION_NATIVE_FRAME === true;
 close.addEventListener("click", () => {

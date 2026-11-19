@@ -21,6 +21,19 @@ function assert(cond, msg) {
 }
 
 assert(api, "helpers are exported for tests");
+assert(api.initialCannedText("", "Shared default") === "Shared default", "a new custom reply starts with the shared default");
+assert(api.initialCannedText("Personal", "Shared default") === "Personal", "a saved custom reply is preserved");
+assert(!api.replySettingsChanged({reply_mode: "canned", canned_text: "", canned_hours: null}, "default", "Shared default", null), "an unchanged default reply is saved");
+assert(api.replySettingsChanged({reply_mode: "canned", canned_text: "", canned_hours: null}, "custom", "Shared default", null), "switching to custom requires saving");
+assert(api.replySettingsChanged({reply_mode: "canned", canned_text: "Hi", canned_hours: null}, "custom", "Changed", null), "editing custom text requires saving");
+assert(api.replySettingsChanged({reply_mode: "canned", canned_text: "", canned_hours: null}, "default", "", {start: "09:00", end: "17:00"}), "changing hours requires saving");
+const timeAt = (h, m) => new Date(2026, 0, 1, h, m);
+assert(api.withinCannedHours(null, timeAt(3, 0)), "disabled canned hours allow any time");
+assert(api.withinCannedHours({start: "09:00", end: "17:00"}, timeAt(9, 0)), "canned hours include the start");
+assert(!api.withinCannedHours({start: "09:00", end: "17:00"}, timeAt(17, 0)), "canned hours exclude the end");
+assert(api.withinCannedHours({start: "22:00", end: "06:00"}, timeAt(0, 0)), "overnight hours include midnight");
+assert(!api.withinCannedHours({start: "22:00", end: "06:00"}, timeAt(12, 0)), "overnight hours exclude midday");
+assert(!api.withinCannedHours({start: "09:00", end: "09:00"}, timeAt(9, 0)), "equal times do not allow a reply");
 assert(api.canSendForTurn(true, {status: "armed", armed_at_ms: 10}, 10), "an unchanged armed chat can send");
 assert(!api.canSendForTurn(true, {status: "armed", armed_at_ms: 11}, 10), "a reply prepared before settings changed cannot send");
 assert(!api.canSendForTurn(true, {status: "paused", armed_at_ms: 10}, 10), "a paused chat cannot send");

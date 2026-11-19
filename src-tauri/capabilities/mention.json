@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "mention-popup",
-  "description": "Reply popups. Each one can read its own card, send a quote reply, open the chat, or close. It cannot reach settings, account management, or the WhatsApp page's notify command.",
+  "description": "Reply popups. Each one can read its own card, send a quote reply, open or mark the chat as read, or close. It cannot reach settings, account management, or the WhatsApp page's notify command.",
   "webviews": ["mention-*"],
   "permissions": [
     "core:default",
@@ -10,6 +10,7 @@
     "allow-mention-transcript",
     "allow-mention-reply",
     "allow-mention-open",
+    "allow-mention-mark-read",
     "allow-mention-dismiss"
   ]
 }

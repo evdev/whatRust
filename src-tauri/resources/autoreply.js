@@ -166,6 +166,28 @@
     return null;
   }
 
+  function initialCannedText(chatText, defaultText) { return chatText || defaultText || ""; }
+
+  function replySettingsChanged(row, selectedMode, text, hours) {
+    var initialMode = row.reply_mode === "canned" ? (row.canned_text ? "custom" : "default") : "ai";
+    if (selectedMode !== initialMode) return true;
+    if (selectedMode === "custom" && text.trim() !== row.canned_text) return true;
+    if (selectedMode === "ai") return false;
+    var saved = row.canned_hours || null;
+    return !!hours !== !!saved || (!!hours && (hours.start !== saved.start || hours.end !== saved.end));
+  }
+
+  function withinCannedHours(hours, date) {
+    if (!hours) return true;
+    function minute(value) {
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value || "")) return -1;
+      return Number(value.slice(0, 2)) * 60 + Number(value.slice(3));
+    }
+    var start = minute(hours.start), end = minute(hours.end);
+    var now = date.getHours() * 60 + date.getMinutes();
+    return start >= 0 && end >= 0 && (start < end ? now >= start && now < end : start > end && (now >= start || now < end));
+  }
+
   function canSendForTurn(enabled, row, armedAt) {
     return !!enabled && !!row && row.status === "armed" && !!armedAt && row.armed_at_ms === armedAt;
   }
@@ -176,6 +198,9 @@
       isDirectId: isDirectId,
       isFresh: isFresh,
       canSendForTurn: canSendForTurn,
+      withinCannedHours: withinCannedHours,
+      initialCannedText: initialCannedText,
+      replySettingsChanged: replySettingsChanged,
       isStandinEcho: isStandinEcho,
       searchMessages: searchMessages,
       messageChatId: messageChatId,
@@ -190,7 +215,7 @@
     return;
   }
 
-  var prefs = { enabled: false, delay_secs: 10, voice: false, video: false, backend: "the API", backend_id: "api", agent: false, grok_host: "" };
+  var prefs = { canned_default: "", enabled: false, delay_secs: 10, voice: false, video: false, backend: "the API", backend_id: "api", agent: false, grok_host: "" };
   var chats = {};
   var privacyAck = false;
   var timers = {};
@@ -382,6 +407,7 @@
     prefs.video = !!snapshot.video;
     prefs.backend = snapshot.backend || prefs.backend;
     prefs.backend_id = snapshot.backend_id || "api";
+    if (typeof snapshot.canned_default === "string") prefs.canned_default = snapshot.canned_default;
     prefs.agent = !!snapshot.agent;
     prefs.grok_host = snapshot.grok_host || "";
     privacyAck = !!snapshot.privacy_ack;
@@ -425,6 +451,7 @@
     prefs.video = !!next.video;
     prefs.backend = next.backend || prefs.backend;
     prefs.backend_id = next.backend_id || prefs.backend_id;
+    if (typeof next.canned_default === "string") prefs.canned_default = next.canned_default;
     if (typeof next.agent === "boolean") prefs.agent = next.agent;
     if (typeof next.grok_host === "string") prefs.grok_host = next.grok_host;
     if (typeof next.privacy_ack === "boolean") privacyAck = next.privacy_ack;
@@ -550,7 +577,9 @@
       ".panel{--bg:#fff;--fg:#111b21;--muted:#667781;--line:rgba(17,27,33,.1);--field:#f3f5f6;--hover:rgba(17,27,33,.06);--accent:#0b8f5a;--on:#fff;--shadow:0 18px 48px rgba(17,27,33,.16);box-sizing:border-box;width:100%;max-height:min(520px,calc(100vh - 88px));overflow:auto;padding:16px;border:1px solid var(--line);border-radius:18px;background:var(--bg);color:var(--fg);box-shadow:var(--shadow);font:13px/1.45 ui-sans-serif,system-ui,sans-serif;color-scheme:light}",
       ".panel[data-theme=dark]{--bg:#1e2a30;--fg:#e9edef;--muted:#8b9da6;--line:rgba(255,255,255,.08);--field:#2a3942;--hover:rgba(255,255,255,.07);--accent:#1daa61;--on:#042;--shadow:0 18px 50px rgba(0,0,0,.46);color-scheme:dark}",
       "button,textarea{font:inherit;color:inherit}",
-      ".head{display:flex;align-items:flex-start;gap:12px}",
+      ".head{display:flex;align-items:flex-start;gap:8px}",
+      ".head-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}",
+      ".canned-preview{white-space:pre-wrap;overflow-wrap:anywhere;padding:10px 12px;border-radius:10px;background:var(--field);margin-top:8px}",
       ".titles{min-width:0;flex:1}",
       ".title{font-size:15px;font-weight:600;letter-spacing:-.015em}",
       ".sub{display:flex;align-items:center;gap:6px;margin-top:3px;color:var(--muted);font-size:12px}",
@@ -578,7 +607,8 @@
       ".confirm{margin-top:12px;padding:12px;border-radius:12px;background:var(--field)}",
       ".confirm p{margin:0;font-size:12.5px}",
       ".confirm .btn{margin-top:10px}",
-      "select,input{display:block;width:100%;box-sizing:border-box;margin-top:6px;border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--field);color:var(--fg)}"
+      "select,input{display:block;width:100%;box-sizing:border-box;margin-top:6px;border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--field);color:var(--fg)}",
+      "[hidden]{display:none!important}.hours-check{display:flex;align-items:center;gap:8px;margin-top:10px}.hours-check input{width:auto;margin:0}.hours-times{display:flex;gap:10px}.hours-times label{flex:1;min-width:0}.hours-times span{margin-top:8px}"
     ].join("");
     panelShadow.appendChild(style);
     panelHost.addEventListener("mousedown", function (event) { event.stopPropagation(); });
@@ -740,7 +770,7 @@
     var chatRow = rowFor(current.id) || {};
     var access = chatRow.access || "memory";
     var replyMode = chatRow.reply_mode || "ai";
-    var shown = (prefs.enabled ? "on:" : "off:") + status + ":" + (prefs.agent ? access : "") + ":" + (prefs.backend_id || "") + ":" + replyMode + ":" + (chatRow.canned_text || "");
+    var shown = (prefs.enabled ? "on:" : "off:") + status + ":" + (prefs.agent ? access : "") + ":" + (prefs.backend_id || "") + ":" + replyMode + ":" + (chatRow.canned_text || "") + ":" + JSON.stringify(chatRow.canned_hours || null);
     var label = prefs.enabled && status === "armed"
       ? "Stand-in: On"
       : prefs.enabled && status === "paused"
@@ -774,7 +804,11 @@
     // After the panel is in the document. The scan walks every message, so a
     // click does not run it; the next refresh does, once the window is up.
     if (!blocked && !immediate) setTimeout(markStandin, 0);
-    if (panel.dataset.chat === current.id && panel.dataset.status === shown) return;
+    if (panel.dataset.chat === current.id && panel.dataset.status === shown) {
+      var preview = panel.querySelector(".canned-preview");
+      if (preview) preview.textContent = prefs.canned_default;
+      return;
+    }
     panel.dataset.chat = current.id;
     panel.dataset.status = shown;
     panel.innerHTML = "";
@@ -810,6 +844,25 @@
     close.appendChild(closeGlyph());
     close.addEventListener("click", function () { open = false; paint(true); });
     head.appendChild(titles);
+    var headActions = document.createElement("div");
+    headActions.className = "head-actions";
+    function button(text, kind, fn) {
+      var el = document.createElement("button");
+      el.type = "button";
+      el.className = "btn" + (kind ? " " + kind : "");
+      el.textContent = text;
+      el.addEventListener("click", fn);
+      headActions.appendChild(el);
+    }
+    if (status === "armed") {
+      button("Pause", "", function () { setChat(current, "pause", false); });
+    } else if (status === "paused") {
+      button("Resume", "primary", function () { confirmArm(current, "resume"); });
+      button("Turn off", "ghost", function () { setChat(current, "off", false); });
+    } else {
+      button("Turn on", "primary", function () { confirmArm(current); });
+    }
+    head.appendChild(headActions);
     head.appendChild(close);
     panel.appendChild(head);
     if (!prefs.enabled) {
@@ -818,26 +871,65 @@
       hint.textContent = "Turn on Allow stand-in in Settings before it can reply.";
       panel.appendChild(hint);
     }
-    var row = document.createElement("div");
-    row.className = "row";
-    var modeField = document.createElement("label");
+    var modeField = document.createElement("div");
     modeField.className = "field";
     var modeLabel = document.createElement("span"); modeLabel.textContent = "Reply type";
-    var modeSelect = document.createElement("select");
+    var modeSelect = document.createElement("select"); modeSelect.setAttribute("aria-label", "Reply type");
     [["ai", "AI reply"], ["default", "Default canned reply"], ["custom", "Custom canned reply"]].forEach(function (pair) {
       var opt = document.createElement("option"); opt.value = pair[0]; opt.textContent = pair[1]; modeSelect.appendChild(opt);
     });
     modeSelect.value = replyMode === "canned" ? (chatRow.canned_text ? "custom" : "default") : "ai";
     var cannedArea = document.createElement("textarea"); cannedArea.setAttribute("aria-label", "Custom canned reply");
-    cannedArea.maxLength = 10000; cannedArea.placeholder = "Write a reply for this chat"; cannedArea.value = chatRow.canned_text || "";
+    cannedArea.maxLength = 10000; cannedArea.placeholder = "Write a reply for this chat"; cannedArea.value = initialCannedText(chatRow.canned_text, prefs.canned_default);
+    var cannedPreview = document.createElement("div"); cannedPreview.className = "canned-preview";
+    cannedPreview.setAttribute("aria-label", "Default canned reply"); cannedPreview.textContent = prefs.canned_default;
     cannedArea.hidden = modeSelect.value !== "custom";
-    modeSelect.addEventListener("change", function () { cannedArea.hidden = modeSelect.value !== "custom"; });
+    var hoursBox = document.createElement("div");
+    var hoursLabel = document.createElement("label"); hoursLabel.className = "hours-check";
+    var hoursCheck = document.createElement("input"); hoursCheck.type = "checkbox"; hoursCheck.checked = !!chatRow.canned_hours;
+    var hoursTitle = document.createElement("span"); hoursTitle.textContent = "Only send canned replies during these hours";
+    hoursLabel.appendChild(hoursCheck); hoursLabel.appendChild(hoursTitle); hoursBox.appendChild(hoursLabel);
+    var hoursTimes = document.createElement("div"); hoursTimes.className = "hours-times";
+    function timeField(label, value) {
+      var wrap = document.createElement("label"), title = document.createElement("span"), input = document.createElement("input");
+      title.textContent = label; input.type = "time"; input.value = value; input.setAttribute("aria-label", label);
+      wrap.appendChild(title); wrap.appendChild(input); hoursTimes.appendChild(wrap); return input;
+    }
+    var hoursStart = timeField("From", chatRow.canned_hours ? chatRow.canned_hours.start : "09:00");
+    var hoursEnd = timeField("Until", chatRow.canned_hours ? chatRow.canned_hours.end : "17:00");
+    hoursBox.appendChild(hoursTimes);
+    var hoursHint = document.createElement("span"); hoursHint.textContent = "Every day, in this computer’s local time. The end time is excluded."; hoursBox.appendChild(hoursHint);
+    function showHours() {
+      hoursBox.hidden = modeSelect.value === "ai"; hoursTimes.hidden = !hoursCheck.checked; hoursHint.hidden = !hoursCheck.checked;
+      cannedArea.hidden = modeSelect.value !== "custom"; cannedPreview.hidden = modeSelect.value !== "default";
+      if (field && actions) { field.hidden = modeSelect.value !== "ai"; actions.hidden = modeSelect.value !== "ai"; if (modeSelect.value === "ai") loadInstructions(); }
+    }
+    var customEdited = false;
+    modeSelect.addEventListener("change", function () {
+      if (modeSelect.value === "custom" && !chatRow.canned_text && !customEdited) cannedArea.value = prefs.canned_default;
+      showHours();
+    });
+    cannedArea.addEventListener("input", function () { customEdited = true; });
+    hoursCheck.addEventListener("change", showHours); showHours();
     var saveMode = document.createElement("button"); saveMode.type = "button"; saveMode.className = "btn"; saveMode.textContent = "Save reply type";
     saveMode.addEventListener("click", function () {
       if (modeSelect.value === "custom" && !cannedArea.value.trim()) { showBanner(current.id, "Enter a custom canned reply."); return; }
-      invoke("autoreply_set_reply_mode", { chat_id: current.id, mode: modeSelect.value === "ai" ? "ai" : "canned", text: modeSelect.value === "custom" ? cannedArea.value : (modeSelect.value === "ai" ? (chatRow.canned_text || "") : "") }).then(function (snapshot) { applySnapshot(snapshot); paint(true); }).catch(function (error) { showBanner(current.id, docError(error, "Could not save the reply type.")); });
+      if (modeSelect.value !== "ai" && hoursCheck.checked && (!hoursStart.value || !hoursEnd.value || hoursStart.value === hoursEnd.value)) { showBanner(current.id, "Choose two different valid times."); return; }
+      var hours = modeSelect.value === "ai" ? (chatRow.canned_hours || null) : (hoursCheck.checked ? { start: hoursStart.value, end: hoursEnd.value } : null);
+      invoke("autoreply_set_reply_mode", { chat_id: current.id, mode: modeSelect.value === "ai" ? "ai" : "canned", text: modeSelect.value === "custom" ? cannedArea.value : (modeSelect.value === "ai" ? (chatRow.canned_text || "") : ""), canned_hours: hours }).then(function (snapshot) { applySnapshot(snapshot); paint(true); }).catch(function (error) { showBanner(current.id, docError(error, "Could not save the reply type.")); });
     });
-    modeField.appendChild(modeLabel); modeField.appendChild(modeSelect); modeField.appendChild(cannedArea); modeField.appendChild(saveMode); panel.appendChild(modeField);
+    var unsaved = document.createElement("span");
+    unsaved.textContent = "Save reply type to apply your changes."; unsaved.hidden = true;
+    function checkUnsaved() {
+      var selectedHours = hoursCheck.checked ? { start: hoursStart.value, end: hoursEnd.value } : null;
+      var changed = replySettingsChanged(chatRow, modeSelect.value, cannedArea.value, selectedHours);
+      headActions.querySelectorAll("button").forEach(function (el) { el.disabled = changed && (el.textContent === "Turn on" || el.textContent === "Resume"); });
+      unsaved.hidden = !changed;
+    }
+    [modeSelect, cannedArea, hoursCheck, hoursStart, hoursEnd].forEach(function (el) {
+      el.addEventListener("input", checkUnsaved); el.addEventListener("change", checkUnsaved);
+    });
+    modeField.appendChild(modeLabel); modeField.appendChild(modeSelect); modeField.appendChild(cannedPreview); modeField.appendChild(cannedArea); modeField.appendChild(hoursBox); modeField.appendChild(saveMode); modeField.appendChild(unsaved); panel.appendChild(modeField);
     if (prefs.agent && replyMode === "ai") {
       var accessField = document.createElement("label");
       accessField.className = "field";
@@ -882,23 +974,6 @@
       accessField.appendChild(applyTools);
       panel.appendChild(accessField);
     }
-    function button(text, kind, fn) {
-      var el = document.createElement("button");
-      el.type = "button";
-      el.className = "btn" + (kind ? " " + kind : "");
-      el.textContent = text;
-      el.addEventListener("click", fn);
-      row.appendChild(el);
-    }
-    if (status === "armed") {
-      button("Pause", "", function () { setChat(current, "pause", false); });
-    } else if (status === "paused") {
-      button("Resume", "primary", function () { confirmArm(current, "resume"); });
-      button("Turn off", "ghost", function () { setChat(current, "off", false); });
-    } else {
-      button("Turn on", "primary", function () { confirmArm(current); });
-    }
-    panel.appendChild(row);
     var field = document.createElement("label");
     field.className = "field";
     var fieldLabel = document.createElement("span");
@@ -937,15 +1012,22 @@
     });
     // Saving before the file has loaded would replace it with an empty box.
     [save, reset].forEach(function (el) { el.disabled = true; });
-    invoke("autoreply_get_chat_doc", { chat_id: current.id }).then(function (text) {
-      if (panel.dataset.chat !== current.id) return;
-      area.value = text || "";
-      [save, reset].forEach(function (el) { el.disabled = false; });
-    }).catch(function (error) {
-      if (panel.dataset.chat !== current.id) return;
-      showBanner(current.id, docError(error, "Could not read the instructions."));
-    });
+    var instructionsLoaded = false;
+    function loadInstructions() {
+      if (instructionsLoaded) return;
+      instructionsLoaded = true;
+      invoke("autoreply_get_chat_doc", { chat_id: current.id }).then(function (text) {
+        if (!panel.contains(area)) return;
+        area.value = text || "";
+        [save, reset].forEach(function (el) { el.disabled = false; });
+      }).catch(function (error) {
+        if (!panel.contains(area)) return;
+        instructionsLoaded = false;
+        showBanner(current.id, docError(error, "Could not read the instructions."));
+      });
+    }
     panel.appendChild(actions);
+    showHours();
   }
 
   function classText(el) {
@@ -1080,8 +1162,8 @@
     if (old) old.remove();
     note.appendChild(copy);
     note.appendChild(yes);
-    var actions = panel.querySelector(".row");
-    if (actions && actions.nextSibling) panel.insertBefore(note, actions.nextSibling);
+    var head = panel.querySelector(".head");
+    if (head && head.nextSibling) panel.insertBefore(note, head.nextSibling);
     else panel.appendChild(note);
   }
 
@@ -1299,6 +1381,13 @@
     await new Promise(function (resolve) { setTimeout(resolve, wait); });
     applySnapshot(await invoke("autoreply_state"));
     if (!canSendForTurn(prefs.enabled, rowFor(chatId), armedAt)) {
+      return false;
+    }
+    if ((step.turn_id || "").indexOf("canned-") === 0 && !withinCannedHours((rowFor(chatId) || {}).canned_hours, new Date())) {
+      await invoke("autoreply_record_outside_hours", {
+        chat_id: chatId, armed_at_ms: armedAt,
+        incoming_tokens: (pendingMsgs || []).map(function (msg) { return msg.msg_token || messageToken(msg.id); })
+      });
       return false;
     }
     inflight[chatId] = { text: step.text, until: Date.now() + 20000, turn_id: step.turn_id };

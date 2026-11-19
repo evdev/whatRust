@@ -947,6 +947,9 @@
   var expandedId = "";
   var host;
   var shadow;
+  var todoWrap;
+  var scheduleSlot;
+  var scheduleCleanup;
   var listEl;
   var searchEl;
   var quickEl;
@@ -955,6 +958,9 @@
   var tabButton;
   var tabBadge;
   var replyButton;
+  var scheduleButton;
+  var scheduleFallback;
+  var scheduleReady = false;
   var replyBadgeEl;
   var fallback;
   var fallbackLabel;
@@ -1161,6 +1167,8 @@
   var PANEL_CSS = [
     ":host{all:initial}",
     ".wrap{box-sizing:border-box;height:100%;display:flex;flex-direction:column;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,sans-serif;border-inline-end:1px solid var(--line)}",
+    ".schedule-slot{height:100%;width:100%}",
+    ".wrap[hidden],.schedule-slot[hidden]{display:none}",
     ".wrap *{box-sizing:border-box}",
     "header.top{display:flex;align-items:center;gap:8px;padding:12px 12px 4px}",
     "header.top h1{margin:0;font-size:18px;font-weight:600}",
@@ -1292,6 +1300,29 @@
     }
   }
 
+  function openScheduled(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (open && page === "scheduled") closePanel();
+    else showScheduledPage();
+  }
+
+  function buildScheduleTab() {
+    var button = el("button");
+    button.type = "button";
+    button.id = "__whatrust_todo_scheduled";
+    button.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>';
+    button.addEventListener("click", openScheduled);
+    return button;
+  }
+
+  function syncScheduleAvailability() {
+    var ready = typeof root.__wrMountScheduledPage === "function";
+    if (ready === scheduleReady) return;
+    scheduleReady = ready;
+    schedule();
+  }
+
   function ensureFallback() {
     if (fallback) return;
     fallback = el("button");
@@ -1322,6 +1353,13 @@
       togglePage("replies");
     });
     document.documentElement.appendChild(replyFallback);
+    scheduleFallback = el("button");
+    scheduleFallback.type = "button";
+    scheduleFallback.id = "__whatrust_todo_schedule_fallback";
+    scheduleFallback.dataset.mode = "fallback";
+    scheduleFallback.style.cssText = "position:fixed;left:12px;bottom:12px;z-index:100000;display:none;gap:6px;align-items:center;padding:8px 12px;border:0;border-radius:999px;background:#1daa61;color:#042;font:13px system-ui;cursor:pointer";
+    scheduleFallback.addEventListener("click", openScheduled);
+    document.documentElement.appendChild(scheduleFallback);
   }
 
   function paintCount(badges, info, dark, calm) {
@@ -1343,7 +1381,7 @@
     button.setAttribute("aria-label", title);
     button.setAttribute("aria-pressed", active ? "true" : "false");
     button.style.boxShadow = active ? "inset 0 0 0 2px " + (color || "#1daa61") : "none";
-    if (button.dataset.mode !== "switcher") {
+    if (button.dataset.mode === "rail") {
       button.style.background = active ? "color-mix(in srgb, currentColor 12%, transparent)" : "transparent";
     }
   }
@@ -1359,6 +1397,15 @@
     if (replyFallbackLabel) replyFallbackLabel.textContent = L("Respostas", "Replies");
     paintRailButton(tabButton, L("Lista de tarefas", "To-Do") + (text ? " (" + text + ")" : ""), open && page === "todo");
     paintRailButton(replyButton, L("Respostas", "Replies") + (replyText ? " (" + replyText + ")" : ""), open && page === "replies", "#53bdeb");
+    paintScheduleTab();
+  }
+
+  function paintScheduleTab() {
+    var scheduleTitle = L("Mensagens agendadas", "Scheduled messages");
+    var active = open && page === "scheduled";
+    paintRailButton(scheduleButton, scheduleTitle, active);
+    paintRailButton(scheduleFallback, scheduleTitle, active, "#042");
+    if (scheduleFallback && scheduleFallback.textContent !== scheduleTitle) scheduleFallback.textContent = scheduleTitle;
   }
 
   function insertAfter(anchor, button) {
@@ -1526,6 +1573,7 @@
     nudgeOffMeta(host);
     nudgeOffMeta(fallback);
     nudgeOffMeta(replyFallback);
+    nudgeOffMeta(scheduleFallback);
     if (!document.querySelectorAll) return;
     var notes = document.querySelectorAll("[data-whatrust='downloads']");
     for (var i = 0; i < notes.length; i++) nudgeOffMeta(notes[i]);
@@ -1572,6 +1620,10 @@
 
   function mountRail() {
     ensureFallback();
+    scheduleReady = typeof root.__wrMountScheduledPage === "function";
+    if (!scheduleReady && open && page === "scheduled") closePanel();
+    if (!scheduleReady && scheduleButton && scheduleButton.parentNode) scheduleButton.parentNode.removeChild(scheduleButton);
+    if (!scheduleReady) scheduleFallback.style.display = "none";
     var choice = chooseAnchor(document);
     if (!choice || choice.mode !== "switcher") {
       switcherWait += 1;
@@ -1585,8 +1637,12 @@
       railMeta = null;
       if (tabButton && tabButton.parentNode) tabButton.parentNode.removeChild(tabButton);
       if (replyButton && replyButton.parentNode) replyButton.parentNode.removeChild(replyButton);
+      if (scheduleButton && scheduleButton.parentNode) scheduleButton.parentNode.removeChild(scheduleButton);
       fallback.style.display = "inline-flex";
+      fallback.style.bottom = scheduleReady ? "100px" : "12px";
       if (replyFallback) replyFallback.style.display = "inline-flex";
+      scheduleFallback.style.display = scheduleReady ? "inline-flex" : "none";
+      paintScheduleTab();
       if (!railWarned) {
         railWarned = true;
         crumb("todo: nav-rail fallback");
@@ -1596,14 +1652,20 @@
     railWarned = false;
     fallback.style.display = "none";
     if (replyFallback) replyFallback.style.display = "none";
+    scheduleFallback.style.display = "none";
     if (!tabButton || !tabButton.isConnected) tabButton = buildTab();
     if (!replyButton || !replyButton.isConnected) replyButton = buildReplyTab();
     styleTab(tabButton, choice.mode);
     styleTab(replyButton, choice.mode);
-    if (choice.el.id === "__whatrust_accounts" || choice.mode === "rail") stackUnder([tabButton, replyButton], choice.el);
+    if (scheduleReady) {
+      if (!scheduleButton || !scheduleButton.isConnected) scheduleButton = buildScheduleTab();
+      styleTab(scheduleButton, choice.mode);
+    }
+    if (choice.el.id === "__whatrust_accounts" || choice.mode === "rail") stackUnder([tabButton, replyButton, scheduleReady ? scheduleButton : null], choice.el);
     else {
       insertAfter(choice.el, tabButton);
       insertAfter(tabButton, replyButton);
+      if (scheduleReady) insertAfter(replyButton, scheduleButton);
     }
     nudgeRailOverlays();
     paintBadge();
@@ -1617,8 +1679,11 @@
     shadow = host.attachShadow({ mode: "open" });
     var style = el("style");
     style.textContent = PANEL_CSS;
-    var wrap = el("div");
-    wrap.className = "wrap";
+    todoWrap = el("div");
+    todoWrap.className = "wrap";
+    scheduleSlot = el("div");
+    scheduleSlot.className = "schedule-slot";
+    scheduleSlot.hidden = true;
     var header = el("header");
     header.className = "top";
     var title = el("h1", L("Lista de tarefas", "To-Do"));
@@ -1706,8 +1771,8 @@
     tabs.appendChild(clearBtn);
     listEl = el("div");
     listEl.className = "list";
-    wrap.append(header, searchEl, form, tabs, listEl);
-    shadow.append(style, wrap);
+    todoWrap.append(header, searchEl, form, tabs, listEl);
+    shadow.append(style, todoWrap, scheduleSlot);
     host.addEventListener("keydown", function (event) {
       event.stopPropagation();
     });
@@ -1830,7 +1895,7 @@
     if (!rect || rect.width < 80) {
       host.style.left = "64px";
       host.style.top = "0px";
-      host.style.width = "380px";
+      host.style.width = "min(380px, calc(100vw - 64px))";
       host.style.height = "100vh";
       return;
     }
@@ -1857,7 +1922,8 @@
     else showPage(next, "");
   }
 
-  function showPage(next, id) {
+  function showPage(next, id, scheduleOptions) {
+    unmountScheduledPage();
     var switching = page !== next;
     page = next;
     if (switching) {
@@ -1869,10 +1935,17 @@
     }
     stopMenuWatch();
     buildPanel();
+    todoWrap.hidden = page === "scheduled";
+    scheduleSlot.hidden = !todoWrap.hidden;
     open = true;
     host.style.display = "block";
     applyTheme();
     placePanel();
+    if (page === "scheduled") {
+      hideCapture();
+      scheduleCleanup = root.__wrMountScheduledPage(scheduleSlot, scheduleOptions, closePanel);
+      return;
+    }
     if (id) {
       var item = items.filter(function (entry) { return entry.id === id; })[0];
       if (page === "replies") filterMode = item && item.done ? "cleared" : "open";
@@ -1900,9 +1973,23 @@
     showPage("replies", id || "");
   }
 
+  function showScheduledPage(options) {
+    if (root.__whatrustLocked || typeof root.__wrMountScheduledPage !== "function") return false;
+    showPage("scheduled", "", options || { chatOnly: false, chat: null, missedOnly: false });
+    return true;
+  }
+
+  function unmountScheduledPage() {
+    var cleanup = scheduleCleanup;
+    scheduleCleanup = null;
+    if (typeof cleanup === "function") cleanup();
+  }
+
   function closePanel() {
     open = false;
     if (host) host.style.display = "none";
+    if (scheduleSlot) scheduleSlot.hidden = true;
+    unmountScheduledPage();
     paintBadge();
   }
 
@@ -2041,7 +2128,7 @@
   }
 
   function renderList() {
-    if (!listEl) return;
+    if (!listEl || page === "scheduled") return;
     renderChrome();
     if (page === "replies") {
       renderReplyList();
@@ -3812,6 +3899,7 @@
   };
 
   root.__whatrustTodoState = applyState;
+  root.__wrShowScheduledPage = showScheduledPage;
   root.__whatrustJumpToMessage = function (id, chat) {
     jumpTo({ message: { msg_id: id, msg_token: messageToken(id), chat_id: chat } });
   };
@@ -3873,6 +3961,8 @@
 
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape" && open) {
+      var path = typeof event.composedPath === "function" ? event.composedPath() : [];
+      if (path.some(function (node) { return node.tagName === "DIALOG" && node.open; })) return;
       var active = shadow && shadow.activeElement;
       if (active && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)) {
         if (typeof active.blur === "function") active.blur();
@@ -3890,6 +3980,8 @@
     if (!rail || !rail.contains(event.target)) return;
     if (tabButton && tabButton.contains(event.target)) return;
     if (replyButton && replyButton.contains(event.target)) return;
+    if (scheduleButton && scheduleButton.contains(event.target)) return;
+    if (scheduleFallback && scheduleFallback.contains(event.target)) return;
     closePanel();
   }, true);
 
@@ -3982,6 +4074,8 @@
   // The badge is a local-time idea, so it goes stale across midnight even when
   // nothing else changes. The message markers do not depend on the clock.
   setInterval(paintBadge, 60_000);
+  // schedule-ui announces its API after initializing, without needing a DOM mutation.
+  root.addEventListener("whatrust-schedule-ready", syncScheduleAvailability);
   // A reply can land without a fresh event the live rule will accept. Catch-up
   // is already limited to one fetch per chat a minute.
   setInterval(runCatchup, 60_000);

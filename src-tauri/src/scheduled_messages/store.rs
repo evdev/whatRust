@@ -79,6 +79,7 @@ pub enum Mode {
     Image,
     Video,
     Document,
+    Voice,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -328,6 +329,15 @@ impl Store {
                 .clone_from(caption);
         }
         files.extend_from_slice(new_attachments);
+        if files
+            .iter()
+            .any(|file| matches!(file.file.mode, Mode::Voice))
+            && (files.len() != 1
+                || !input.text.is_empty()
+                || files.iter().any(|file| !file.file.caption.is_empty()))
+        {
+            return Err("invalid_voice_message".into());
+        }
         if files.is_empty() && input.text.trim().is_empty() {
             return Err("empty_message".into());
         }
@@ -751,6 +761,7 @@ impl Mode {
             Self::Image => "image",
             Self::Video => "video",
             Self::Document => "document",
+            Self::Voice => "voice",
         }
     }
 }
@@ -805,6 +816,7 @@ fn map_attachment(row: &rusqlite::Row<'_>, from: usize) -> rusqlite::Result<Atta
         "image" => Mode::Image,
         "video" => Mode::Video,
         "document" => Mode::Document,
+        "voice" => Mode::Voice,
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
     Ok(Attachment {
@@ -1010,6 +1022,93 @@ mod tests {
         store.dispatch(candidate).unwrap();
         store.prepare(candidate, "test-message-id").unwrap();
         store.finish(candidate, Outcome::Sent, true).unwrap();
+    }
+
+    #[test]
+    fn voice_roundtrips_across_restart_and_rejects_text_captions_or_other_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("voice.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let mut input = input();
+        input.text.clear();
+        let voice = Attachment {
+            id: "voice-opus".into(),
+            file: FileInput {
+                name: "voice-note.ogg".into(),
+                mime: "audio/ogg; codecs=opus".into(),
+                size: 100,
+                mode: Mode::Voice,
+                caption: String::new(),
+            },
+        };
+        let now = due(&input, 0) - 1;
+        input.text = "draft".into();
+        assert!(store
+            .save(PROFILE, IDENTITY, &input, &[voice.clone()], now)
+            .is_err());
+        input.text.clear();
+        let mut captioned = voice.clone();
+        captioned.file.caption = "caption".into();
+        assert!(store
+            .save(PROFILE, IDENTITY, &input, &[captioned], now)
+            .is_err());
+        assert!(store
+            .save(
+                PROFILE,
+                IDENTITY,
+                &input,
+                &[voice.clone(), attachments()[0].clone()],
+                now
+            )
+            .is_err());
+        assert!(store.schedules(PROFILE, IDENTITY).unwrap().is_empty());
+        store
+            .save(PROFILE, IDENTITY, &input, &[voice], now)
+            .unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let saved = store.schedules(PROFILE, IDENTITY).unwrap().remove(0);
+        assert!(matches!(saved.attachments[0].file.mode, Mode::Voice));
+        assert_eq!(saved.attachments[0].file.mime, "audio/ogg; codecs=opus");
+        input.id = Some(saved.id);
+        input.revision = Some(saved.revision);
+        input.keep_attachment_ids = vec!["voice-opus".into()];
+        input.first_caption = Some("caption".into());
+        assert!(store.save(PROFILE, IDENTITY, &input, &[], now).is_err());
+        assert_eq!(store.schedules(PROFILE, IDENTITY).unwrap()[0].revision, 1);
+        store.due(now + 1, |_, _, _| false).unwrap();
+        let missed = store.review(PROFILE, IDENTITY).unwrap().remove(0);
+        assert_eq!(missed.state, "missed");
+        assert!(store.candidates().unwrap().is_empty());
+        assert_eq!(
+            store.decide(
+                PROFILE,
+                IDENTITY,
+                &missed.occurrence_id,
+                Action::Send,
+                false,
+                now + 2,
+            ),
+            Err("account_unavailable".into())
+        );
+        store
+            .decide(
+                PROFILE,
+                IDENTITY,
+                &missed.occurrence_id,
+                Action::Send,
+                true,
+                now + 3,
+            )
+            .unwrap();
+        let candidate = store.candidates().unwrap().remove(0);
+        assert_eq!(candidate.approved_at, Some(now + 3));
+        assert!(matches!(
+            candidate.attachment.as_ref().map(|file| &file.file.mode),
+            Some(Mode::Voice)
+        ));
+        claim_ack(&mut store, &candidate);
+        assert!(store.schedules(PROFILE, IDENTITY).unwrap().is_empty());
     }
 
     #[test]

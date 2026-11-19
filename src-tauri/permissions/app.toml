@@ -13,7 +13,7 @@ commands.allow = [
   "todo_snooze", "todo_dismiss_alarm", "todo_clear_done",
   "autoreply_state", "autoreply_set_chat", "autoreply_set_access", "autoreply_set_reply_mode", "autoreply_get_chat_doc",
   "autoreply_save_chat_doc", "autoreply_reset_chat_doc", "autoreply_open_chat_doc",
-  "autoreply_turn", "autoreply_record_sent", "autoreply_pause_self"
+  "autoreply_turn", "autoreply_record_sent", "autoreply_record_outside_hours", "autoreply_pause_self"
 ]
 
 [[permission]]

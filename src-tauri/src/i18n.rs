@@ -201,6 +201,7 @@ static EN_TABLE: &[(&str, &str)] = &[
     ("Escreva uma resposta.", "Write a reply."),
     ("A resposta é longa demais.", "The reply is too long."),
     ("Não foi possível enviar.", "Could not send."),
+    ("Não foi possível marcar a conversa como lida. Tente de novo.", "Could not mark the chat as read. Try again."),
     ("O áudio tem mais de 2 MB.", "The voice note is larger than 2 MB."),
     ("O áudio é longo demais.", "The voice note is too long."),
     ("Não foi possível reproduzir o áudio.", "Could not play the voice note."),

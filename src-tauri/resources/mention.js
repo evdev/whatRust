@@ -866,18 +866,19 @@
     }).catch(function () { fail(); });
   };
 
-  root.__whatrustMentionOpen = async function (chatId, request) {
+  root.__whatrustMentionChatAction = async function (chatId, request, method) {
+    if (method !== "openChatBottom" && method !== "markIsRead") return;
     var ok = false;
     var deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
       var wpp = root.WPP;
-      if (wpp && wpp.isReady && wpp.chat && typeof wpp.chat.openChatBottom === "function") {
-        try { ok = (await wpp.chat.openChatBottom(chatId)) !== false; } catch (e) {}
+      if (wpp && wpp.isReady && wpp.chat && typeof wpp.chat[method] === "function") {
+        try { ok = (await wpp.chat[method](chatId)) !== false; } catch (e) {}
         break;
       }
       await new Promise(function (resolve) { setTimeout(resolve, 250); });
     }
-    invoke("mention_opened", { request: request, ok: ok }).catch(function () {});
+    await invoke("mention_chat_action_done", { request: request, ok: ok }).catch(function () {});
   };
 
   function ensureWatch() {
@@ -917,10 +918,9 @@
         }).catch(function () {});
       },
     });
-    // A visible popup stays while this chat is only opened or read. A message
-    // sent in it closes the popup, including one that arrives from another
-    // device. A revoked message closes too. Read-on-the-phone is checked only
-    // for alerts parked by the lock.
+    // Reading a chat elsewhere leaves visible popups alone. The popup's own
+    // Mark as read action, a sent message, or a revocation can dismiss them.
+    // Read-on-the-phone is checked only for alerts parked by the lock.
     if (watching && !ensureWatch.settled) {
       ensureWatch.settled = true;
       try {
