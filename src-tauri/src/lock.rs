@@ -124,6 +124,18 @@ pub fn require_unlocked(app: &AppHandle) -> Result<(), String> {
     }
 }
 
+fn sync_scheduled_lock(app: &AppHandle, locked: bool) {
+    crate::scheduled_messages::wake(app);
+    let script = format!(
+        "window.__whatrustLocked={locked};window.__wrScheduleDeliveryRefresh?.();window.__wrScheduleChanged?.()"
+    );
+    for (label, view) in app.webviews() {
+        if crate::accounts::id_from_label(&label).is_some() {
+            let _ = view.eval(&script);
+        }
+    }
+}
+
 /// Lock the app: mark locked, hide every user-facing window (recording which were
 /// visible), and show the lock screen.
 pub fn lock_now(app: &AppHandle) {
@@ -164,6 +176,7 @@ fn lock_on_main(app: &AppHandle, prompt: bool) {
     crate::notify::on_lock(app);
     crate::todo::on_lock(app);
     crate::mention::on_lock(app);
+    sync_scheduled_lock(app, true);
     for (label, view) in app.webviews() {
         if label.starts_with("wa-") {
             let _ = view.eval("window.__whatrustCloseTranscriptSearch?.()");
@@ -209,6 +222,7 @@ fn unlock_on_main(app: &AppHandle) {
     state.prompt_requested.store(false, Ordering::SeqCst);
     crate::notify::on_unlock(app);
     *guard(&state.unlocked) = true;
+    sync_scheduled_lock(app, false);
     crate::todo::on_unlock(app);
     crate::voice::push_prefs(app, &crate::settings::load(app));
     if let Some(w) = app.get_webview_window("lock") {

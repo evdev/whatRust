@@ -101,6 +101,10 @@ jobs:
         if: matrix.js
         run: node src-tauri/resources/todo.test.mjs
 
+      - name: Scheduled messages UI and delivery tests
+        if: matrix.js
+        run: node --test src-tauri/resources/schedule-ui.test.mjs src-tauri/resources/schedule-delivery.test.mjs
+
       - name: summary.js tests — ranges and menu placement
         if: matrix.js
         run: node src-tauri/resources/summary.test.mjs

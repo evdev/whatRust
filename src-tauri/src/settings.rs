@@ -217,7 +217,9 @@ impl Default for Settings {
             summary_model_codex_cli: String::new(),
             summary_model_antigravity_cli: String::new(),
             standin_enabled: false,
-            standin_canned_default: "Thanks for your message! I’m away right now and will get back to you when I can.".into(),
+            standin_canned_default:
+                "Thanks for your message! I’m away right now and will get back to you when I can."
+                    .into(),
             standin_backend: "api".into(),
             standin_model_openrouter: None,
             standin_model_gemini: None,

@@ -317,7 +317,17 @@
   }, { capture: true, passive: false });
 
   // A small, keyboard-accessible account switcher owned by whatRust. It exposes
-  // only account names/unread counts and a request to focus an existing account.
+  // account names, unread and schedule review counts, and account navigation.
+  var scheduleCounts = new Map();
+  if (!window.__WHATRUST_WINDOWS__ && !window.__WHATRUST_SINGLE__) {
+    window.__wrScheduleAccountCountsChanged = function (counts) {
+      scheduleCounts = new Map((counts || []).map(function (entry) { return [entry.account_id, entry.count]; }));
+    };
+    window.__wrScheduleOpenAccountPicker = function () {
+      var trigger = document.getElementById("__whatrust_accounts");
+      if (trigger) trigger.click();
+    };
+  }
   function mountAccountSwitcher() {
     if (window.__WHATRUST_WINDOWS__ || window.__WHATRUST_SINGLE__) return;
     if (!document.body || document.getElementById("__whatrust_accounts")) return;
@@ -361,13 +371,24 @@
           var item = document.createElement("button"); item.type = "button";
           var row = document.createElement("div");
           row.setAttribute("role", "listitem");
-          item.textContent = String(account.name || "WhatsApp") + (account.unread > 0 ? "  ·  " + account.unread + L(" não lidas", " unread") : "");
-          item.setAttribute("aria-label", String(account.name || "WhatsApp") + (account.unread > 0 ? ", " + account.unread + L(" não lidas", " unread") : ""));
+          var missed = scheduleCounts.get(account.id);
+          item.textContent = String(account.name || "WhatsApp") + (account.unread > 0 ? " · " + account.unread + L(" não lidas", " unread") : "") + (missed ? " · " + missed + L(" agendamento(s) para revisar", " scheduled send(s) to review") : "");
           item.style.cssText = "display:block;width:100%;text-align:left;padding:10px;border:0;border-radius:8px;background:white;color:#222;cursor:pointer";
           item.addEventListener("click", function () { invoke("switch_account", { id: account.id }); dialog.close(); });
           row.appendChild(item);
           list.appendChild(row);
         });
+        if (typeof window.__whatrustScheduleOpen === "function") {
+          var messages = document.createElement("button");
+          messages.type = "button";
+          messages.textContent = L("Mensagens agendadas", "Scheduled messages");
+          messages.style.cssText = "display:block;width:100%;text-align:left;padding:10px;border:0;border-radius:8px;background:white;color:#222;cursor:pointer";
+          messages.addEventListener("click", function () { dialog.close(); window.__whatrustScheduleOpen(false); });
+          var schedules = document.createElement("div");
+          schedules.setAttribute("role", "listitem");
+          schedules.appendChild(messages);
+          list.appendChild(schedules);
+        }
         if (!dialog.open) dialog.showModal();
         trigger.setAttribute("aria-expanded", "true");
         var first = list.querySelector("button"); if (first) first.focus(); else close.focus();

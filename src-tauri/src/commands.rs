@@ -856,6 +856,7 @@ pub async fn remove_account(
     // even if closing its webview reports an error.
     crate::chat_summary::delete_account(&app, &removed.id);
     crate::autoreply::delete_account(&app, &removed.id);
+    crate::scheduled_messages::remove_account(&app, &removed.id);
 
     // Close the window if open. `close()` on a WebviewWindow only detaches the
     // view, and close-to-tray would hide it instead, so the WebKit process

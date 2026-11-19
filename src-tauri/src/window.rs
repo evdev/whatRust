@@ -115,12 +115,13 @@ fn wajs_when_ready() -> String {
         r#"(function(){function start(){if(!document.getElementById("pane-side")){setTimeout(start,500);return;}"#,
     );
     script.push_str(include_str!("../resources/wppconnect-wa.js"));
-    script.push_str("}start();})();");
+    script.push_str("\nwindow.__wrScheduleDeliveryStart?.();}start();})();");
     script
 }
 
 /// Platform routing keeps the existing non-Windows account-window flow.
 pub fn open_account_window(app: &AppHandle, account: &Account, hidden: bool) -> tauri::Result<()> {
+    take_over_scheduled_account(app, &accounts::window_label(&account.id));
     #[cfg(windows)]
     {
         crate::sessions::open_account(app, account, hidden)
@@ -133,6 +134,53 @@ pub fn open_account_window(app: &AppHandle, account: &Account, hidden: bool) -> 
             build_account_window(app, account, hidden).map(|_| ())
         }
     }
+}
+
+#[derive(Default)]
+pub(crate) struct ScheduledAccountViews(std::sync::Mutex<std::collections::HashSet<String>>);
+
+pub(crate) fn take_over_scheduled_account(app: &AppHandle, label: &str) -> bool {
+    app.try_state::<ScheduledAccountViews>()
+        .is_some_and(|views| crate::lock::guard(&views.0).remove(label))
+}
+
+/// Called from the scheduler worker. A temporary view uses the normal account
+/// profile but never becomes the selected account during its background load.
+pub(crate) fn scheduler_open_account(app: &AppHandle, id: &str) -> bool {
+    let _accounts = accounts::lock_mutations();
+    let label = accounts::window_label(id);
+    if !crate::lock::is_unlocked(app) || app.get_webview(&label).is_some() {
+        return false;
+    }
+    let Some(account) = accounts::load(app)
+        .accounts
+        .into_iter()
+        .find(|a| a.id == id)
+    else {
+        return false;
+    };
+    crate::lock::guard(&app.state::<ScheduledAccountViews>().0).insert(label.clone());
+    let opened = if crate::sessions::enabled() {
+        crate::sessions::warm_account(app, &account)
+    } else {
+        build_account_window(app, &account, true).map(|_| ())
+    };
+    if let Err(err) = opened {
+        crate::dlog::log(&format!("scheduled account: background load failed: {err}"));
+        scheduler_release_account(app, id);
+        return false;
+    }
+    true
+}
+
+pub(crate) fn scheduler_release_account(app: &AppHandle, id: &str) {
+    let label = accounts::window_label(id);
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if take_over_scheduled_account(&handle, &label) {
+            release_account_webview(&handle, &label);
+        }
+    });
 }
 
 // Keep navigation, injection and download hooks identical across platform builders.
@@ -158,8 +206,9 @@ macro_rules! account_webview {
             .zoom_hotkeys_enabled(false)
             .initialization_script(crate::i18n::init_script())
             .initialization_script(if cfg!(debug_assertions) && std::env::var("WHATRUST_ASR_SMOKE").as_deref() == Ok("1") { "window.__WHATRUST_AUDIO_SMOKE=true;" } else { "" })
+            .initialization_script(format!("window.__whatrustLocked={};", !crate::lock::is_unlocked($app)))
             .initialization_script(if cfg!(windows) {
-                format!("window.__WHATRUST_WINDOWS__=true;window.__whatrustNotificationEpoch={};window.__whatrustLocked={};",$app.state::<crate::notify::Recent>().epoch(),!crate::lock::is_unlocked($app))
+                format!("window.__WHATRUST_WINDOWS__=true;window.__whatrustNotificationEpoch={};",$app.state::<crate::notify::Recent>().epoch())
             } else if crate::sessions::enabled() {
                 // Linux/macOS single-window mode: header switcher instead of
                 // the legacy in-page one; notifications keep their own path.
@@ -174,6 +223,7 @@ macro_rules! account_webview {
             // WA-JS (Apache-2.0) reads WhatsApp's own media loader so a voice
             // note can be transcribed without pressing play. voice.js renders
             // the transcript under the bubble. See resources/wppconnect-wa.LICENSE.
+            .initialization_script(include_str!("../resources/schedule-delivery.js"))
             .initialization_script(wajs_when_ready())
             .initialization_script(include_str!("../resources/voice.js"))
             // Source-device icon beside the message time. The flag is the saved
@@ -189,6 +239,7 @@ macro_rules! account_webview {
             .initialization_script(include_str!("../resources/todo.js"))
             .initialization_script(include_str!("../resources/transcript-search.js"))
             .initialization_script(include_str!("../resources/autoreply.js"))
+            .initialization_script(include_str!("../resources/schedule-ui.js"))
             .initialization_script(include_str!("../resources/summary.js"))
             .initialization_script(crate::mention::boot_script($app, &$label))
             .initialization_script(include_str!("../resources/mention-chime.js"))
@@ -209,6 +260,13 @@ macro_rules! account_webview {
             // Belt-and-braces: cancel any `file://` navigation so a stray drop can never
             // navigate the window away and tear down the live WhatsApp session.
             .on_navigation(|url| url.scheme() != "file")
+            .on_page_load(|view, page| {
+                if page.event() == tauri::webview::PageLoadEvent::Started {
+                    crate::scheduled_messages::forget_view(view.app_handle(), view.label());
+                } else {
+                    let _ = view.eval("window.__wrScheduleDeliveryRefresh?.(true)");
+                }
+            })
             // Chat links go to the appropriate app or browser (issue #30).
             // A call popout needs a real window linked to its opener.
             .on_new_window({
@@ -429,6 +487,7 @@ pub(crate) fn build_account_view(
     app: &AppHandle,
     parent: &tauri::Window,
     account: &Account,
+    background: bool,
 ) -> tauri::Result<tauri::Webview> {
     let label = accounts::window_label(&account.id);
     crate::proxy::check_platform(&crate::settings::load(app))?;
@@ -437,6 +496,11 @@ pub(crate) fn build_account_view(
         WebviewUrl::External("https://web.whatsapp.com/".parse().expect("valid url")),
     );
     let builder = account_webview!(builder, app, label).additional_browser_args(WEBVIEW2_SYNC_ARGS);
+    let builder = if background {
+        builder.focused(false)
+    } else {
+        builder
+    };
     // Windows/macOS let the engine deliver file drops to the page itself. On
     // Linux the page never receives them, so Tauri's handler stays on and
     // `register_view_drop_handler` streams them into the visible account.
@@ -458,9 +522,12 @@ pub(crate) fn build_account_view(
     // creates them on macOS when that mode is on.
     #[cfg(target_os = "macos")]
     crate::webcrypto::attach(account.store_uuid);
+    // Keep the temporary view outside the client area until the session host
+    // can hide it. It still gets a normal viewport during the login check.
+    let left = if background { -1100. } else { 0. };
     let view = parent.add_child(
         builder,
-        tauri::LogicalPosition::new(0., 0.),
+        tauri::LogicalPosition::new(left, 0.),
         tauri::LogicalSize::new(1100., 800.),
     )?;
     view.set_auto_resize(false)?;
@@ -1367,6 +1434,7 @@ fn register_focus_listener(app: &AppHandle, win: &WebviewWindow) {
     let label = win.label().to_string();
     win.on_window_event(move |event| match event {
         tauri::WindowEvent::Focused(true) => {
+            take_over_scheduled_account(&app_handle, &label);
             if let Some(active) = app_handle.try_state::<ActiveAccount>() {
                 *crate::lock::guard(&active) = label.clone();
             }
@@ -1374,6 +1442,9 @@ fn register_focus_listener(app: &AppHandle, win: &WebviewWindow) {
             if let Some(w) = app_handle.get_webview_window(&label) {
                 focus_webview_windows(&w);
             }
+        }
+        tauri::WindowEvent::Destroyed => {
+            crate::scheduled_messages::forget_view(&app_handle, &label);
         }
         // Menu-bar mode: losing focus dismisses a presented panel; the
         // webview keeps running while hidden (see `background_throttling`).
@@ -2036,6 +2107,7 @@ pub(crate) fn release_account_webview(app: &AppHandle, label: &str) {
         }
         return;
     }
+    crate::scheduled_messages::forget_view(app, label);
     #[cfg(target_os = "macos")]
     crate::menubar::forget_window(label);
     let window = app.get_webview_window(label);
@@ -2085,12 +2157,13 @@ pub fn show_account(app: &AppHandle, label: &str) {
         }
         return;
     }
+    let warmed = take_over_scheduled_account(app, label);
     let existed = app.get_webview(label).is_some();
     let ready = ensure_account_webview(app, label);
     // The first time an account is opened while another is already open, give
     // it its own window. Switching back to one that is already open only
     // focuses it.
-    if crate::sessions::enabled() && ready && !existed {
+    if crate::sessions::enabled() && ready && (!existed || warmed) {
         // Detach waits on the UI thread. The tray calls this from that thread,
         // so the move onto its own window happens in the background.
         let app = app.clone();

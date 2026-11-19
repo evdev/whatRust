@@ -333,7 +333,7 @@ pub fn open_account(app: &AppHandle, account: &Account, hidden: bool) -> tauri::
     let parent = initialize(app, hidden)?;
     let label = accounts::window_label(&account.id);
     if app.get_webview(&label).is_none() {
-        let view = crate::window::build_account_view(app, &parent, account)?;
+        let view = crate::window::build_account_view(app, &parent, account, false)?;
         set_view_visible(app, &view, false);
     }
     if crate::lock::guard(&state(app).main_active).is_none() {
@@ -344,6 +344,15 @@ pub fn open_account(app: &AppHandle, account: &Account, hidden: bool) -> tauri::
     } else {
         layout(app, "main");
     }
+    Ok(())
+}
+
+pub(crate) fn warm_account(app: &AppHandle, account: &Account) -> tauri::Result<()> {
+    let parent = app.get_window("main").ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "account host is unavailable")
+    })?;
+    let view = crate::window::build_account_view(app, &parent, account, true)?;
+    set_view_visible(app, &view, false);
     Ok(())
 }
 
@@ -370,6 +379,7 @@ fn activate_on_main(app: &AppHandle, label: &str) {
     let Some(view) = app.get_webview(label) else {
         return;
     };
+    crate::window::take_over_scheduled_account(app, label);
     let parent = view.window();
     if parent.label() == "main" {
         *crate::lock::guard(&state(app).main_active) = Some(label.to_string());
@@ -570,6 +580,7 @@ pub fn detach(app: &AppHandle, id: &str) -> Result<(), String> {
     let _health = crate::ui_health::enter("detach account");
     crate::lock::require_unlocked(app)?;
     let label = accounts::window_label(id);
+    crate::window::take_over_scheduled_account(app, &label);
     let v = app
         .get_webview(&label)
         .ok_or_else(|| tr("Conta não está aberta").into_owned())?;
@@ -778,6 +789,7 @@ fn choose_remaining(app: &AppHandle, exclude: Option<&str>) {
 /// `main` window stays; a detached owner is destroyed with its view.
 pub fn close_account_view(app: &AppHandle, id: &str) -> tauri::Result<()> {
     let label = accounts::window_label(id);
+    crate::scheduled_messages::forget_view(app, &label);
     let Some(v) = app.get_webview(&label) else {
         return Ok(());
     };

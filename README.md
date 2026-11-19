@@ -77,6 +77,12 @@ Right-click a message and choose **Add to To-Do**, **Waiting on them**, or **I o
 
 Open **To-Do** or **Replies** near the account switcher to see what's outstanding and jump back to the message. Each account has its own lists. Reminders can fire while whatRust is in the tray. If the app was closed when a reminder came due, you'll see it next time you open the app.
 
+### Schedule a message
+
+In a source build, click the clock beside **Send** to schedule a draft or select photos, videos, and files. If whatRust cannot verify the files in WhatsApp’s attachment preview, select them again in the scheduling dialog. Choose a one-time send or a repeat in days, weeks, months, or years. A repeat keeps the time zone saved with it and can end on a date or after a set number of successful sends. Open **Scheduled messages** from the account controls to review, edit, or cancel upcoming messages.
+
+Schedules and attachment copies stay on this computer across restarts. whatRust can deliver through its connected WhatsApp session while open or in the tray. If a send comes due while the app is closed or the session is unavailable, whatRust asks you to send or skip it when you return. For repeats, the review shows the latest missed send.
+
 ### Let the stand-in answer while you're away
 
 Turn on **Allow stand-in** in **Settings → Stand-in**, then enable it from the header of an individual chat. Each chat starts off. You can write general instructions for how you like to reply and add notes for that particular conversation. In each chat, choose an AI reply or a canned reply using the shared default or a custom message. Edit the default in Stand-in settings. Canned replies are sent at most once every two hours per chat; messages arriving during that interval do not trigger a later reply.

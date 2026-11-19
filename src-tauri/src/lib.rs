@@ -39,6 +39,7 @@ mod notify;
 mod opener;
 mod proxy;
 mod rag;
+mod scheduled_messages;
 mod scrollbars;
 mod sessions;
 mod settings;
@@ -246,6 +247,8 @@ pub fn run() {
         .manage(integration::Integration::default())
         .manage(accounts::ActiveAccount::new("wa-default".into()))
         .manage(chat_summary::ChatSummaryState::default())
+        .manage(scheduled_messages::Scheduler::default())
+        .manage(window::ScheduledAccountViews::default())
         .manage(todo::TodoState::default())
         .manage(autoreply::AutoreplyState::default())
         .manage(mention::Popups::default())
@@ -334,6 +337,17 @@ pub fn run() {
             todo::todo_snooze,
             todo::todo_dismiss_alarm,
             todo::todo_clear_done,
+            scheduled_messages::schedule_snapshot,
+            scheduled_messages::schedule_save,
+            scheduled_messages::schedule_cancel,
+            scheduled_messages::schedule_decide,
+            scheduled_messages::schedule_stage_begin,
+            scheduled_messages::schedule_stage_chunk,
+            scheduled_messages::schedule_stage_discard,
+            scheduled_messages::schedule_report,
+            scheduled_messages::schedule_delivery_chunk,
+            scheduled_messages::schedule_delivery_prepare,
+            scheduled_messages::schedule_delivery_result,
             autoreply::autoreply_state,
             autoreply::autoreply_set_chat,
             autoreply::autoreply_set_access,
@@ -488,6 +502,7 @@ pub fn run() {
                 window::open_account_window(handle, account, open_hidden)?;
             }
             dlog::log("startup: account windows built");
+            scheduled_messages::start(handle.clone());
             // tao's content view must not re-interpret keys the webview left
             // unhandled (issue #73); needs a tao window to exist.
             #[cfg(target_os = "macos")]

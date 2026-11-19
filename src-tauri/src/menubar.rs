@@ -240,6 +240,7 @@ mod imp {
         else {
             return;
         };
+        crate::window::take_over_scheduled_account(app, &label);
         let Some(win) = ensure_window(app, &label) else {
             return;
         };

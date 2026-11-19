@@ -3,10 +3,12 @@
   function L(pt, en) { return window.__WR_LANG === "en" ? en : pt; }
   if (!(window.__WHATRUST_WINDOWS__ || window.__WHATRUST_SINGLE__) || location.origin !== "https://web.whatsapp.com") return;
   var state = { accounts: [], current_id: "", native_notifications: false };
+  var scheduledCounts = new Map();
   var host, root, menu, gear, accountButton, accountName, accountBadge, status, lastReport = "", observer, scheduled, resizeObserver, resizeTarget, themeObserver;
   function call(cmd, args) { var t=window.__TAURI__;if(!t||!t.core)return Promise.resolve(null);return t.core.invoke(cmd, args).catch(function () { return null; }); }
   function button(text, fn) { var b=document.createElement("button");b.type="button";b.textContent=text;b.addEventListener("click",function(e){e.stopPropagation();fn();});return b; }
   function openPanel() { if(menu.open)menu.close();call("open_app_panel"); }
+  function missedLabel(count) { return count + L(" agendamento(s) para revisar", " scheduled send(s) to review"); }
   function positionMenu(){var r=accountButton.getBoundingClientRect(),below=Math.max(0,innerHeight-12-r.bottom-8),above=Math.max(0,r.top-20),natural=menu.scrollHeight+2,down=below>=natural||below>=above;menu.style.maxHeight=Math.max(40,Math.min(innerHeight-24,down?below:above))+"px";var height=menu.offsetHeight;menu.style.top=Math.max(12,Math.min(down?r.bottom+8:r.top-height-8,innerHeight-height-12))+"px";menu.style.left=Math.max(12,Math.min(r.left,innerWidth-menu.offsetWidth-12))+"px";}
 
   function draw() {
@@ -17,12 +19,26 @@
     accountName.textContent=own ? own.name : L("Contas","Accounts");
     accountBadge.textContent=own && own.unread ? String(own.unread>99?"99+":own.unread) : "";
     accountBadge.hidden=!accountBadge.textContent;
-    accountButton.setAttribute("aria-label",L("Trocar conta","Switch account")+(own?": "+own.name:"")+(own&&own.unread?" · "+own.unread+L(" conversas não lidas"," unread chats"):""));
+    var totalMissed=Array.from(scheduledCounts.values()).reduce(function(total,count){return total+count;},0);
+    accountButton.setAttribute("aria-label",L("Trocar conta","Switch account")+(own?": "+own.name:"")+(own&&own.unread?" · "+own.unread+L(" conversas não lidas"," unread chats"):"")+(totalMissed?" · "+missedLabel(totalMissed):""));
     accountButton.title=own ? L("Conta: ","Account: ")+own.name+L(" — Trocar conta"," — Switch account") : L("Trocar conta do WhatsApp","Switch WhatsApp account");
+    if(totalMissed)accountButton.title+=" · "+missedLabel(totalMissed);
     gear.setAttribute("aria-label",L("Configurações do whatRust","whatRust settings"));gear.title=L("Configurações do whatRust","whatRust settings");menu.setAttribute("aria-label",L("Contas do whatRust","whatRust accounts"));
     menu.replaceChildren();
     var title=document.createElement("h2");title.textContent=L("Suas contas","Your accounts");menu.appendChild(title);
-    state.accounts.forEach(function(a){var b=button(a.name+(a.unread?" · "+a.unread+L(" conversas não lidas"," unread chats"):""),function(){menu.close();call("switch_account",{id:a.id});});b.setAttribute("aria-current",String(a.id===state.current_id));b.dataset.item=a.id;menu.appendChild(b);});
+    state.accounts.forEach(function(a){
+      var missed=scheduledCounts.get(a.id);
+      var b=button(a.name+(a.unread?" · "+a.unread+L(" conversas não lidas"," unread chats"):"")+(missed?" · "+missedLabel(missed):""),function(){
+        menu.close();
+        if(missed && a.id===state.current_id)window.__whatrustScheduleMissed?.();
+        else call("switch_account",{id:a.id});
+      });
+      b.setAttribute("aria-current",String(a.id===state.current_id));b.dataset.item=a.id;menu.appendChild(b);
+    });
+    if(own && typeof window.__whatrustScheduleOpen==="function"){
+      var messages=button(L("Mensagens agendadas","Scheduled messages"),function(){menu.close();window.__whatrustScheduleOpen(false);});
+      messages.dataset.item="scheduled";menu.appendChild(messages);
+    }
     var manage=button(L("Gerenciar contas e configurações","Manage accounts and settings"),openPanel);manage.dataset.item="manage";menu.appendChild(manage);
     var close=button(L("Fechar","Close"),function(){menu.close();});close.dataset.item="close";menu.appendChild(close);
     status=document.createElement("p");status.setAttribute("role","status");status.textContent=own?L("Conta atual: ","Current account: ")+own.name:L("Escolha uma conta","Choose an account");menu.appendChild(status);
@@ -30,6 +46,14 @@
     if(keepFocus){var restore=Array.from(menu.querySelectorAll("button")).find(function(b){return b.dataset.item===focusKey;})||menu.querySelector("button");if(restore)restore.focus();}
   }
   window.__wrRelang=function(){if(accountButton)draw();};
+  window.__wrScheduleAccountCountsChanged=function(counts){
+    scheduledCounts=new Map((counts||[]).map(function(entry){return [entry.account_id,entry.count];}));
+    if(accountButton)draw();
+  };
+  window.__wrScheduleOpenAccountPicker=function(){
+    if(accountButton && host.isConnected){if(!menu.open)accountButton.click();}
+    else call("open_app_panel");
+  };
   window.__whatrustState=function(next){if(!next)return;state=next;window.__whatrustPreferNative=!!next.native_notifications;window.__whatrustNotificationEpoch=next.notification_epoch||0;window.__whatrustLocked=!!next.notifications_locked;draw();};
   function create(){
     host=document.createElement("span");host.id="__whatrust_controls";host.setAttribute("data-whatrust","controls");

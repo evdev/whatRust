@@ -50,6 +50,17 @@ const PAGE_COMMANDS: &[&str] = &[
     "todo_snooze",
     "todo_dismiss_alarm",
     "todo_clear_done",
+    "schedule_snapshot",
+    "schedule_save",
+    "schedule_cancel",
+    "schedule_decide",
+    "schedule_stage_begin",
+    "schedule_stage_chunk",
+    "schedule_stage_discard",
+    "schedule_report",
+    "schedule_delivery_chunk",
+    "schedule_delivery_prepare",
+    "schedule_delivery_result",
     "autoreply_state",
     "autoreply_set_chat",
     "autoreply_set_access",
@@ -274,6 +285,24 @@ fn bridge_commands_are_refused_from_any_other_site() {
         "https://evil.example/",
         "notify"
     ));
+}
+
+#[test]
+fn schedule_commands_are_limited_to_whatsapp_account_views() {
+    let app = app();
+    for &command in PAGE_COMMANDS
+        .iter()
+        .filter(|cmd| cmd.starts_with("schedule_"))
+    {
+        assert!(!allowed(
+            &app,
+            "wa-default",
+            "https://other.example/",
+            command
+        ));
+        assert!(!allowed(&app, "settings", "tauri://localhost/", command));
+        assert!(!allowed(&app, "other", PAGE, command));
+    }
 }
 
 #[test]
