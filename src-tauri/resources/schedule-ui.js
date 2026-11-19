@@ -150,6 +150,14 @@
   function localDate(date) {
     return date.getFullYear() + "-" + String(date.getMonth() + 1).padStart(2, "0") + "-" + String(date.getDate()).padStart(2, "0") + "T" + String(date.getHours()).padStart(2, "0") + ":" + String(date.getMinutes()).padStart(2, "0");
   }
+  function splitLocal(value) {
+    var match = /^(\d{4}-\d\d-\d\d)T(\d\d:\d\d)$/.exec(value || "");
+    return match ? [match[1], match[2]] : ["", ""];
+  }
+  function joinLocal(date, time) {
+    var clock = String(time || "").slice(0, 5);
+    return /^\d{4}-\d\d-\d\d$/.test(date || "") && /^\d\d:\d\d$/.test(clock) ? date + "T" + clock : "";
+  }
   function invoke(command, args) {
     if (!root.__TAURI__ || !root.__TAURI__.core) return Promise.reject(new Error(L("Aplicativo indisponível.", "App unavailable.")));
     return root.__TAURI__.core.invoke(command, args || {});
@@ -178,7 +186,7 @@
     } catch (error) { await invoke("schedule_stage_discard", { stage_id: stage }).catch(function () {}); throw error; }
   }
   if (root.__WHATRUST_TEST) {
-    root.__whatrustScheduleUiApi = { chatId: chatId, scheduleChat: scheduleChat, draftText: draftText, latestReview: latestReview, reviewActions: reviewActions, messagePreview: messagePreview, validTime: validTime, originalFiles: originalFiles, clearSavedDraft: clearSavedDraft, stageFiles: stageFiles, attachmentMime: attachmentMime, captureObjectURLs: captureObjectURLs, verifyNativePreview: verifyNativePreview, otherAccountPending: otherAccountPending, errorText: errorText, composerContext: composerContext, actionSlot: actionSlot };
+    root.__whatrustScheduleUiApi = { chatId: chatId, scheduleChat: scheduleChat, draftText: draftText, latestReview: latestReview, reviewActions: reviewActions, messagePreview: messagePreview, validTime: validTime, splitLocal: splitLocal, joinLocal: joinLocal, originalFiles: originalFiles, clearSavedDraft: clearSavedDraft, stageFiles: stageFiles, attachmentMime: attachmentMime, captureObjectURLs: captureObjectURLs, verifyNativePreview: verifyNativePreview, otherAccountPending: otherAccountPending, errorText: errorText, composerContext: composerContext, actionSlot: actionSlot };
     root.__whatrustScheduleUiApi.reviewActionAvailable = reviewActionAvailable;
     return;
   }
@@ -234,7 +242,21 @@
       .schedule-preview-name{padding:5px 7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
       .schedule-preview-card img,.schedule-preview-card video{display:block;width:100%;height:107px;object-fit:contain;background:light-dark(#ebeff1,#111b21)}
       .schedule-preview-card img[data-pdf-page]{background:white}
-      .schedule-preview-card audio{display:block;width:100%;height:38px}
+      .schedule-voice{display:flex;align-items:center;gap:6px;min-width:0;padding:7px}
+      .schedule-voice audio{display:none!important}
+      .schedule-editor .schedule-voice-play,.schedule-editor .schedule-voice-speed{margin:0;border:0;background:#21c063;color:#082316;line-height:1;flex:none}
+      .schedule-editor .schedule-voice-play{display:grid;place-items:center;width:28px;height:28px;padding:0;border-radius:50%}
+      .schedule-editor .schedule-voice-play svg{width:14px;height:14px}
+      .schedule-editor .schedule-voice-play .pause,.schedule-editor .schedule-voice-play.playing .play{display:none}
+      .schedule-editor .schedule-voice-play.playing .pause{display:block}
+      .schedule-editor .schedule-voice-play .play{margin-left:2px}
+      .schedule-voice-duration{flex:none;min-width:32px;font-size:11px;font-variant-numeric:tabular-nums;color:light-dark(#52636c,#aebac1)}
+      .schedule-editor .schedule-voice-speed{height:24px;min-width:42px;padding:0 6px;border-radius:12px;font-size:11px;font-weight:700}
+      .schedule-editor .schedule-voice-progress{position:relative;flex:1;min-width:0;height:16px;margin:0;padding:0;border:0;border-radius:0;background:transparent;color:inherit;cursor:pointer}
+      .schedule-editor .schedule-voice-progress i{position:absolute;left:0;top:6px;z-index:1;height:4px;width:0;border-radius:99px;background:#21c063}
+      .schedule-editor .schedule-voice-progress::before{content:"";position:absolute;left:0;right:0;top:6px;height:4px;border-radius:99px;background:light-dark(#d5dee3,#2a3942)}
+      .schedule-when{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:8px;align-items:end}
+      .schedule-when .schedule-zone{grid-column:1 / -1}
       .schedule-editor button{margin:0;padding:6px 10px}
       .schedule-editor .schedule-link{background:transparent;border-color:transparent;flex:none;padding-inline:4px}
       .schedule-actions{justify-content:flex-end;padding-top:2px}
@@ -331,11 +353,71 @@
       urls.forEach(function (url) { root.URL.revokeObjectURL(url); }); urls = [];
       grid.replaceChildren();
     }
+    function clock(seconds) {
+      var total = Math.max(0, Math.floor(seconds || 0));
+      return Math.floor(total / 60) + ":" + String(total % 60).padStart(2, "0");
+    }
+    function voiceNote(file, card) {
+      // Play the local WAV through a hidden element. Native controls on Mac
+      // draw an AirPlay button, which is the generic audio player rather than
+      // a voice note. Rust stores the same samples as Ogg Opus.
+      var audio = el("audio"), url = root.URL.createObjectURL(file);
+      urls.push(url);
+      audio.hidden = true; audio.controls = false; audio.preload = "auto"; audio.disableRemotePlayback = true;
+      var row = el("div"), speeds = [1, 1.5, 2], speedIndex = 0;
+      row.className = "schedule-voice";
+      var play = el("button"); play.type = "button"; play.className = "schedule-voice-play";
+      play.innerHTML = '<svg class="play" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg><svg class="pause" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>';
+      var progress = el("button"), bar = el("i", undefined, progress);
+      progress.type = "button"; progress.className = "schedule-voice-progress";
+      progress.setAttribute("aria-label", L("Posição da nota de voz", "Voice note position"));
+      var duration = el("span", "0:00"); duration.className = "schedule-voice-duration";
+      var speed = el("button", "1.0x"); speed.type = "button"; speed.className = "schedule-voice-speed";
+      speed.setAttribute("aria-label", L("Velocidade de reprodução", "Playback speed"));
+      function paint() {
+        var decoded = Number.isFinite(audio.duration) ? audio.duration : 0;
+        var ratio = decoded ? Math.min(1, (audio.currentTime || 0) / decoded) : 0;
+        bar.style.width = (ratio * 100) + "%";
+        var shown = !decoded || (audio.paused && audio.currentTime < 0.2) ? decoded : audio.currentTime;
+        duration.textContent = clock(shown);
+      }
+      function setPlaying(on) {
+        play.classList.toggle("playing", on);
+        play.setAttribute("aria-label", on ? L("Pausar nota de voz", "Pause voice note") : L("Reproduzir nota de voz", "Play voice note"));
+      }
+      setPlaying(false);
+      play.addEventListener("click", async function () {
+        if (audio.paused) {
+          try { await audio.play(); } catch (_) { return; }
+          setPlaying(true);
+        } else { audio.pause(); setPlaying(false); }
+        paint();
+      });
+      speed.addEventListener("click", function () {
+        speedIndex = (speedIndex + 1) % speeds.length;
+        audio.playbackRate = speeds[speedIndex];
+        speed.textContent = speeds[speedIndex].toFixed(1) + "x";
+      });
+      progress.addEventListener("click", function (event) {
+        if (!Number.isFinite(audio.duration) || !audio.duration) return;
+        var rect = progress.getBoundingClientRect();
+        var ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / (rect.width || 1)));
+        audio.currentTime = ratio * audio.duration;
+        paint();
+      });
+      audio.addEventListener("timeupdate", paint);
+      audio.addEventListener("loadedmetadata", paint);
+      audio.addEventListener("ended", function () { audio.currentTime = 0; setPlaying(false); paint(); });
+      audio.addEventListener("error", function () { row.remove(); }, { once: true });
+      audio.src = url;
+      row.append(play, progress, duration, speed, audio);
+      card.prepend(row);
+    }
     function media(tag, blob, card, name, pdf) {
       var item = el(tag), url = root.URL.createObjectURL(blob);
       urls.push(url);
       if (tag === "img") { item.alt = name; item.decoding = "async"; item.loading = "lazy"; }
-      else { item.controls = true; item.preload = "metadata"; item.setAttribute("aria-label", name); }
+      else { item.controls = true; item.preload = "metadata"; item.disableRemotePlayback = true; item.setAttribute("aria-label", name); }
       if (pdf) item.setAttribute("data-pdf-page", "1");
       item.addEventListener("error", function () { item.remove(); }, { once: true });
       item.src = url; card.prepend(item);
@@ -358,7 +440,8 @@
         var filename = el("div", name, card); filename.className = "schedule-preview-name"; filename.title = name;
         if (!(typeof root.File === "function" && file instanceof root.File)) return;
         var mime = attachmentMime(file), type = voice ? "audio" : mode(file);
-        if (type === "image" || type === "video" || type === "audio") {
+        if (voice) voiceNote(file, card);
+        else if (type === "image" || type === "video") {
           // OS drag/drop sometimes omits MIME. Keep the bytes and set the format
           // explicitly so a local preview and WhatsApp use the same media type.
           media(type === "image" ? "img" : type, file.type === mime ? file : file.slice(0, file.size, mime), card, name, false);
@@ -391,10 +474,15 @@
     var label = el("label", undefined, form), messageLabel = el("span", "", label);
     var area = el("textarea", undefined, label); area.value = text;
     var zone = existing ? existing.time_zone : Intl.DateTimeFormat().resolvedOptions().timeZone;
-    var when = field(form, L("Enviar em", "Send on"), "datetime-local", existing ? existing.local_at : localDate(new Date(Date.now() + 3600000))); when.required = true;
-    var timeZone = el("span", zone, when.parentNode);
+    var initialWhen = splitLocal(existing ? existing.local_at : localDate(new Date(Date.now() + 3600000)));
+    var whenRow = el("div", undefined, form); whenRow.className = "schedule-when";
+    var sendDate = field(whenRow, L("Data", "Date"), "date", initialWhen[0]); sendDate.required = true;
+    var sendTime = field(whenRow, L("Hora", "Time"), "time", initialWhen[1]); sendTime.required = true; sendTime.step = "60";
+    var timeZone = el("span", zone, whenRow);
     timeZone.id = "schedule-time-zone"; timeZone.className = "schedule-zone";
-    when.setAttribute("aria-describedby", timeZone.id);
+    sendDate.setAttribute("aria-describedby", timeZone.id);
+    sendTime.setAttribute("aria-describedby", timeZone.id);
+    function scheduleLocal() { return joinLocal(sendDate.value, sendTime.value); }
     var repeat = existing && existing.repeat;
     var quick = el("div", undefined, form); quick.className = "schedule-quick";
     var unit = select(quick, L("Repetir", "Repeat"), [["", L("Não repetir", "Does not repeat")], ["day", L("Diariamente", "Daily")], ["week", L("Semanalmente", "Weekly")], ["month", L("Mensalmente", "Monthly")], ["year", L("Anualmente", "Yearly")]], repeat ? repeat.unit : "");
@@ -478,14 +566,15 @@
       if (source && source.previewFallback && !files.length) { status.textContent = previewHelp; return; }
       var voice = hasVoice(), sendFiles = voiceFile ? [voiceFile] : files;
       var n = Number(interval.value), max = Number(count.value);
-      if (!validTime(when.value, zone) || unit.value && (!Number.isInteger(n) || n < 1 || n > 1000 || ending.value === "date" && (!until.value || until.value < when.value.slice(0, 10)) || ending.value === "count" && (!Number.isSafeInteger(max) || max < 1 || max > Number(count.max))) || !area.value.trim() && !sendFiles.length && !retained.length) {
-        status.textContent = L("Confira a mensagem, data e repetição.", "Check the message, date and recurrence."); return;
+      var localAt = scheduleLocal();
+      if (!validTime(localAt, zone) || unit.value && (!Number.isInteger(n) || n < 1 || n > 1000 || ending.value === "date" && (!until.value || until.value < sendDate.value) || ending.value === "count" && (!Number.isSafeInteger(max) || max < 1 || max > Number(count.max))) || !area.value.trim() && !sendFiles.length && !retained.length) {
+        status.textContent = L("Confira a mensagem, data, hora e repetição.", "Check the message, date, time, and recurrence."); return;
       }
       busy = true; var stage = null;
       // Freeze the form and payload during staging so a second selection cannot change bytes.
       var controls = Array.from(dialog.querySelectorAll("input,select,textarea,button")); controls.forEach(function (c) { c.disabled = true; });
       try {
-        var body = { id: existing ? existing.id : null, revision: existing ? existing.revision : null, chat_id: chat.id, chat_name: chat.name, text: sendFiles.length || retained.length ? "" : area.value, first_caption: retained.length && !voice ? area.value : null, local_at: when.value, time_zone: zone, repeat: unit.value ? { unit: unit.value, interval: n, end_date: ending.value === "date" ? until.value : null, max_sends: ending.value === "count" ? max : null } : null, stage_id: null, keep_attachment_ids: retained };
+        var body = { id: existing ? existing.id : null, revision: existing ? existing.revision : null, chat_id: chat.id, chat_name: chat.name, text: sendFiles.length || retained.length ? "" : area.value, first_caption: retained.length && !voice ? area.value : null, local_at: localAt, time_zone: zone, repeat: unit.value ? { unit: unit.value, interval: n, end_date: ending.value === "date" ? until.value : null, max_sends: ending.value === "count" ? max : null } : null, stage_id: null, keep_attachment_ids: retained };
         if (sendFiles.length) { var cc = sendFiles.map(function (_, i) { return i === 0 ? area.value : captions[i] || ""; }); stage = await stageFiles(sendFiles.slice(), cc, voice); body.stage_id = stage; }
         if (root.__whatrustLocked) throw new Error(L("Conta bloqueada.", "Account locked."));
         await invoke("schedule_save", { input: body }); stage = null;
@@ -506,7 +595,7 @@
       finally { busy = false; controls.forEach(function (c) { c.disabled = false; }); updateControls(); }
     });
     dialog.addEventListener("cancel", function (event) { if (busy) event.preventDefault(); });
-    if (text || files.length || retained.length) when.focus(); else area.focus();
+    if (text || files.length || retained.length) sendDate.focus(); else area.focus();
   }
   function openList(container, options, closePage, initialTab) {
     var chatOnly = options.chatOnly, current = options.chat;
