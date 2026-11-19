@@ -21,6 +21,10 @@ function assert(cond, msg) {
 }
 
 assert(api, "helpers are exported for tests");
+assert(api.canSendForTurn(true, {status: "armed", armed_at_ms: 10}, 10), "an unchanged armed chat can send");
+assert(!api.canSendForTurn(true, {status: "armed", armed_at_ms: 11}, 10), "a reply prepared before settings changed cannot send");
+assert(!api.canSendForTurn(true, {status: "paused", armed_at_ms: 10}, 10), "a paused chat cannot send");
+assert(!api.canSendForTurn(false, {status: "armed", armed_at_ms: 10}, 10), "a disabled stand-in cannot send");
 assert(api.normalizeChatId("1555:14@lid") === "1555@lid", "a device suffix is the same chat");
 assert(api.normalizeChatId("false_1555@c.us_ABC") === "1555@c.us", "a message id yields its chat");
 assert(api.isDirectId("1555@c.us") === true, "a 1:1 chat is eligible");

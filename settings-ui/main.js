@@ -1,6 +1,6 @@
 const invoke = window.__TAURI__.core.invoke;
 const LANGS = ["pt-BR", "en"];
-const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "standin_enabled", "hide_app_banner"];
+const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "auto_star_todos", "standin_enabled", "hide_app_banner"];
 const AI_PROVIDERS = ["openrouter", "gemini", "anthropic"];
 const TEXT_CLI_PROVIDERS = ["claude_cli", "codex_cli", "antigravity_cli"];
 const STANDIN_CLI_PROVIDERS = [...TEXT_CLI_PROVIDERS, "grok_cli"];
@@ -368,6 +368,7 @@ async function load() {
   standinShown = standinBackend;
   document.getElementById("standin_delay_secs").value = String(s.standin_delay_secs || 10);
   document.getElementById("standin_hourly_limit").value = String(s.standin_hourly_limit || 12);
+  document.getElementById("standin_canned_default").value = s.standin_canned_default;
   document.getElementById("standin_hermes_url").value = s.standin_hermes_url || "";
   document.getElementById("standin_agent_timeout_secs").value = String(s.standin_agent_timeout_secs || 150);
   document.getElementById("standin_agent_runs_per_hour").value = String(s.standin_agent_runs_per_hour || 20);
@@ -525,6 +526,7 @@ async function save() {
   s.standin_antigravity_bin = standinBins.antigravity_cli;
   s.standin_delay_secs = parseInt(document.getElementById("standin_delay_secs").value, 10) || 10;
   s.standin_hourly_limit = parseInt(document.getElementById("standin_hourly_limit").value, 10) || 12;
+  s.standin_canned_default = document.getElementById("standin_canned_default").value.trim() || "Thanks for your message! I’m away right now and will get back to you when I can.";
   s.standin_hermes_url = document.getElementById("standin_hermes_url").value.trim();
   s.standin_agent_timeout_secs = parseInt(document.getElementById("standin_agent_timeout_secs").value, 10) || 150;
   s.standin_agent_runs_per_hour = parseInt(document.getElementById("standin_agent_runs_per_hour").value, 10) || 20;

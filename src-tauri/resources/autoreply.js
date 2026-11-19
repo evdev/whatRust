@@ -166,11 +166,16 @@
     return null;
   }
 
+  function canSendForTurn(enabled, row, armedAt) {
+    return !!enabled && !!row && row.status === "armed" && !!armedAt && row.armed_at_ms === armedAt;
+  }
+
   if (root.__WHATRUST_TEST) {
     root.__whatrustAutoreplyApi = {
       normalizeChatId: normalizeChatId,
       isDirectId: isDirectId,
       isFresh: isFresh,
+      canSendForTurn: canSendForTurn,
       isStandinEcho: isStandinEcho,
       searchMessages: searchMessages,
       messageChatId: messageChatId,
@@ -732,8 +737,10 @@
       return;
     }
     var status = statusOf(current.id);
-    var access = (rowFor(current.id) && rowFor(current.id).access) || "memory";
-    var shown = (prefs.enabled ? "on:" : "off:") + status + ":" + (prefs.agent ? access : "") + ":" + (prefs.backend_id || "");
+    var chatRow = rowFor(current.id) || {};
+    var access = chatRow.access || "memory";
+    var replyMode = chatRow.reply_mode || "ai";
+    var shown = (prefs.enabled ? "on:" : "off:") + status + ":" + (prefs.agent ? access : "") + ":" + (prefs.backend_id || "") + ":" + replyMode + ":" + (chatRow.canned_text || "");
     var label = prefs.enabled && status === "armed"
       ? "Stand-in: On"
       : prefs.enabled && status === "paused"
@@ -813,7 +820,25 @@
     }
     var row = document.createElement("div");
     row.className = "row";
-    if (prefs.agent) {
+    var modeField = document.createElement("label");
+    modeField.className = "field";
+    var modeLabel = document.createElement("span"); modeLabel.textContent = "Reply type";
+    var modeSelect = document.createElement("select");
+    [["ai", "AI reply"], ["default", "Default canned reply"], ["custom", "Custom canned reply"]].forEach(function (pair) {
+      var opt = document.createElement("option"); opt.value = pair[0]; opt.textContent = pair[1]; modeSelect.appendChild(opt);
+    });
+    modeSelect.value = replyMode === "canned" ? (chatRow.canned_text ? "custom" : "default") : "ai";
+    var cannedArea = document.createElement("textarea"); cannedArea.setAttribute("aria-label", "Custom canned reply");
+    cannedArea.maxLength = 10000; cannedArea.placeholder = "Write a reply for this chat"; cannedArea.value = chatRow.canned_text || "";
+    cannedArea.hidden = modeSelect.value !== "custom";
+    modeSelect.addEventListener("change", function () { cannedArea.hidden = modeSelect.value !== "custom"; });
+    var saveMode = document.createElement("button"); saveMode.type = "button"; saveMode.className = "btn"; saveMode.textContent = "Save reply type";
+    saveMode.addEventListener("click", function () {
+      if (modeSelect.value === "custom" && !cannedArea.value.trim()) { showBanner(current.id, "Enter a custom canned reply."); return; }
+      invoke("autoreply_set_reply_mode", { chat_id: current.id, mode: modeSelect.value === "ai" ? "ai" : "canned", text: modeSelect.value === "custom" ? cannedArea.value : (modeSelect.value === "ai" ? (chatRow.canned_text || "") : "") }).then(function (snapshot) { applySnapshot(snapshot); paint(true); }).catch(function (error) { showBanner(current.id, docError(error, "Could not save the reply type.")); });
+    });
+    modeField.appendChild(modeLabel); modeField.appendChild(modeSelect); modeField.appendChild(cannedArea); modeField.appendChild(saveMode); panel.appendChild(modeField);
+    if (prefs.agent && replyMode === "ai") {
       var accessField = document.createElement("label");
       accessField.className = "field";
       var accessLabel = document.createElement("span");
@@ -868,7 +893,7 @@
     if (status === "armed") {
       button("Pause", "", function () { setChat(current, "pause", false); });
     } else if (status === "paused") {
-      button("Resume", "primary", function () { setChat(current, "resume", false); });
+      button("Resume", "primary", function () { confirmArm(current, "resume"); });
       button("Turn off", "ghost", function () { setChat(current, "off", false); });
     } else {
       button("Turn on", "primary", function () { confirmArm(current); });
@@ -1018,9 +1043,10 @@
     }
   }
 
-  function confirmArm(current) {
-    if (privacyAck) {
-      setChat(current, "arm", false);
+  function confirmArm(current, action) {
+    action = action || "arm";
+    if (privacyAck || (rowFor(current.id) || {}).reply_mode === "canned") {
+      setChat(current, action, false);
       return;
     }
     ensureHost();
@@ -1049,7 +1075,7 @@
     yes.type = "button";
     yes.className = "btn primary";
     yes.textContent = "Continue";
-    yes.addEventListener("click", function () { setChat(current, "arm", true); });
+    yes.addEventListener("click", function () { setChat(current, action, true); });
     var old = panel.querySelector(".confirm");
     if (old) old.remove();
     note.appendChild(copy);
@@ -1260,20 +1286,19 @@
     })).then(function () { return messages; });
   }
 
-  async function sendText(chatId, step, pendingMsgs) {
+  async function sendText(chatId, step, pendingMsgs, armedAt) {
     var wpp = root.WPP;
-    var armedAt = (rowFor(chatId) || {}).armed_at_ms;
     if (!wpp || !wpp.chat || typeof wpp.chat.sendTextMessage !== "function") {
       throw new Error("WhatsApp is still opening");
     }
-    if (statusOf(chatId) !== "armed") return false;
+    if (!canSendForTurn(prefs.enabled, rowFor(chatId), armedAt)) return false;
     var wait = Math.max(1500, Math.min(4000, String(step.text || "").length * 25));
     if (typeof wpp.chat.markIsComposing === "function") {
       Promise.resolve().then(function () { return wpp.chat.markIsComposing(chatId, wait); }).catch(function () {});
     }
     await new Promise(function (resolve) { setTimeout(resolve, wait); });
     applySnapshot(await invoke("autoreply_state"));
-    if (!prefs.enabled || statusOf(chatId) !== "armed" || rowFor(chatId).armed_at_ms !== armedAt) {
+    if (!canSendForTurn(prefs.enabled, rowFor(chatId), armedAt)) {
       return false;
     }
     inflight[chatId] = { text: step.text, until: Date.now() + 20000, turn_id: step.turn_id };
@@ -1336,9 +1361,10 @@
     });
   }
 
-  function turn(chatId, name, pendingMsgs, round, exchanges) {
+  function turn(chatId, name, pendingMsgs, round, exchanges, expectedArmedAt) {
     if (busy[chatId] && round === 0) return Promise.resolve();
     busy[chatId] = true;
+    var armedAt = expectedArmedAt || (rowFor(chatId) || {}).armed_at_ms;
     return loadRecent(chatId).then(function (loaded) {
       var messages = loaded.slice();
       // Keep anything an earlier search round already paged in, so a second
@@ -1363,6 +1389,7 @@
         }
       });
       if (!round && !incomingIds.length) return { messages: messages, incomingIds: incomingIds, skip: true };
+      if ((rowFor(chatId) || {}).reply_mode === "canned") return { messages: messages, incomingIds: incomingIds };
       return waitVoice(incoming).then(function () {
         return attachVideo(incoming);
       }).then(function () {
@@ -1389,11 +1416,11 @@
           next.push({ role: "assistant", content: JSON.stringify(step) });
           // Rust frames this in <search_results> when it rebuilds the prompt.
           next.push({ role: "user", content: String(text || "").slice(0, 8000) });
-          return turn(chatId, name, pendingMsgs, round + 1, next);
+          return turn(chatId, name, pendingMsgs, round + 1, next, armedAt);
         });
       }
       if (step.kind === "send") {
-        return sendText(chatId, step, pendingMsgs).then(function (sent) {
+        return sendText(chatId, step, pendingMsgs, armedAt).then(function (sent) {
           if (!sent) forgetAnswered(chatId, pendingMsgs);
         }).catch(function () {
           forgetAnswered(chatId, pendingMsgs);

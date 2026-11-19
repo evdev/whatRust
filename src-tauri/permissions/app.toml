@@ -9,9 +9,9 @@ commands.allow = [
   "voice_prefs", "voice_lookup", "transcribe_voice", "transcribe_video", "summarize_voice", "voice_transcripts",
   "search_transcripts",
   "chat_summary_consent", "summarize_chat", "chat_summary_save", "chat_summaries", "chat_summary_delete",
-  "todo_list", "todo_add", "todo_update", "todo_toggle_done", "todo_delete",
+  "todo_list", "todo_add", "todo_star_state", "todo_update", "todo_toggle_done", "todo_delete",
   "todo_snooze", "todo_dismiss_alarm", "todo_clear_done",
-  "autoreply_state", "autoreply_set_chat", "autoreply_set_access", "autoreply_get_chat_doc",
+  "autoreply_state", "autoreply_set_chat", "autoreply_set_access", "autoreply_set_reply_mode", "autoreply_get_chat_doc",
   "autoreply_save_chat_doc", "autoreply_reset_chat_doc", "autoreply_open_chat_doc",
   "autoreply_turn", "autoreply_record_sent", "autoreply_pause_self"
 ]

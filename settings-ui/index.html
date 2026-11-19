@@ -210,6 +210,11 @@
             <input type="text" id="standin_bin" aria-label="Program" />
           </label>
           <label class="row">
+            <span class="row-text"><span class="row-title">Default canned reply</span>
+              <span class="row-subtitle">Used by chats that select the default canned reply.</span></span>
+            <textarea id="standin_canned_default" aria-label="Default canned reply" maxlength="10000"></textarea>
+          </label>
+          <label class="row">
             <span class="row-text"><span class="row-title">Wait before replying</span>
               <span class="row-subtitle">Seconds after the last message, from 5 to 60.</span></span>
             <input type="number" id="standin_delay_secs" min="5" max="60" value="10" aria-label="Wait before replying" />
@@ -299,6 +304,11 @@ Set asked_if_ai to true only when the contact asks whether you are an AI, a bot,
       <section class="group" id="sec-aparencia">
         <h2 class="group-title">Appearance</h2>
         <div class="boxed-list">
+          <label class="row">
+            <span class="row-text"><span class="row-title">Star task and follow-up messages</span>
+              <span class="row-subtitle">Star new message-linked tasks and follow-ups so they appear in WhatsApp’s starred messages. Automatically added stars are removed when the items close.</span></span>
+            <input type="checkbox" class="switch" id="auto_star_todos" />
+          </label>
           <label class="row">
             <span class="row-text"><span class="row-title">Source device</span>
               <span class="row-subtitle">An icon next to the time shows an Apple device, Android, or a computer, when the message id gives a good indication.</span></span>

@@ -148,12 +148,23 @@ pub struct TodoItem {
     pub kind: ItemKind,
 }
 
+/// Durable ownership and membership for automatic WhatsApp stars.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoStar {
+    pub message: TodoMessageRef,
+    pub item_ids: Vec<String>,
+    /// pending, adding, owned, or existing (a personal star).
+    pub state: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TodoFile {
     #[serde(default)]
     pub next_seq: u64,
     #[serde(default)]
     pub items: Vec<TodoItem>,
+    #[serde(default)]
+    pub stars: Vec<TodoStar>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -173,6 +184,7 @@ pub struct TodoSnapshot {
     pub open_count: u32,
     pub alarms: Vec<TodoAlarm>,
     pub reply_open_count: u32,
+    pub stars: Vec<TodoStar>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -517,7 +529,82 @@ pub fn todo_add(
     let account_id = account_of(&window, &app)?;
     remember_tz(&app, tz_offset_minutes);
     let now = now_ms();
-    let (_, snapshot) = with_file(&app, &account_id, |file| add_item(file, draft, now))?;
+    let enabled = crate::settings::load(&app).auto_star_todos;
+    let (_, snapshot) = with_file(&app, &account_id, |file| {
+        let previous_seq = file.next_seq;
+        add_item(file, draft, now)?;
+        if enabled && file.next_seq != previous_seq {
+            enroll_star(file);
+        }
+        Ok(())
+    })?;
+    finish(&app, &account_id, snapshot)
+}
+
+fn enroll_star(file: &mut TodoFile) {
+    let Some(item) = file.items.last() else {
+        return;
+    };
+    let Some(message) = item.message.as_ref() else {
+        return;
+    };
+    if message.msg_id.is_empty() && message.msg_token.is_empty() {
+        return;
+    }
+    let id = item.id.clone();
+    let message = message.clone();
+    if let Some(star) = file.stars.iter_mut().find(|star| {
+        (!message.msg_id.is_empty() && star.message.msg_id == message.msg_id)
+            || (!message.msg_token.is_empty()
+                && star.message.msg_token == message.msg_token
+                && star.message.chat_id == message.chat_id)
+    }) {
+        star.item_ids.push(id);
+    } else {
+        file.stars.push(TodoStar {
+            message,
+            item_ids: vec![id],
+            state: "pending".into(),
+        });
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn todo_star_state(
+    window: tauri::Webview,
+    app: AppHandle,
+    item_id: String,
+    state: String,
+) -> Result<TodoSnapshot, String> {
+    let account_id = account_of(&window, &app)?;
+    let (_, snapshot) = with_file(&app, &account_id, |file| {
+        let star = file
+            .stars
+            .iter_mut()
+            .find(|s| s.item_ids.contains(&item_id))
+            .ok_or(EditError::Missing)?;
+        let valid = matches!(
+            (star.state.as_str(), state.as_str()),
+            ("pending", "adding")
+                | ("pending", "existing")
+                | ("adding", "owned")
+                | ("owned", "pending")
+                | ("adding", "pending")
+                | ("existing", "pending")
+                | ("pending", "pending")
+        );
+        if !valid {
+            return Err(EditError::Invalid);
+        }
+        star.state = state;
+        file.stars.retain(|s| {
+            s.state != "pending"
+                || s.item_ids
+                    .iter()
+                    .any(|id| file.items.iter().any(|i| &i.id == id))
+        });
+        Ok(())
+    })?;
     finish(&app, &account_id, snapshot)
 }
 
@@ -800,6 +887,7 @@ fn snapshot_of(file: &TodoFile, now: u64, offset_minutes: i32) -> TodoSnapshot {
         open_count,
         alarms,
         reply_open_count,
+        stars: file.stars.clone(),
     }
 }
 
@@ -1244,6 +1332,26 @@ mod tests {
     }
 
     #[test]
+    fn star_enrollment_shares_message_and_survives_round_trip() {
+        let mut file = TodoFile::default();
+        let id = format!("false_15551212@c.us_{}", "A".repeat(22));
+        add_item(&mut file, draft_message(&id), 1_700_000_000_000).unwrap();
+        enroll_star(&mut file);
+        let mut watch = draft_message(&id);
+        watch.kind = Some(ItemKind::Waiting);
+        watch.message.as_mut().unwrap().chat_id = Some("15551212@c.us".into());
+        add_item(&mut file, watch, 1_700_000_000_001).unwrap();
+        enroll_star(&mut file);
+        assert_eq!(file.stars.len(), 1);
+        assert_eq!(file.stars[0].item_ids.len(), 2);
+        let restored: TodoFile =
+            serde_json::from_str(&serde_json::to_string(&file).unwrap()).unwrap();
+        assert_eq!(restored, file);
+        let old: TodoFile = serde_json::from_str(r#"{"next_seq":0,"items":[]}"#).unwrap();
+        assert!(old.stars.is_empty());
+    }
+
+    #[test]
     fn account_ids_cannot_escape_the_todo_directory() {
         assert!(valid_account_id("default"));
         assert!(valid_account_id("acct-12"));
@@ -1415,6 +1523,7 @@ mod tests {
             &TodoFile {
                 next_seq: 2,
                 items: vec![item],
+                stars: vec![],
             },
             1_700_000_100_000,
             0,

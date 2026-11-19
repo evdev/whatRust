@@ -55,6 +55,8 @@ pub struct Settings {
     /// Icon beside a message's time when its id indicates an Apple device,
     /// Android, or a computer. On by default.
     pub show_message_device: bool,
+    /// Star newly created message-linked tasks and follow-ups.
+    pub auto_star_todos: bool,
     /// macOS only (issue #44): show the icon in the menu bar. With it off, the
     /// Dock icon brings a hidden window back. Windows and Linux always show the
     /// tray icon, since there it is the only way back to a hidden window.
@@ -93,6 +95,7 @@ pub struct Settings {
     pub summary_model_antigravity_cli: String,
     /// Master switch for the per-chat stand-in. Off until the user turns it on.
     pub standin_enabled: bool,
+    pub standin_canned_default: String,
     /// Provider ID, or `api` to use the saved API provider.
     pub standin_backend: String,
     /// Optional stand-in model for each API provider. Empty uses the summary model.
@@ -191,6 +194,7 @@ impl Default for Settings {
             hide_dock_icon: false,
             zoom: 1.0,
             show_message_device: true,
+            auto_star_todos: true,
             menu_bar_icon: true,
             language: crate::i18n::EN.to_string(),
             voice_transcribe: true,
@@ -213,6 +217,7 @@ impl Default for Settings {
             summary_model_codex_cli: String::new(),
             summary_model_antigravity_cli: String::new(),
             standin_enabled: false,
+            standin_canned_default: "Thanks for your message! I’m away right now and will get back to you when I can.".into(),
             standin_backend: "api".into(),
             standin_model_openrouter: None,
             standin_model_gemini: None,
@@ -1145,6 +1150,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     use super::{flatpak_autostart_entry, is_valid_flatpak_id};
+
+    #[test]
+    fn automatic_task_stars_default_on_for_existing_settings() {
+        let old: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        assert!(old.auto_star_todos);
+        let disabled: Settings = serde_json::from_str(r#"{"auto_star_todos":false}"#).unwrap();
+        assert!(!disabled.auto_star_todos);
+    }
 
     #[test]
     fn old_settings_keep_default_download_folder_and_icon() {

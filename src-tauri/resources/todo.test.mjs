@@ -53,6 +53,21 @@ globalThis.document = { getElementById: () => null, body: null };
 eval(source);
 const api = globalThis.__whatrustTodoApi;
 
+const star = { item_ids: ["a", "b"], state: "pending" };
+const openStars = [{ id: "a", done: false }, { id: "b", done: false }];
+assert(api.starAction(star, openStars) === "inspect", "new tracked messages check for a personal star");
+star.state = "adding";
+assert(api.starAction(star, openStars) === "add", "interrupted additions resume");
+star.state = "owned";
+assert(api.starAction(star, [{ id: "a", done: true }, { id: "b", done: false }]) === "", "a shared star stays while another item is open");
+assert(api.starAction(star, [{ id: "a", done: true }, { id: "b", done: true }]) === "remove", "the app removes its star after the last item closes");
+assert(api.starAction(star, []) === "remove", "deleted items still get cleanup");
+star.state = "existing";
+assert(api.starAction(star, [{ id: "a", done: true }]) === "reset", "personal stars are preserved on completion");
+star.state = "pending";
+assert(api.starAction(star, [{ id: "a", done: false }]) === "inspect", "reopening enrolls the message again");
+assert(api.starAction(star, []) === "reset", "an unused pending record is removed");
+
 const web = "3EB0" + "A".repeat(18);
 assert(api.messageToken("false_15551212@c.us_" + web + "_5511999@c.us") === web, "group suffix is not part of the token");
 assert(api.messageToken("true_120363@g.us_" + "D".repeat(32)) === "D".repeat(32), "legacy compound id yields the token");

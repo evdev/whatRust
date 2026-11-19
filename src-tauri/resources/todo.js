@@ -872,6 +872,18 @@
     ].join("");
   }
 
+  function starAction(star, list) {
+    var ids = star.item_ids || [];
+    var present = (list || []).some(function (item) { return ids.indexOf(item.id) !== -1; });
+    var active = (list || []).some(function (item) { return ids.indexOf(item.id) !== -1 && !item.done; });
+    if (active && star.state === "pending") return "inspect";
+    if (active && star.state === "adding") return "add";
+    if (!active && (star.state === "owned" || star.state === "adding")) return "remove";
+    if (!active && star.state === "existing") return "reset";
+    if (!present && star.state === "pending") return "reset";
+    return "";
+  }
+
   if (root.__WHATRUST_TEST) {
     root.__whatrustTodoApi = {
       messageToken: messageToken,
@@ -911,6 +923,7 @@
       themeFromColor: themeFromColor,
       themePalette: themePalette,
       popupCss: popupCss,
+      starAction: starAction,
       placeBesideMenu: placeBesideMenu,
     };
     return;
@@ -920,6 +933,9 @@
   root.__whatrustTodoBoot = true;
 
   var items = [];
+  var stars = [];
+  var starBusy = false;
+  var starRetryAt = Object.create(null);
   var tracked = Object.create(null);
   var openTracked = Object.create(null);
   var watchOpen = Object.create(null);
@@ -2648,6 +2664,7 @@
   function applyState(snapshot) {
     if (!snapshot || !snapshot.items) return snapshot;
     items = snapshot.items;
+    stars = snapshot.stars || [];
     indexItems();
     paintBadge();
     paintMarkers();
@@ -2657,7 +2674,71 @@
     if (alarmIds(nextAlarms) !== alarmIds(lastAlarms)) showAlarms(nextAlarms, false);
     flushClears();
     runCatchup();
+    syncStars();
     return snapshot;
+  }
+
+  // Serialize changes and persist intent before calling WhatsApp so a crash or
+  // reconnect can safely finish a partially applied star operation.
+  function syncStars() {
+    if (starBusy) return;
+    var wpp = root.WPP;
+    if (!wpp || !wpp.isReady || !wpp.chat || typeof wpp.chat.getMessageById !== "function" || typeof wpp.chat.starMessage !== "function") return;
+    var star = null, action = "";
+    for (var i = 0; i < stars.length; i++) {
+      if (Date.now() < (starRetryAt[stars[i].item_ids[0]] || 0)) continue;
+      action = starAction(stars[i], items);
+      if (action) { star = stars[i]; break; }
+    }
+    if (!star) return;
+    starBusy = true;
+    var itemId = star.item_ids[0];
+    function record(state) {
+      return invoke("todo_star_state", { item_id: itemId, state: state }).then(applyState);
+    }
+    var operation;
+    if (action === "reset") {
+      operation = record("pending");
+    } else {
+      var ref = star.message || {};
+      var loaded = loadedMessage(ref.msg_token || messageToken(ref.msg_id));
+      var lookup = (loaded && serializedOf(loaded.id)) || ref.msg_id || "";
+      operation = Promise.resolve().then(function () {
+        if (/^(?:true|false)_/.test(lookup)) return;
+        if (!ref.chat_id || typeof wpp.chat.getMessages !== "function") throw new Error("Message is not available yet");
+        return Promise.resolve(wpp.chat.getMessages(ref.chat_id, { count: 100 })).then(function (messages) {
+          var token = ref.msg_token || messageToken(ref.msg_id);
+          var match = (messages || []).find(function (message) {
+            return messageToken(serializedOf(message.id)) === token;
+          });
+          if (match) lookup = serializedOf(match.id);
+        });
+      }).then(function () {
+        if (!/^(?:true|false)_/.test(lookup)) throw new Error("Message is not available yet");
+        return wpp.chat.getMessageById(lookup);
+      }).then(function (message) {
+        if (!message) throw new Error("Message is not available yet");
+        if (action === "inspect") {
+          if (message.star || (message.attributes && message.attributes.star)) return record("existing");
+          return record("adding");
+        }
+        if (action === "add") {
+          return Promise.resolve(wpp.chat.starMessage(lookup, true)).then(function () { return record("owned"); });
+        }
+        return Promise.resolve(wpp.chat.starMessage(lookup, false)).then(function () { return record("pending"); });
+      });
+    }
+    operation.then(function () {
+      delete starRetryAt[itemId];
+      starBusy = false;
+      setTimeout(syncStars, 0);
+    }).catch(function () {
+      starBusy = false;
+      starRetryAt[itemId] = Date.now() + 60000;
+      // A later refresh, reconnect, or retry resumes the durable operation.
+      setTimeout(syncStars, 60000);
+      setTimeout(syncStars, 0);
+    });
   }
 
   function alarmIds(list) {
@@ -3904,4 +3985,5 @@
   // A reply can land without a fresh event the live rule will accept. Catch-up
   // is already limited to one fetch per chat a minute.
   setInterval(runCatchup, 60_000);
+  setInterval(syncStars, 60_000);
 })();

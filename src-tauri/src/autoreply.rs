@@ -95,6 +95,8 @@ pub struct ChatView {
     pub armed_at_ms: u64,
     /// `memory`, `read`, or `full`. Missing on an older row means memory.
     pub access: String,
+    pub reply_mode: String,
+    pub canned_text: String,
     pub log: Vec<LogView>,
 }
 
@@ -209,6 +211,12 @@ struct ChatRow {
     /// When an agent run was started. Skipped runs count toward the hourly cap.
     #[serde(default)]
     agent_runs: Vec<u64>,
+    #[serde(default)]
+    reply_mode: String,
+    #[serde(default)]
+    canned_text: String,
+    #[serde(default)]
+    canned_sent_at: u64,
 }
 
 fn access_memory() -> String {
@@ -229,6 +237,9 @@ impl Default for ChatRow {
             log: Vec::new(),
             access: access_memory(),
             agent_runs: Vec::new(),
+            reply_mode: String::new(),
+            canned_text: String::new(),
+            canned_sent_at: 0,
         }
     }
 }
@@ -241,6 +252,11 @@ struct LogRow {
     action: String,
     #[serde(default)]
     text: String,
+}
+
+fn canned_suppressed(last: u64, received: u64, now: u64) -> bool {
+    last > 0
+        && (received < last.saturating_add(2 * HOUR_MS) || now < last.saturating_add(2 * HOUR_MS))
 }
 
 fn now_ms() -> u64 {
@@ -454,6 +470,13 @@ fn snapshot_of(app: &AppHandle, account: &str) -> Result<Snapshot, String> {
                 tokens: row.tokens.clone(),
                 answered_tokens: row.answered_tokens.clone(),
                 access: access_of(row).into(),
+                reply_mode: if row.reply_mode == "canned" {
+                    "canned"
+                } else {
+                    "ai"
+                }
+                .into(),
+                canned_text: row.canned_text.clone(),
                 armed_at_ms: row.armed_at_ms,
                 log: row
                     .log
@@ -1709,7 +1732,16 @@ pub fn autoreply_set_chat(
         .collect();
     let now = now_ms();
     let key = with_store(&app, &account, |store| {
-        if action == "arm" && !ack_covers(store, &backend) && !ack_privacy {
+        let key = stored_key(store, &chat);
+        let canned = store
+            .chats
+            .get(&key)
+            .is_some_and(|row| row.reply_mode == "canned");
+        if (action == "arm" || action == "resume")
+            && !canned
+            && !ack_covers(store, &backend)
+            && !ack_privacy
+        {
             return Err(tr("Confirm where the chat is sent.").into());
         }
         if ack_privacy {
@@ -1777,6 +1809,37 @@ pub fn autoreply_set_access(
         row.access = access;
         Ok(())
     })?;
+    snapshot_of(&app, &account)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn autoreply_set_reply_mode(
+    window: tauri::Webview,
+    app: AppHandle,
+    chat_id: String,
+    mode: String,
+    text: String,
+) -> Result<Snapshot, String> {
+    crate::lock::require_unlocked(&app)?;
+    let account = account_of(&window)?;
+    let chat = direct_chat(&chat_id).ok_or_else(|| tr("That chat is not valid.").to_string())?;
+    if !matches!(mode.as_str(), "ai" | "canned") || text.encode_utf16().count() > 10000 {
+        return Err("Invalid reply settings.".into());
+    }
+    let backend = settings::load(&app).standin_backend;
+    let key = with_store(&app, &account, |store| {
+        let acknowledged = ack_covers(store, &backend);
+        let key = stored_key(store, &chat);
+        let row = store.chats.entry(key.clone()).or_default();
+        if mode == "ai" && !acknowledged && row.status == "armed" {
+            row.status = "paused".into();
+        }
+        row.reply_mode = mode;
+        row.canned_text = text.trim().to_string();
+        row.armed_at_ms = now_ms().max(row.armed_at_ms.saturating_add(1));
+        Ok(key)
+    })?;
+    cancel_if(&app, &account, &key);
     snapshot_of(&app, &account)
 }
 
@@ -2113,11 +2176,6 @@ pub async fn autoreply_turn(
     if !settings.standin_enabled {
         return Ok(Step::Idle);
     }
-    if is_agent_backend(&settings.standin_backend)
-        && !starts_agent_run(&settings.standin_backend, round)
-    {
-        return Ok(Step::Idle);
-    }
     let chat = match direct_chat(&chat_id) {
         Some(chat) => chat,
         None => return Ok(Step::Idle),
@@ -2142,10 +2200,18 @@ pub async fn autoreply_turn(
             }
             let name = row.name.clone();
             let armed_at = row.armed_at_ms;
+            let canned = row.reply_mode == "canned";
+            if !canned
+                && is_agent_backend(&settings.standin_backend)
+                && !starts_agent_run(&settings.standin_backend, round)
+            {
+                return Ok(Step::Idle);
+            }
             let burst = burst_tripped(&row.sent_at, now);
             let hourly = over_hourly(&row.sent_at, now, settings.standin_hourly_limit);
             let agent_capped = !burst
                 && !hourly
+                && !canned
                 && is_agent_backend(&settings.standin_backend)
                 && pause_for_agent_cap(row, now, settings.standin_agent_runs_per_hour);
             if burst || hourly || agent_capped {
@@ -2164,7 +2230,16 @@ pub async fn autoreply_turn(
                 Err((name, reason))
             } else {
                 let chat_ids = chat_id_set(&key, &chat, &row.aliases);
-                Ok((key, name, armed_at, chat_ids, row.answered_tokens.clone()))
+                Ok((
+                    key,
+                    name,
+                    armed_at,
+                    chat_ids,
+                    row.answered_tokens.clone(),
+                    canned,
+                    row.canned_text.clone(),
+                    row.canned_sent_at,
+                ))
             }
         };
         save_store(&path, &store)?;
@@ -2179,7 +2254,7 @@ pub async fn autoreply_turn(
             Ok(ready) => ready,
         }
     };
-    let (key, name, armed_at, chat_ids, answered) = prepared;
+    let (key, name, armed_at, chat_ids, answered, canned, canned_text, canned_sent_at) = prepared;
     let mut messages: Vec<ChatMessage> = messages
         .into_iter()
         .rev()
@@ -2201,6 +2276,45 @@ pub async fn autoreply_turn(
     }
     if round == 0 && incoming.is_empty() {
         return Ok(Step::Idle);
+    }
+    if canned {
+        let suppressed: Vec<_> = incoming
+            .iter()
+            .filter(|message| canned_suppressed(canned_sent_at, message.timestamp_ms, now))
+            .collect();
+        if !suppressed.is_empty() {
+            with_store(&app, &account, |store| {
+                if let Some(row) = store.chats.get_mut(&key) {
+                    for message in &suppressed {
+                        if !message.msg_token.is_empty()
+                            && !row.answered_tokens.contains(&message.msg_token)
+                        {
+                            row.answered_tokens.push(message.msg_token.clone());
+                        }
+                    }
+                    if row.answered_tokens.len() > MAX_TOKENS {
+                        row.answered_tokens
+                            .drain(0..row.answered_tokens.len() - MAX_TOKENS);
+                    }
+                }
+                Ok(())
+            })?;
+            if suppressed.len() == incoming.len() {
+                return Ok(Step::Idle);
+            }
+        }
+        let text = if canned_text.is_empty() {
+            settings.standin_canned_default.trim().to_string()
+        } else {
+            canned_text
+        };
+        if text.is_empty() {
+            return Ok(Step::Idle);
+        }
+        return Ok(Step::Send {
+            text,
+            turn_id: format!("canned-{now}"),
+        });
     }
     let root = data_root(&app)?;
     let persona = read_doc(&persona_path(&root), persona_template());
@@ -2522,6 +2636,9 @@ pub fn autoreply_record_sent(
         if row.answered_tokens.len() > MAX_TOKENS {
             let extra = row.answered_tokens.len() - MAX_TOKENS;
             row.answered_tokens.drain(0..extra);
+        }
+        if turn_id.starts_with("canned-") {
+            row.canned_sent_at = now;
         }
         row.sent_at.push(now);
         if row.sent_at.len() > MAX_SENT {
@@ -3105,6 +3222,32 @@ mod tests {
         assert!(repairs_a_bad_decision("claude_cli"));
         assert!(repairs_a_bad_decision("api"));
         assert!(!starts_agent_run("api", 0));
+    }
+
+    #[test]
+    fn canned_interval_uses_the_incoming_time_and_survives_serialization() {
+        let mut row = ChatRow::default();
+        row.reply_mode = "canned".into();
+        row.canned_sent_at = 10_000;
+        let row: ChatRow = serde_json::from_str(&serde_json::to_string(&row).unwrap()).unwrap();
+        assert!(canned_suppressed(
+            row.canned_sent_at,
+            10_000 + 2 * HOUR_MS - 1,
+            10_000 + 2 * HOUR_MS
+        ));
+        assert!(!canned_suppressed(
+            row.canned_sent_at,
+            10_000 + 2 * HOUR_MS,
+            10_000 + 2 * HOUR_MS
+        ));
+        assert!(canned_suppressed(
+            row.canned_sent_at,
+            10_000 + 2 * HOUR_MS,
+            10_000 + 2 * HOUR_MS - 1
+        ));
+        assert!(!canned_suppressed(0, 1, 1));
+        let old: ChatRow = serde_json::from_str("{}").unwrap();
+        assert_ne!(old.reply_mode, "canned");
     }
 
     #[test]

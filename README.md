@@ -79,7 +79,7 @@ Open **To-Do** or **Replies** near the account switcher to see what's outstandin
 
 ### Let the stand-in answer while you're away
 
-Turn on **Allow stand-in** in **Settings → Stand-in**, then enable it from the header of an individual chat. Each chat starts off. You can write general instructions for how you like to reply and add notes for that particular conversation.
+Turn on **Allow stand-in** in **Settings → Stand-in**, then enable it from the header of an individual chat. Each chat starts off. You can write general instructions for how you like to reply and add notes for that particular conversation. In each chat, choose an AI reply or a canned reply using the shared default or a custom message. Edit the default in Stand-in settings. Canned replies are sent at most once every two hours per chat; messages arriving during that interval do not trigger a later reply.
 
 The stand-in can search available chat history and transcripts. It pauses when you reply yourself and can stay quiet and alert you when it isn't sure what to say. You can set a reply delay and hourly limit. Messages it sends are marked in the conversation. If WhatsApp rejects a send, the app shows an error and leaves the incoming message unanswered. When the app starts, it checks for recent replies before answering anything that came in while it was opening.
 
