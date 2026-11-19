@@ -87,6 +87,7 @@ struct PhotoStamp {
 }
 
 struct Card {
+    history: Vec<Held>,
     account_label: String,
     automatic_geometry: Option<PopupGeometry>,
     chat_id: String,
@@ -121,6 +122,7 @@ impl PopupGeometry {
     }
 }
 
+#[derive(Clone)]
 struct Held {
     account_label: String,
     chat_id: String,
@@ -149,6 +151,7 @@ enum Release {
 
 #[derive(Serialize)]
 pub struct CardView {
+    msg_id: String,
     chat_name: String,
     sender_name: String,
     body: String,
@@ -158,6 +161,17 @@ pub struct CardView {
     at_ms: u64,
     account_name: String,
     sound: bool,
+    history: Vec<MessageView>,
+}
+
+#[derive(Serialize)]
+struct MessageView {
+    msg_id: String,
+    sender_name: String,
+    body: String,
+    preview: String,
+    voice: bool,
+    at_ms: u64,
 }
 
 #[derive(Serialize)]
@@ -875,6 +889,7 @@ pub fn mention_card(window: tauri::Webview, app: AppHandle) -> Result<CardView, 
     let inner = lock::guard(&state.inner);
     let card = inner.cards.get(window.label()).ok_or("closed")?;
     Ok(CardView {
+        msg_id: card.msg_id.clone(),
         chat_name: card.chat_name.clone(),
         sender_name: card.sender_name.clone(),
         body: card.body.clone(),
@@ -884,7 +899,43 @@ pub fn mention_card(window: tauri::Webview, app: AppHandle) -> Result<CardView, 
         at_ms: card.at_ms,
         account_name: card.account_name.clone(),
         sound: card.sound,
+        history: card
+            .history
+            .iter()
+            .map(|item| MessageView {
+                msg_id: item.msg_id.clone(),
+                sender_name: item.sender_name.clone(),
+                body: item.body.clone(),
+                preview: item.preview.clone(),
+                voice: item.voice,
+                at_ms: item.at_ms,
+            })
+            .collect(),
     })
+}
+
+#[tauri::command]
+pub fn mention_select(
+    window: tauri::Webview,
+    app: AppHandle,
+    msg_id: String,
+) -> Result<(), String> {
+    if !local_popup(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    let state = popups(&app);
+    let mut inner = lock::guard(&state.inner);
+    let card = inner.cards.get_mut(window.label()).ok_or("closed")?;
+    if let Some(index) = card.history.iter().position(|item| item.msg_id == msg_id) {
+        let selected = card.history.remove(index);
+        let previous = held_from_card(card);
+        card.history.push(previous);
+        card.history.sort_by_key(|item| item.at_ms);
+        let sound = card.sound;
+        apply_held(card, selected, sound);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1376,12 +1427,30 @@ fn deliver(app: &AppHandle, account_id: &str, prefs: &MentionAccountPrefs, held:
 fn stage(app: &AppHandle, held: Held, sound: bool) -> String {
     let state = popups(app);
     let mut inner = lock::guard(&state.inner);
+    if let Some(label) = inner
+        .cards
+        .iter()
+        .find(|(_, card)| same_popup_chat(&card.account_label, &card.chat_id, &held))
+        .map(|(label, _)| label.clone())
+    {
+        let card = inner.cards.get_mut(&label).unwrap();
+        let old = held_from_card(card);
+        card.history.push(old);
+        apply_held(card, held, sound);
+        drop(inner);
+        if let Some(win) = app.get_webview_window(&label) {
+            let _ =
+                win.eval("window.__whatrustRefreshMention && window.__whatrustRefreshMention()");
+        }
+        return label;
+    }
     inner.next += 1;
     let label = format!("mention-{}", inner.next);
     inner.order.push_front(label.clone());
     inner.cards.insert(
         label.clone(),
         Card {
+            history: Vec::new(),
             account_label: held.account_label,
             automatic_geometry: None,
             chat_id: held.chat_id,
@@ -1402,6 +1471,48 @@ fn stage(app: &AppHandle, held: Held, sound: bool) -> String {
         },
     );
     label
+}
+
+fn same_popup_chat(account: &str, chat: &str, item: &Held) -> bool {
+    account == item.account_label && chat == item.chat_id
+}
+
+fn held_from_card(card: &Card) -> Held {
+    Held {
+        account_label: card.account_label.clone(),
+        chat_id: card.chat_id.clone(),
+        msg_id: card.msg_id.clone(),
+        chat_name: card.chat_name.clone(),
+        sender_name: card.sender_name.clone(),
+        body: card.body.clone(),
+        preview: card.preview.clone(),
+        voice: card.voice,
+        seconds: card.seconds,
+        at_ms: card.at_ms,
+        account_name: card.account_name.clone(),
+        mentions: card.mentions,
+        replies: card.replies,
+        direct: card.direct,
+        everyone: card.everyone,
+        queued: Instant::now(),
+    }
+}
+
+fn apply_held(card: &mut Card, item: Held, sound: bool) {
+    card.msg_id = item.msg_id;
+    card.chat_name = item.chat_name;
+    card.sender_name = item.sender_name;
+    card.body = item.body;
+    card.preview = item.preview;
+    card.voice = item.voice;
+    card.seconds = item.seconds;
+    card.at_ms = item.at_ms;
+    card.account_name = item.account_name;
+    card.mentions = item.mentions;
+    card.replies = item.replies;
+    card.direct = item.direct;
+    card.everyone = item.everyone;
+    card.sound = sound;
 }
 
 fn spawn_present(app: AppHandle, labels: Vec<String>) {
@@ -1425,24 +1536,8 @@ pub fn on_lock(app: &AppHandle) {
         let mut parked = Vec::new();
         for label in &labels {
             if let Some(card) = inner.cards.remove(label) {
-                parked.push(Held {
-                    account_label: card.account_label,
-                    chat_id: card.chat_id,
-                    msg_id: card.msg_id,
-                    chat_name: card.chat_name,
-                    sender_name: card.sender_name,
-                    body: card.body,
-                    preview: card.preview,
-                    voice: card.voice,
-                    seconds: card.seconds,
-                    at_ms: card.at_ms,
-                    account_name: card.account_name,
-                    mentions: card.mentions,
-                    replies: card.replies,
-                    direct: card.direct,
-                    everyone: card.everyone,
-                    queued: Instant::now(),
-                });
+                parked.push(held_from_card(&card));
+                parked.extend(card.history.into_iter().rev());
             }
         }
         (parked, labels)
@@ -1483,7 +1578,7 @@ pub fn drop_account(app: &AppHandle, label: &str) {
 }
 
 fn settle(app: &AppHandle, account: &str, chat_id: &str, msg_id: &str, sent_at: u64) {
-    let labels = {
+    let (labels, refresh) = {
         let state = popups(app);
         let mut inner = lock::guard(&state.inner);
         if msg_id.is_empty() && chat_id.is_empty() {
@@ -1493,22 +1588,44 @@ fn settle(app: &AppHandle, account: &str, chat_id: &str, msg_id: &str, sent_at: 
         } else {
             hold_drop_msg(&mut inner.waiting, account, msg_id);
         }
-        inner
-            .cards
-            .iter()
-            .filter(|(_, card)| {
-                card.account_label == account
-                    && if msg_id.is_empty() && chat_id.is_empty() {
-                        true
-                    } else if msg_id.is_empty() {
-                        card.chat_id == chat_id && answered_by(card.at_ms, sent_at)
-                    } else {
-                        card.msg_id == msg_id
-                    }
-            })
-            .map(|(label, _)| label.clone())
-            .collect::<Vec<_>>()
+        let mut labels = Vec::new();
+        let mut refresh = Vec::new();
+        for (label, card) in &mut inner.cards {
+            if card.account_label != account {
+                continue;
+            }
+            let matches = |item: &Held| {
+                if !msg_id.is_empty() {
+                    item.msg_id == msg_id
+                } else if chat_id.is_empty() {
+                    true
+                } else {
+                    item.chat_id == chat_id && answered_by(item.at_ms, sent_at)
+                }
+            };
+            let before = card.history.len();
+            card.history.retain(|item| !matches(item));
+            let latest_matches = matches(&held_from_card(card));
+            if latest_matches {
+                if let Some(last) = card.history.pop() {
+                    let sound = card.sound;
+                    apply_held(card, last, sound);
+                    refresh.push(label.clone());
+                } else {
+                    labels.push(label.clone());
+                }
+            } else if before != card.history.len() {
+                refresh.push(label.clone());
+            }
+        }
+        (labels, refresh)
     };
+    for label in refresh {
+        if let Some(win) = app.get_webview_window(&label) {
+            let _ =
+                win.eval("window.__whatrustRefreshMention && window.__whatrustRefreshMention()");
+        }
+    }
     for label in labels {
         close_popup(app, &label);
     }
@@ -1588,7 +1705,11 @@ fn pump(app: &AppHandle) {
         let mut inner = lock::guard(&state.inner);
         hold_prune(&mut inner.waiting, Instant::now());
         let pending: Vec<Held> = inner.waiting.drain(..).collect();
-        let slots = POPUP_MAX.saturating_sub(inner.order.len());
+        let mut chats: std::collections::HashSet<(String, String)> = inner
+            .cards
+            .values()
+            .map(|card| (card.account_label.clone(), card.chat_id.clone()))
+            .collect();
         let mut later = VecDeque::new();
         for item in pending {
             if app
@@ -1607,7 +1728,9 @@ fn pump(app: &AppHandle) {
                     }
                 }
                 Release::Popup { sound } => {
-                    if show.len() < slots {
+                    let key = (item.account_label.clone(), item.chat_id.clone());
+                    if chats.contains(&key) || chats.len() < POPUP_MAX {
+                        chats.insert(key);
                         if sound && !chimes.contains(&account_id) {
                             chimes.push(account_id);
                         }
@@ -2101,8 +2224,9 @@ fn reveal_account(app: &AppHandle, label: &str) {
 mod tests {
     use super::{
         answered_by, boot_script_from, duplicate_photo, hold_drop_chat, hold_push, message_token,
-        popup_origin, prepare_reply, release_of, reply_text, send_script, shown_body, shown_name,
-        shown_preview, uses_native_popup_frame, Held, Release, FILE_MAX, POPUP_H, POPUP_W,
+        popup_origin, prepare_reply, release_of, reply_text, same_popup_chat, send_script,
+        shown_body, shown_name, shown_preview, uses_native_popup_frame, Held, Release, FILE_MAX,
+        POPUP_H, POPUP_W,
     };
     use crate::settings::MentionAccountPrefs;
     use std::collections::{HashMap, VecDeque};
@@ -2203,6 +2327,14 @@ mod tests {
             everyone: false,
             queued,
         }
+    }
+
+    #[test]
+    fn popup_grouping_requires_the_same_account_and_chat() {
+        let item = sample("account-one", "false_1@g.us_msg", Instant::now());
+        assert!(same_popup_chat("account-one", "1@g.us", &item));
+        assert!(!same_popup_chat("account-two", "1@g.us", &item));
+        assert!(!same_popup_chat("account-one", "2@g.us", &item));
     }
 
     #[test]

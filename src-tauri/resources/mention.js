@@ -29,7 +29,8 @@
  * - A live message from me in that chat closes its popups. chat.new_message
  *   carries both a reply typed in this window and one synced from another
  *   device. Opening the chat replays older messages; only a send at or
- *   after the alert counts. Reading the chat does not close it.
+ *   after the alert counts. Switching to a chat also closes its existing
+ *   popups; later messages in that chat still alert normally.
  * - Status posts are out of this feature. A status@broadcast chat, an
  *   isStatusV3 message, and any other broadcast stay quiet.
  */
@@ -365,6 +366,15 @@
       if (listening) return;
       listening = true;
       var readyAt = Number(hooks.now()) || 0;
+      var activeChat = "";
+      wpp.on("chat.active_chat", function (chat) {
+        var id = parseId(widText(chat && field(chat, "id")));
+        var next = id ? id.serialized : "";
+        if (next && next !== activeChat && typeof hooks.settle === "function") {
+          hooks.settle(next, hooks.now());
+        }
+        activeChat = next;
+      });
       var seen = Object.create(null);
       var order = [];
       function remember(id) {
@@ -918,8 +928,6 @@
         }).catch(function () {});
       },
     });
-    // Reading a chat elsewhere leaves visible popups alone. The popup's own
-    // Mark as read action, a sent message, or a revocation can dismiss them.
     // Read-on-the-phone is checked only for alerts parked by the lock.
     if (watching && !ensureWatch.settled) {
       ensureWatch.settled = true;

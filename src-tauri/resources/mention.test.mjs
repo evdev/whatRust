@@ -538,6 +538,24 @@ assert(settled.length === 3
   "a live outgoing text or voice note settles that chat once, after ciphertext");
 assert(answerAlerts.join() === "direct", "an outgoing message does not alert, and an incoming one still does");
 
+const switching = fakeWpp(true);
+const switchSettled = [];
+const switchAlerts = [];
+api.attach(switching, {
+  now: () => clock,
+  selfIds: () => self,
+  emit: hit => switchAlerts.push(hit.chatId),
+  settle: (id, at) => switchSettled.push([id, at]),
+});
+switching.emit("chat.active_chat", { id: { _serialized: "999@g.us" } });
+switching.emit("chat.active_chat", { id: "15551212@c.us" });
+switching.emit("chat.active_chat", { id: "15551212@c.us" });
+clock += 1000;
+switching.emit("chat.new_message", incoming({ id: "false_15551212@c.us_OPEN", t: clock }));
+assert(switchSettled.length === 2 && switchSettled[1][0] === "15551212@c.us" && switchSettled[1][1] === clock - 1000,
+  "switching chats settles only the selected chat once at the switch time");
+assert(switchAlerts.join() === "15551212@c.us", "a new message in the open chat still alerts");
+
 const pictures = fakeWpp(true);
 const pictureHits = [];
 clock = now;
@@ -606,6 +624,7 @@ assert(bundle.includes("t.markIsRead=async function"), "wa-js can mark a chat re
 assert(bundle.includes("t.getMyUserLid=function"), "wa-js can read the lid self id");
 assert(bundle.includes('emit("conn.main_ready"'), "catch-up is conn.main_ready");
 assert(bundle.includes('emit("chat.new_message"'), "live messages use chat.new_message");
+assert(bundle.includes('emit("chat.active_chat"'), "chat switches use the bundled active-chat event");
 
 const chatCalls = [];
 const acknowledgements = [];

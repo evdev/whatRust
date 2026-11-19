@@ -128,6 +128,7 @@ fn main() {
             "clear_chat_summary_consent",
             "mention_event",
             "mention_card",
+            "mention_select",
             "mention_listen",
             "mention_heard",
             "mention_transcript",

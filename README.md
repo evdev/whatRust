@@ -46,10 +46,12 @@ Open **Settings → Notifications**, choose an account, and turn on alerts for t
 
 Choose **Mark as read** on a reply popup to mark its WhatsApp chat as read without opening it.
 
+Switching to a WhatsApp chat closes its existing reply popups. New messages can still show popups while that chat is open.
+
 On Windows and macOS, reply popups appear in the top-right corner of the display containing the foreground window. They float above other app windows and leave keyboard focus where it is until you interact with the popup.
 Drag the title bar to move a popup, or drag an edge or corner to resize it.
 
-The popup shows who wrote, the message, and a photo preview when available. You can play an incoming voice note, read its transcript when transcription is enabled, or reply with text, a file, a photo, or a recorded voice note. **Open Chat** takes you to the conversation for that account. The popup replaces the ordinary notification for that message. Repeat reports of the same photo are filtered, and different photos still get their own alerts.
+Messages from the same chat and account share a popup; other chats get separate popups. The popup shows who wrote each message and photo previews when available. Select an earlier message to reply to it or play its voice note. You can also read a voice transcript when transcription is enabled, or reply with text, a file, a photo, or a recorded voice note. **Open Chat** takes you to the conversation for that account. The popup replaces the ordinary notification for that message. Repeat reports of the same photo are filtered, and different photos are included separately.
 
 ### Transcribe voice notes and videos
 

@@ -370,6 +370,7 @@ pub fn run() {
             autoreply::standin_agent_status,
             mention::mention_event,
             mention::mention_card,
+            mention::mention_select,
             mention::mention_listen,
             mention::mention_heard,
             mention::mention_transcript,

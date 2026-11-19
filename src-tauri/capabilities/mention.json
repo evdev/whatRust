@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "allow-mention-card",
+    "allow-mention-select",
     "allow-mention-listen",
     "allow-mention-transcript",
     "allow-mention-reply",

@@ -20,6 +20,49 @@ function showError(message) {
 
 async function load() {
   const card = await invoke("mention_card");
+  if (currentMessage !== card.msg_id) {
+    currentMessage = card.msg_id;
+    const audio = document.getElementById("heard-audio");
+    audio.pause();
+    audio.removeAttribute("src");
+    if (heardUrl) URL.revokeObjectURL(heardUrl);
+    heardUrl = "";
+    heardLoading = false;
+    transcriptTries = 0;
+    transcriptPlaceholder = false;
+    document.getElementById("heard-transcript").textContent = "";
+    document.getElementById("heard-transcript").hidden = true;
+    document.getElementById("heard-play").classList.remove("playing");
+    document.getElementById("heard-play").disabled = false;
+  }
+  const history = document.getElementById("history");
+  history.replaceChildren();
+  for (const item of card.history || []) {
+    const row = document.createElement("div");
+    row.className = "earlier-message";
+    const who = document.createElement("strong");
+    who.textContent = [item.sender_name || "WhatsApp", when(item.at_ms)].filter(Boolean).join(" · ");
+    row.appendChild(who);
+    if (item.preview) {
+      const image = document.createElement("img");
+      image.src = item.preview;
+      image.alt = "Photo";
+      row.appendChild(image);
+    }
+    const text = document.createElement("span");
+    text.textContent = item.body || (item.voice ? "Voice message" : item.preview ? "" : "New message");
+    row.appendChild(text);
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "select-message";
+    select.textContent = item.voice ? "Play or reply" : "Select to reply";
+    select.addEventListener("click", async () => {
+      try { await invoke("mention_select", { msgId: item.msg_id }); await load(); }
+      catch (error) { showError(String(error)); }
+    });
+    row.appendChild(select);
+    history.appendChild(row);
+  }
   const sender = card.sender_name || "WhatsApp";
   document.getElementById("sender").textContent = sender;
   document.getElementById("avatar").textContent = initials(sender);
@@ -40,11 +83,15 @@ async function load() {
     picture.removeAttribute("src");
   }
   text.textContent = card.body || (card.preview || card.voice ? "" : "New message");
+  document.getElementById("body").hidden = !!(card.voice && !card.body && !card.preview);
+  document.getElementById("heard").hidden = !card.voice;
   if (card.voice) showHeard(card);
-  if (card.voice && !card.body && !card.preview) document.getElementById("body").hidden = true;
 }
 
+window.__whatrustRefreshMention = () => load().catch((error) => showError(String(error)));
+
 let heardUrl = "";
+let currentMessage = "";
 let heardLoading = false;
 let heardSeconds = 0;
 let transcriptTries = 0;
@@ -75,9 +122,11 @@ function setTranscript(text, placeholder) {
 }
 
 async function watchTranscript() {
+  const message = currentMessage;
   let view;
   try { view = await invoke("mention_transcript"); }
   catch { return; }
+  if (message !== currentMessage) return;
   const node = document.getElementById("heard-transcript");
   if (!view || view.status === "disabled") {
     if (transcriptPlaceholder || !node.textContent) node.hidden = true;
@@ -97,7 +146,7 @@ async function watchTranscript() {
   if (transcriptPlaceholder || !node.textContent) setTranscript("Transcribing…", true);
   if (transcriptTries < 20) {
     transcriptTries += 1;
-    setTimeout(watchTranscript, 2000);
+    setTimeout(() => { if (message === currentMessage) watchTranscript(); }, 2000);
     return;
   }
   if (transcriptPlaceholder) node.hidden = true;
@@ -649,14 +698,17 @@ document.getElementById("heard-play").addEventListener("click", async () => {
     heardLoading = true;
     play.disabled = true;
     showError("");
+    const message = currentMessage;
     try {
       const media = await invoke("mention_listen");
+      if (message !== currentMessage) return;
       const bytes = base64ToBytes(media.data || "");
       if (!bytes.length) throw new Error("Could not play the voice note.");
       if (heardUrl) URL.revokeObjectURL(heardUrl);
       heardUrl = URL.createObjectURL(new Blob([bytes], { type: media.mime || "audio/wav" }));
       audio.src = heardUrl;
     } catch (error) {
+      if (message !== currentMessage) return;
       const message = String((error && error.message) || error || "");
       showError(message.replace(/^Error:\s*/, "") || "Could not play the voice note.");
       heardLoading = false;
