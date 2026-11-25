@@ -510,6 +510,16 @@
     return L("Não foi possível transcrever.", "Could not transcribe.");
   }
 
+  // FluidVoice answers 400 while its decoder is busy or still loading. The same
+  // bytes succeed a moment later, so keep the row loading and try again.
+  // `attempt` is how many refusals this note has seen. Zero means show the error.
+  function audioRetryDelay(notice, attempt) {
+    var text = String(notice && notice.message ? notice.message : notice || "");
+    if (text.indexOf("bad_audio") === -1) return 0;
+    if (attempt < 1 || attempt > 8) return 0;
+    return Math.min(8000, attempt * 1000);
+  }
+
   function stopEvent(event) {
     event.stopPropagation();
   }
@@ -652,6 +662,7 @@
       isVideoMessage: isVideoMessage,
       looksLikeVoiceRow: looksLikeVoiceRow,
       chatApiReady: chatApiReady,
+      audioRetryDelay: audioRetryDelay,
       looksLikeVideoRow: looksLikeVideoRow,
       intersectsViewport: intersectsViewport,
       pack: pack,
@@ -704,6 +715,8 @@
   var openChat = "";
   var checking = Object.create(null);
   var retryAt = Object.create(null);
+  var retryCount = Object.create(null);
+  var retryToken = Object.create(null);
   var translationRequests = Object.create(null);
   var armed = false;
   var scheduled = false;
@@ -772,13 +785,13 @@
       });
     }).then(function (view) {
       delete times[id];
+      delete retryCount[id];
+      delete retryToken[id];
       known[id] = view && view.status ? view : { id: id, status: "error", notice: "error" };
       paint(id);
       if (known[id].status === "loading") watchLoading(id);
     }).catch(function (error) {
-      known[id] = { id: id, status: "error", notice: String(error && error.message ? error.message : error) };
-      crumb("voice: fail");
-      paint(id);
+      settleFailure(id, error, "");
     });
   });
 
@@ -805,6 +818,8 @@
       });
     }).then(function (view) {
       delete times[id];
+      delete retryCount[id];
+      delete retryToken[id];
       if (!view || !prefs.video) {
         if (known[id] && known[id].status === "loading") delete known[id];
         return;
@@ -815,9 +830,7 @@
       if (known[id].status === "loading") watchLoading(id);
     }).catch(function (error) {
       if (!prefs.video) return;
-      known[id] = { id: id, status: "error", media: "video", notice: String(error && error.message ? error.message : error) };
-      crumb("video: fail");
-      paint(id);
+      settleFailure(id, error, "video");
     });
   });
 
@@ -863,6 +876,8 @@
   };
 
   root.__whatrustVoiceRetry = function (id) {
+    delete retryToken[id];
+    delete retryCount[id];
     var view = known[id];
     var target = view && view.media === "video" ? videoQueue : queue;
     if (!target.forget(id)) return;
@@ -870,6 +885,38 @@
     delete retryAt[id];
     target.add(id);
   };
+
+  function settleFailure(id, error, media) {
+    var notice = String(error && error.message ? error.message : error);
+    var attempt = (retryCount[id] || 0) + 1;
+    var wait = audioRetryDelay(notice, attempt);
+    if (wait) {
+      retryCount[id] = attempt;
+      var token = {};
+      retryToken[id] = token;
+      var loading = { id: id, status: "loading" };
+      if (media) loading.media = media;
+      known[id] = loading;
+      paint(id);
+      crumb("voice: retry");
+      setTimeout(function () {
+        if (retryToken[id] !== token) return;
+        var target = media === "video" ? videoQueue : queue;
+        target.forget(id);
+        if (target.add(id)) return;
+        if (media === "video") considerVideo(id);
+        else consider(id);
+      }, wait);
+      return;
+    }
+    delete retryCount[id];
+    delete retryToken[id];
+    var failed = { id: id, status: "error", notice: notice };
+    if (media) failed.media = media;
+    known[id] = failed;
+    crumb(media === "video" ? "video: fail" : "voice: fail");
+    paint(id);
+  }
 
   root.__whatrustVoiceSummarize = function (id) {
     var view = known[id];

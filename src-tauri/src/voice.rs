@@ -16,6 +16,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{InvokeBody, Request};
 use tauri::{AppHandle, Manager, Webview};
@@ -1480,6 +1481,17 @@ fn post_once(
     }
 }
 
+/// How long to wait after FluidVoice refuses audio that a later call accepts.
+/// `failures` is how many refusals this note has already seen. `None` means stop.
+fn retry_after_bad_audio(failures: u32) -> Option<Duration> {
+    match failures {
+        1 => Some(Duration::from_millis(400)),
+        2 => Some(Duration::from_millis(800)),
+        3 => Some(Duration::from_millis(1_600)),
+        _ => None,
+    }
+}
+
 fn fluid_transcribe(port: u16, audio: &[u8], filename: &str) -> Result<String, &'static str> {
     // A WhatsApp note with a silent gap inside a multi-frame packet is valid
     // Opus, and it plays, but FluidVoice's decoder rejects the whole file.
@@ -1488,6 +1500,30 @@ fn fluid_transcribe(port: u16, audio: &[u8], filename: &str) -> Result<String, &
         crate::dlog::log("voice: repaired opus");
     }
     let audio = repaired.as_deref().unwrap_or(audio);
+    // One decoder. A second note, or a note sent while FluidVoice is dictating
+    // or still loading its model, comes back as a 400. The same bytes succeed
+    // once the decoder is free, so wait in line and try a refusal again.
+    static GATE: Mutex<()> = Mutex::new(());
+    let _hold = GATE.lock().unwrap_or_else(|err| err.into_inner());
+    let mut failures = 0;
+    loop {
+        match fluid_transcribe_once(port, audio, filename) {
+            Err("bad_audio") => {
+                failures += 1;
+                match retry_after_bad_audio(failures) {
+                    Some(delay) => {
+                        crate::dlog::log("voice: fluidvoice busy, retrying");
+                        std::thread::sleep(delay);
+                    }
+                    None => return Err("bad_audio"),
+                }
+            }
+            result => return result,
+        }
+    }
+}
+
+fn fluid_transcribe_once(port: u16, audio: &[u8], filename: &str) -> Result<String, &'static str> {
     sweep_note_files();
     #[cfg(windows)]
     if let Some((port, token)) = windows_fluidvoice(port) {
@@ -1781,6 +1817,11 @@ mod tests {
         );
         assert_eq!(after_status(404, "not found"), After::Next);
         assert_eq!(after_status(400, "could not decode audio"), After::BadAudio);
+        assert_eq!(retry_after_bad_audio(1), Some(Duration::from_millis(400)));
+        assert_eq!(retry_after_bad_audio(2), Some(Duration::from_millis(800)));
+        assert_eq!(retry_after_bad_audio(3), Some(Duration::from_millis(1_600)));
+        assert_eq!(retry_after_bad_audio(4), None);
+        assert_eq!(retry_after_bad_audio(0), None);
         assert_eq!(
             after_status(400, r#"could not decode C:\Users\a\Temp\note.opus"#),
             After::BadAudio
