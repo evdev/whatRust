@@ -523,11 +523,15 @@ LangString wrTranscriptionTitle ${LANG_ENGLISH} "Transcription tools"
 LangString wrTranscriptionSubtitle ${LANG_ENGLISH} "Optional local voice and video transcription"
 LangString wrTranscriptionCheckbox ${LANG_ENGLISH} "Install transcription tools"
 LangString wrTranscriptionFailed ${LANG_ENGLISH} "whatRust was installed, but transcription setup did not finish. Check the installation details and retry from Settings > Transcription."
+  LangString wrNpuTestFailed ${LANG_ENGLISH} "whatRust was installed, but the transcription test failed. Windows may have blocked GenieX, or the NPU or model may be unavailable. If Smart App Control blocked GenieX, use a fully signed GenieX release when available. Turning Smart App Control off reduces protection for the whole PC, and on some Windows versions re-enabling it may require a reset. After addressing the problem, retry Test NPU in whatRust Settings > Transcription.$\r$\n$\r$\nOpen Smart App Control settings?"
+  LangString wrOpenSecurityFailed ${LANG_ENGLISH} "Windows could not open that page. Open Windows Security > App & browser control > Smart App Control settings."
 LangString wrFluidVoiceNext ${LANG_ENGLISH} "Open FluidVoice, complete its model setup, and enable its local API before using transcription in whatRust."
 LangString wrTranscriptionTitle ${LANG_PORTUGUESEBR} "Ferramentas de transcrição"
 LangString wrTranscriptionSubtitle ${LANG_PORTUGUESEBR} "Transcrição local opcional de áudio e vídeo"
 LangString wrTranscriptionCheckbox ${LANG_PORTUGUESEBR} "Instalar ferramentas de transcrição"
 LangString wrTranscriptionFailed ${LANG_PORTUGUESEBR} "O whatRust foi instalado, mas a configuração da transcrição não terminou. Consulte os detalhes e tente novamente em Configurações > Transcrição."
+  LangString wrNpuTestFailed ${LANG_PORTUGUESEBR} "O whatRust foi instalado, mas o teste de transcrição falhou. O Windows pode ter bloqueado o GenieX, ou a NPU ou o modelo podem estar indisponíveis. Se o Controle Inteligente de Aplicativos bloqueou o GenieX, use uma versão totalmente assinada quando estiver disponível. Desativar essa proteção reduz a segurança de todo o PC e, em algumas versões do Windows, reativá-la pode exigir uma redefinição. Depois tente Testar NPU em Configurações > Transcrição.$\r$\n$\r$\nAbrir as configurações do Controle Inteligente de Aplicativos?"
+  LangString wrOpenSecurityFailed ${LANG_PORTUGUESEBR} "O Windows não conseguiu abrir essa página. Abra Segurança do Windows > Controle de aplicativos e navegador > Configurações do Controle Inteligente de Aplicativos."
 LangString wrFluidVoiceNext ${LANG_PORTUGUESEBR} "Abra o FluidVoice, configure seu modelo e ative a API local antes de usar a transcrição no whatRust."
 !if "${ARCH}" == "arm64"
   LangString wrTranscriptionDescription ${LANG_ENGLISH} "Installs Qualcomm GenieX CLI and Qwen3-ASR 0.6B Q8. Requires a supported Snapdragon NPU, an internet connection, and about 1.2 GiB of downloads. Existing installations and models are kept. You can also set this up later in Settings."
@@ -850,12 +854,25 @@ Section Install
     nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\whatrust-transcription-setup.ps1" -Architecture "${ARCH}"'
     Pop $0
     ${If} $0 != 0
-      DetailPrint "$(wrTranscriptionFailed)"
+      ${If} $0 == 2
+        DetailPrint "$(wrNpuTestFailed)"
+      ${Else}
+        DetailPrint "$(wrTranscriptionFailed)"
+      ${EndIf}
       ${If} ${Silent}
       ${OrIf} $PassiveMode = 1
         SetErrorLevel 1
       ${Else}
-        MessageBox MB_OK|MB_ICONEXCLAMATION "$(wrTranscriptionFailed)"
+        ${If} $0 == 2
+          MessageBox MB_YESNO|MB_ICONEXCLAMATION "$(wrNpuTestFailed)" IDNO npu_security_done
+          ClearErrors
+          ExecShell "open" "windowsdefender://smartapp/"
+          IfErrors 0 npu_security_done
+          MessageBox MB_OK|MB_ICONEXCLAMATION "$(wrOpenSecurityFailed)"
+          npu_security_done:
+        ${Else}
+          MessageBox MB_OK|MB_ICONEXCLAMATION "$(wrTranscriptionFailed)"
+        ${EndIf}
       ${EndIf}
     ${Else}
       !if "${ARCH}" == "x64"

@@ -35,6 +35,7 @@ $script:registered = $false
 $script:downloads = @()
 $script:starts = @()
 $script:pulls = 0
+$script:npuWorks = $true
 $script:exitCode = 0
 function Find-GenieX { if ($script:genieExists) { return 'mock-geniex.exe' }; return $null }
 function Find-InstalledProgram($name) { return $script:registered }
@@ -49,6 +50,7 @@ function Start-Process {
 }
 function Has-Q8Model($exe) { return $script:modelExists }
 function Install-Q8Model($exe) { $script:pulls++; $script:modelExists = $true }
+function Test-GenieXNpu($exe) { return $script:npuWorks }
 function Test-Path {
   param($LiteralPath, $PathType)
   if ($LiteralPath -like '*FluidVoice\fluidvoice.exe') { return $script:fluidExists }
@@ -63,6 +65,11 @@ Assert ($script:downloads.Count -eq 1 -and $script:starts.Count -eq 1 -and $scri
 $script:modelExists = $false
 Install-Transcription arm64
 Assert ($script:downloads.Count -eq 1 -and $script:starts.Count -eq 1 -and $script:pulls -eq 2) 'existing GenieX receives only the missing Q8 model'
+$script:npuWorks = $false
+$rejected = $false
+try { Install-Transcription arm64 } catch { $rejected = $_.Exception.Message -like 'NPU_TEST_FAILED:*' -and $_.Exception.Message -like '*windowsdefender://smartapp/*' }
+Assert $rejected 'a failed NPU test reports recovery guidance'
+$script:npuWorks = $true
 
 $script:genieExists = $false; $script:registered = $true
 $rejected = $false
