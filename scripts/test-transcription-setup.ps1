@@ -12,6 +12,22 @@ $rejected = $false
 try { Get-VerifiedInstaller 'https://invalid.example/test.exe' ('0' * 64) $badFile } catch { $rejected = $_.Exception.Message -like '*checksum*' }
 Assert $rejected 'a corrupt download is rejected'
 
+# Exercise the real JSON parsing with the schema emitted by GenieX 0.12.
+function Test-GenieXList {
+  $global:LASTEXITCODE = 0
+  return $script:listJson
+}
+$script:listJson = '[]'
+Assert (-not (Has-Q8Model Test-GenieXList)) 'an empty model list requires a download'
+$script:listJson = '[{"name":"ggml-org/Qwen3-ASR-0.6B-GGUF","size":1183324768,"runtime":"llama_cpp","type":"vlm","precisions":["Q8_0"]}]'
+Assert (Has-Q8Model Test-GenieXList) 'the GenieX JSON list recognizes the installed Q8 model'
+$script:listJson = '[{"name":"ggml-org/Qwen3-ASR-0.6B-GGUF","precisions":["Q4_0"]},{"name":"another/model","precisions":["Q8_0"]}]'
+Assert (-not (Has-Q8Model Test-GenieXList)) 'other models and precisions do not count as Q8'
+$script:listJson = 'invalid json'
+$rejected = $false
+try { Has-Q8Model Test-GenieXList } catch { $rejected = $_.Exception.Message -like '*incompatible model list*' }
+Assert $rejected 'invalid model JSON is reported'
+
 $script:genieExists = $false
 $script:modelExists = $false
 $script:fluidExists = $false
@@ -40,7 +56,7 @@ function Test-Path {
 }
 
 Install-Transcription arm64
-Assert ($script:downloads.Count -eq 1 -and $script:downloads[0].Url -match 'qualcomm/GenieX/.+v0\.11\.0' -and $script:downloads[0].Hash -eq '8470b8a1d51ae3a41040c831c76ec7e9e5fed72c51b49ef8a0f1bf2580cfb57f') 'fresh ARM64 setup downloads the pinned GenieX installer'
+Assert ($script:downloads.Count -eq 1 -and $script:downloads[0].Url -match 'qualcomm/GenieX/.+v0\.12\.0' -and $script:downloads[0].Hash -eq '1d9de0144c42456cb89f7306e3f4885d5a5898def6c5dacd0f49cc91d07c10ce') 'fresh ARM64 setup downloads the pinned GenieX installer'
 Assert ($script:starts.Count -eq 1 -and $script:starts[0].Args -contains '/VERYSILENT' -and $script:pulls -eq 1) 'fresh ARM64 setup installs GenieX and downloads Q8'
 Install-Transcription arm64
 Assert ($script:downloads.Count -eq 1 -and $script:starts.Count -eq 1 -and $script:pulls -eq 1) 'existing GenieX and Q8 are not replaced or downloaded again'

@@ -33,8 +33,14 @@ function Get-VerifiedInstaller($url, $sha256, $destination) {
 function Has-Q8Model($exe) {
   $json = & $exe --skip-update list --format json | Out-String
   if ($LASTEXITCODE -ne 0) { throw 'The installed GenieX CLI did not list its models. Update GenieX manually and retry in whatRust settings.' }
-  try { $models = @($json | ConvertFrom-Json) } catch { throw 'The installed GenieX CLI returned an incompatible model list. Update it manually.' }
-  return @($models | Where-Object { $_.name -eq $modelRepo -and @($_.precisions) -contains 'Q8_0' }).Count -gt 0
+  # Wrapping the JSON preserves an empty or single-element array in both
+  # Windows PowerShell 5.1 and PowerShell 7.
+  try { $models = (ConvertFrom-Json -InputObject ('{"models":' + $json + '}')).models } catch { throw 'The installed GenieX CLI returned an incompatible model list. Update it manually.' }
+  if ($models -isnot [array]) { throw 'The installed GenieX CLI returned an incompatible model list. Update it manually.' }
+  foreach ($entry in $models) {
+    if ($entry.name -eq $modelRepo -and @($entry.precisions) -contains 'Q8_0') { return $true }
+  }
+  return $false
 }
 
 function Install-Q8Model($exe) {
@@ -47,8 +53,8 @@ function Install-Transcription([string]$Architecture) {
     $exe = Find-GenieX
     if (-not $exe) {
       if (Find-InstalledProgram 'GenieX CLI') { throw 'GenieX is registered but its executable was not found. Check its installation and retry in whatRust settings.' }
-      $setup = Join-Path $env:TEMP 'whatrust-geniex-v0.11.0-setup.exe'
-      Get-VerifiedInstaller 'https://github.com/qualcomm/GenieX/releases/download/v0.11.0/geniex-cli-setup-windows-arm64-v0.11.0.exe' '8470b8a1d51ae3a41040c831c76ec7e9e5fed72c51b49ef8a0f1bf2580cfb57f' $setup
+      $setup = Join-Path $env:TEMP 'whatrust-geniex-v0.12.0-setup.exe'
+      Get-VerifiedInstaller 'https://github.com/qualcomm/GenieX/releases/download/v0.12.0/geniex-cli-setup-windows-arm64-v0.12.0.exe' '1d9de0144c42456cb89f7306e3f4885d5a5898def6c5dacd0f49cc91d07c10ce' $setup
       Write-Output 'Installing GenieX CLI...'
       $process = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' -Wait -PassThru
       if ($process.ExitCode -ne 0) { throw "GenieX setup exited with code $($process.ExitCode)." }
