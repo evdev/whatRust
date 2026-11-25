@@ -206,6 +206,13 @@
     return durationOnThumbnail(row);
   }
 
+  // WhatsApp can render an unplayed video as an ordinary image thumbnail,
+  // without a stable play icon or duration. The message model is checked
+  // before showing a button, so image thumbnails are safe candidates too.
+  function mayContainVideo(row) {
+    return looksLikeVideoRow(row) || !!(row && row.querySelector && row.querySelector("img"));
+  }
+
   function serializedId(value) {
     if (!value) return "";
     if (typeof value === "string") return isMessageId(value) ? value : "";
@@ -664,6 +671,8 @@
       chatApiReady: chatApiReady,
       audioRetryDelay: audioRetryDelay,
       looksLikeVideoRow: looksLikeVideoRow,
+      mayContainVideo: mayContainVideo,
+      messageIdOf: messageIdOf,
       intersectsViewport: intersectsViewport,
       pack: pack,
       createQueue: createQueue,
@@ -1131,10 +1140,21 @@
     if (prefs.video) {
       for (var v = 0; v < rows.length; v++) {
         var videoId = rows[v].getAttribute("data-id");
-        if (!isMessageId(videoId) || !looksLikeVideoRow(rows[v]) || !intersectsViewport(rows[v])) continue;
+        if (!isMessageId(videoId) || !mayContainVideo(rows[v]) || !intersectsViewport(rows[v])) continue;
         anchors[videoId] = rows[v];
         noteChat(videoId);
         considerVideo(videoId);
+      }
+      // Some WhatsApp versions keep the message ID in React props instead of
+      // a data-id attribute, as with voice messages above.
+      var videoRows = main.querySelectorAll('[data-testid="msg-container"]');
+      for (var vr = 0; vr < videoRows.length; vr++) {
+        if (!mayContainVideo(videoRows[vr]) || !intersectsViewport(videoRows[vr])) continue;
+        var fallbackId = messageIdOf(videoRows[vr]);
+        if (!isMessageId(fallbackId)) continue;
+        anchors[fallbackId] = videoRows[vr];
+        noteChat(fallbackId);
+        considerVideo(fallbackId);
       }
     }
     sweep();

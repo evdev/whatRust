@@ -81,6 +81,15 @@ assert(api.isVoiceMessage({ type: "ptt" }), "ptt is a voice note");
 assert(api.isVoiceMessage({ attributes: { type: "audio" } }), "audio messages count");
 assert(!api.isVoiceMessage({ type: "chat" }), "text messages are skipped");
 assert(!api.isVoiceMessage(null), "missing messages are skipped");
+assert(api.isVideoMessage({ type: "video" }) && api.isVideoMessage({ attributes: { type: "ptv" } }), "regular and instant videos are eligible");
+assert(!api.isVideoMessage({ type: "image" }) && !api.isVideoMessage({ type: "video", isGif: true }) && !api.isVideoMessage({ type: "video", isViewOnce: true }), "photos, GIFs and view-once videos are excluded");
+const thumbnailRow = {
+  querySelector: (selector) => selector === "img" ? {} : null,
+  querySelectorAll: () => [],
+};
+assert(api.mayContainVideo(thumbnailRow), "an unmarked thumbnail is checked against the message model");
+const reactRow = { parentElement: null, getAttribute: () => null, __reactProps$test: { message: { id: { _serialized: id } } } };
+assert(api.messageIdOf(reactRow) === id, "a message ID can be recovered from React props when the row has no data-id");
 
 const row = new El("div");
 row.setAttribute("data-id", id);
