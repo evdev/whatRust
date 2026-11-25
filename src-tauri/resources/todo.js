@@ -122,7 +122,7 @@
   function collectButtons(el) {
     var out = [];
     walk(el, function (node) {
-      if (node !== el && (tagIs(node, "button") || attr(node, "role") === "button")) out.push(node);
+      if (node !== el && !/^__whatrust_/.test(node.id || "") && (tagIs(node, "button") || attr(node, "role") === "button" || attr(node, "role") === "tab")) out.push(node);
     });
     return out;
   }
@@ -137,7 +137,9 @@
       seen.push(el);
     }
     walk(app, function (node) {
-      if (tagIs(node, "header") || tagIs(node, "nav")) add(node);
+      // WhatsApp has also rendered the navigation rail as nested divs and
+      // asides. Use its geometry below instead of relying on its tag name.
+      if (!hasId(node, "main") && !hasId(node, "side") && !hasId(node, "pane-side")) add(node);
     });
     var kids = app.children || [];
     for (var i = 0; i < kids.length; i++) {
@@ -200,7 +202,14 @@
       var meta = findMetaButton(rail);
       if (meta && meta.parentNode) return { el: meta, mode: "rail" };
       var buttons = collectButtons(rail);
-      var last = buttons.length ? buttons[buttons.length - 1] : null;
+      // The profile and settings controls may be at the bottom of the rail.
+      // Prefer the last navigation control in its upper half instead.
+      var railBox = rectOf(rail);
+      var upper = buttons.filter(function (button) {
+        var r = rectOf(button);
+        return r && r.width > 0 && r.height > 0 && r.top < railBox.top + railBox.height / 2;
+      });
+      var last = upper.length ? upper[upper.length - 1] : null;
       if (last && last.parentNode) return { el: last, mode: "rail" };
     }
     var controls = doc.getElementById("__whatrust_controls");
