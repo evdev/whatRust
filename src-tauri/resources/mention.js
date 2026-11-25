@@ -7,13 +7,15 @@
  * direct message and a reply, so either switch alerts. One message still
  * makes one sound and one popup.
  *
- * What wa-js 4.7.2 (resources/wppconnect-wa.js) actually exposes:
+ * What wa-js 4.8.2 (resources/wppconnect-wa.js) actually exposes:
  * - New messages: WPP.on("chat.new_message"). Opening a chat replays older
  *   messages through that event. WPP.isFullReady becomes true only after
  *   conn.main_ready, which is the caught-up point. Subscribe then, and
  *   ignore anything older than that moment.
- * - Self: WPP.conn.getMyUserWid() and getMyUserLid() (the lid call throws
- *   when there is none). A mention may use either id.
+ * - Self: WPP.conn.getMyUserWid() and getMyUserLid(). getMyUserLid uses
+ *   getMeLidUserOrThrow when WhatsApp still has it, otherwise
+ *   getMaybeMeLidUser, and throws when there is none. A mention may use
+ *   either id.
  * - Personal mention: mentionedJidList. @all is not a jid. The send path
  *   treats /(?<![\w@.+-])@all\b/ as MENTION_ALL, and that flag's value is 1
  *   (nonJidMentions bit). @everyone is the same kind of tag.

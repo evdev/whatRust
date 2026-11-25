@@ -622,6 +622,10 @@ assert(bundle.includes("r.quotedMsg instanceof s.MsgKey"), "a quoted send accept
 assert(bundle.includes("(?<![\\w@.+-])@all\\b"), "wa-js treats @all as a non-jid mention");
 assert(bundle.includes("t.markIsRead=async function"), "wa-js can mark a chat read");
 assert(bundle.includes("t.getMyUserLid=function"), "wa-js can read the lid self id");
+assert(
+  bundle.includes("getMeLidUserOrThrow") && bundle.includes("getMaybeMeLidUser") && bundle.includes("The account LID is unavailable"),
+  "wa-js falls back when WhatsApp removes the throwing lid getter"
+);
 assert(bundle.includes('emit("conn.main_ready"'), "catch-up is conn.main_ready");
 assert(bundle.includes('emit("chat.new_message"'), "live messages use chat.new_message");
 assert(bundle.includes('emit("chat.active_chat"'), "chat switches use the bundled active-chat event");

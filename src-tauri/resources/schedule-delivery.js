@@ -1,6 +1,6 @@
 /* Scheduled delivery transport. Rust owns authorization, durable attempts, and
  * retry policy. A local model (or a resolved send promise) alone is not proof.
- * WA-JS 4.7.2 supports messageId for both text and media; media forwards the
+ * WA-JS 4.8.2 supports messageId for both text and media; media forwards the
  * prepared key through productMsgOptions. Never select/open/read a chat here. */
 (function () {
   "use strict";
@@ -160,7 +160,7 @@
   function preSubmissionError(error, kind) {
     var ErrorType = root.WPP.util && root.WPP.util.WPPError;
     if (typeof ErrorType !== "function" || !(error instanceof ErrorType)) return false;
-    // Verified in bundled 4.7.2: these throw before addAndSendMsgToChat or
+    // Verified in bundled 4.8.2: these throw before addAndSendMsgToChat or
     // prepared-media sendToChat. Do not extend this to native/network errors.
     return error.code === "chat_not_found" ||
       error.code === "message_key_is_not_from_me" ||
