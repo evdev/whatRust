@@ -190,7 +190,7 @@ pub fn start(app: &AppHandle) {
                 Err(err) => json!({"test":"mention_popup_floats_without_taking_focus","pass":false,"error":err}),
             });
             for (step, mounted) in [false, true, false, true, false].into_iter().enumerate() {
-                eval(&app, &label, &format!("window.__menuStep=-1;window.__TAURI__.core.invoke('report_integration',{{mounted:{mounted},detector:false}}).then(()=>window.__menuStep={step})"))?;
+                eval(&app, &label, &format!("window.__menuStep=-1;window.__TAURI__.core.invoke('report_integration',{{mounted:{mounted},detector:false,loaded:true}}).then(()=>window.__menuStep={step})"))?;
                 for _ in 0..20 {
                     if eval(&app, &label, &format!("window.__menuStep==={step}"))? == "true" {
                         break;

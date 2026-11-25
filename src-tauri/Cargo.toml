@@ -1,6 +1,6 @@
 [package]
 name = "whatrust"
-version = "0.6.16"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.90"
 
@@ -72,6 +72,7 @@ windows = { version = "0.62", features = [
   "Win32_UI_WindowsAndMessaging", # SW_SHOWNORMAL for ShellExecuteW
   "Win32_Globalization",
   "Win32_Media_Audio",
+  "Win32_Graphics_Dwm",
   "Win32_UI_Input_KeyboardAndMouse",
 ] }
 windows-core = "0.62"

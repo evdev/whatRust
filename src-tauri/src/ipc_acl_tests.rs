@@ -80,6 +80,7 @@ const PAGE_COMMANDS: &[&str] = &[
     "mention_filter",
     "mention_media",
     "mention_heard",
+    "paste_clipboard",
 ];
 /// Commands only the local settings window may use.
 const SETTINGS_COMMANDS: &[&str] = &[
@@ -95,6 +96,8 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "remove_account_photo",
     "open_contributor",
     "restart_app",
+    "export_backup",
+    "import_backup",
     "list_accounts",
     "add_account",
     "remove_account",

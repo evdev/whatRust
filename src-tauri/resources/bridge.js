@@ -299,6 +299,22 @@
     e.stopPropagation();
     invoke("zoom_step", { action: action });
   }, true);
+  // Ctrl+1..9 (Cmd on macOS) opens the Nth account, like browser tabs. Only
+  // with more than one account; otherwise the keys reach WhatsApp untouched.
+  function accountKeyIndex(e) {
+    if (e.isComposing || e.keyCode === 229 || e.altKey || e.shiftKey) return -1;
+    if (!(IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) return -1;
+    var m = /^(?:Digit|Numpad)([1-9])$/.exec(e.code || "");
+    return m ? Number(m[1]) - 1 : -1;
+  }
+  window.addEventListener("keydown", function (e) {
+    if (e.defaultPrevented) return;
+    var i = accountKeyIndex(e);
+    if (i < 0) return;
+    invoke("switcher_accounts").then(function (list) {
+      if (Array.isArray(list) && list.length > 1 && list[i]) invoke("switch_account", { id: list[i].id });
+    });
+  }, true);
   // A wheel notch, or a trackpad pinch (a burst of ctrl+wheel events), moves one
   // level: deltas accumulate to a threshold, then a short cooldown swallows the
   // rest of the burst.
@@ -805,6 +821,76 @@
     }
   } catch (e) {}
 
+  // 2d) WhatsApp's own alert tones. The page plays message sounds through
+  //     `new Audio(...)` elements it creates once and reuses for the whole
+  //     session (WAWebNotificationTone and friends). Those are independent of
+  //     whatRust's notifications, so turning notifications off does not silence
+  //     them. Track the elements that constructor creates and mute only the
+  //     bundled UI tones while the user has notification sounds off.
+  //
+  //     Chat audio (voice notes, audio messages, status) also goes through
+  //     `new Audio`, but with a `blob:` URL: WhatsApp decrypts the media in the
+  //     page and hands it to the element that way. Only the alert tones come
+  //     from static.whatsapp.net. A looped element — the incoming-call ringtone
+  //     — is left alone.
+  (function () {
+    var soundOn = window.__whatrustSound !== false;
+    // Every element the Audio constructor made, held weakly: voice notes go
+    // through `new Audio` too, and a plain list would keep each one (and its
+    // decoded media) alive for the whole session.
+    var constructed = typeof WeakSet === "function" ? new WeakSet() : null;
+    // Only the alert tones seen so far (a handful), so the toggle can reach them.
+    var alertAudios = [];
+    var silencedByUs = [];
+    function isAlertAudio(el) {
+      if (!constructed || !constructed.has(el) || el.loop || el.isConnected) return false;
+      var src = String(el.currentSrc || el.src || "");
+      return /^https:\/\/static\.whatsapp\.net\//i.test(src);
+    }
+    function remember(el) {
+      if (isAlertAudio(el) && alertAudios.indexOf(el) < 0) alertAudios.push(el);
+    }
+    function silence(el) {
+      if (soundOn || !isAlertAudio(el) || el.muted) return;
+      el.muted = true;
+      if (silencedByUs.indexOf(el) < 0) silencedByUs.push(el);
+    }
+    try {
+      if (typeof window.Audio === "function" && window.HTMLMediaElement) {
+        var NativeAudio = window.Audio;
+        var nativePlay = window.HTMLMediaElement.prototype.play;
+        window.Audio = new Proxy(NativeAudio, {
+          construct: function (target, args) {
+            var el = Reflect.construct(target, args);
+            if (constructed) constructed.add(el);
+            remember(el);
+            return el;
+          },
+        });
+        window.HTMLMediaElement.prototype.play = function () {
+          remember(this);
+          silence(this);
+          return nativePlay.apply(this, arguments);
+        };
+      }
+    } catch (e) {}
+    function apply(on) {
+      soundOn = on !== false;
+      for (var i = 0; i < alertAudios.length; i++) {
+        var el = alertAudios[i];
+        if (el.loop) continue;
+        if (soundOn) {
+          if (silencedByUs.indexOf(el) >= 0) el.muted = false;
+        } else {
+          silence(el);
+        }
+      }
+      if (soundOn) silencedByUs = [];
+    }
+    window.__whatrustSetNotificationSound = apply;
+    apply(soundOn);
+  })();
+
   // 3) Unread count — forward the raw <title> string on change; Rust parses it.
   // `settled`: the page has been up long enough that a rising count means new
   // messages, not WhatsApp syncing after a launch or reload (Rust only raises
@@ -1124,14 +1210,38 @@
       (b.closest('button,[role="button"],div[role="button"]') || b).click();
       return true;
     };
-    drop.clickMenuItem = function (kind) {
-      var sels =
-        kind === "media"
-          ? ['[data-testid="attach-image"]', '[data-icon="media-multiple"]', '[aria-label*="Photos"]', '[aria-label*="hoto"]']
-          : ['[data-testid="attach-document"]', '[data-icon="document"]', '[aria-label*="Document"]', '[aria-label*="ocument"]'];
-      var e = drop.qs(sels);
-      if (!e) return false;
+    // The attach menu's "Photos & videos" / "Document" entry, most specific selector first.
+    drop.menuItemSelectors = function (kind) {
+      return kind === "media"
+        ? ['[data-testid="attach-image"]', '[data-icon="media-multiple"]', '[aria-label*="Photos"]', '[aria-label*="hoto"]']
+        : ['[data-testid="attach-document"]', '[data-icon="document"]', '[aria-label*="Document"]', '[aria-label*="ocument"]'];
+    };
+    // Every element on the page that matches a menu-item selector.
+    drop.menuItemMatches = function (kind) {
+      var sels = drop.menuItemSelectors(kind), out = [];
+      for (var i = 0; i < sels.length; i++) {
+        var found = document.querySelectorAll(sels[i]);
+        for (var j = 0; j < found.length; j++) out.push(found[j]);
+      }
+      return out;
+    };
+    // The first menu-item match that is not in `stale`. The loose aria-label selectors
+    // can also match things outside the menu (a "Profile photo" button, say); anything
+    // already on the page before the menu opened is one of those, never the menu item.
+    drop.findMenuItem = function (kind, stale) {
+      var all = drop.menuItemMatches(kind);
+      for (var i = 0; i < all.length; i++) {
+        if (stale.indexOf(all[i]) === -1) return all[i];
+      }
+      return null;
+    };
+    drop.clickElement = function (e) {
       (e.closest('li,button,[role="button"],div[role="button"]') || e).click();
+    };
+    drop.clickMenuItem = function (kind) {
+      var e = drop.qs(drop.menuItemSelectors(kind));
+      if (!e) return false;
+      drop.clickElement(e);
       return true;
     };
     drop.poll = function (fn, ms) {
@@ -1157,23 +1267,39 @@
       input.dispatchEvent(new Event("input", { bubbles: true }));
       return true;
     };
-    // Open the attach menu (which mounts the lazily-rendered inputs) and inject into the
-    // one matching `kind`. If opening the menu alone doesn't mount it, click the matching
-    // submenu item to force it. No user gesture exists here, so the OS file picker can't
-    // open — only the input element is mounted, which is all we need.
+    // Open the attach menu and inject into the file input matching `kind`. Current
+    // WhatsApp Web mounts that input only when the menu's "Photos & videos" or
+    // "Document" entry is clicked, not when the menu opens. So after opening the menu,
+    // watch for EITHER the input (older versions mount it with the menu) OR the menu
+    // entry, and click the entry the moment it renders. Waiting for the input alone
+    // used to sit out its full 1 s timeout before clicking the entry (a visible delay
+    // on every drop and paste). No user gesture exists here, so the OS file picker
+    // can't open; only the input element is mounted, which is all we need.
     drop.mountAndInject = function (kind, files) {
       var find = kind === "media" ? drop.findMediaInput : drop.findDocInput;
+      var started = Date.now();
+      var injectInto = function (input, how) {
+        drop.log(kind + " input " + how + " after " + (Date.now() - started) + "ms");
+        return drop.inject(input, files);
+      };
       var existing = find();
-      if (existing) {
-        drop.log(kind + " input already present");
-        return Promise.resolve(drop.inject(existing, files));
-      }
+      if (existing) return Promise.resolve(injectInto(existing, "already present"));
+
+      var stale = drop.menuItemMatches(kind);
       drop.openMenu();
-      return drop.poll(find, 1000).then(function (input) {
-        if (input) return drop.inject(input, files);
-        drop.clickMenuItem(kind);
-        return drop.poll(find, 1000).then(function (input2) {
-          if (input2) return drop.inject(input2, files);
+      return drop.poll(function () {
+        var input = find();
+        if (input) return { input: input };
+        var item = drop.findMenuItem(kind, stale);
+        return item ? { item: item } : null;
+      }, 1000).then(function (hit) {
+        if (hit && hit.input) return injectInto(hit.input, "mounted with the menu");
+        // The entry rendered: click it. Nothing rendered within 1 s: the menu may be a
+        // version whose entry was already on the page, so try the plain lookup once.
+        if (hit) drop.clickElement(hit.item);
+        else drop.clickMenuItem(kind);
+        return drop.poll(find, 1000).then(function (input) {
+          if (input) return injectInto(input, "mounted by the menu entry");
           drop.log(kind + " input NOT found after opening attach menu");
           return false;
         });
@@ -1372,5 +1498,47 @@
       }
     };
     drop.log("drop injector v5 (batched chunks, incremental decode, ordered no-loss routing) ready");
+
+    // 5) Clipboard paste of images and files (Linux).
+    //    WebKitGTK hides both from the page and refuses navigator.clipboard.read():
+    //      - an image (screenshot, "Copy image") arrives as an EMPTY clipboardData;
+    //      - files copied in a file manager (PDF, video, ...) arrive as type
+    //        text/uri-list whose getData() is "" and with no files.
+    //    Either way WhatsApp gets nothing to attach. When a paste carries no file
+    //    and no plain text, ask Rust to read the system clipboard (clipboard.rs).
+    //    Copied files are streamed back through __whatrustDropFeed above, like a
+    //    drop; an image comes back as base64 PNG and goes through the same queue
+    //    and composer routing as a dropped photo.
+    //    Windows and macOS put pasted images and files in clipboardData.files, and
+    //    a text paste has text/plain, so neither ever reaches Rust.
+    drop.pasteNeedsNativeRead = function (data) {
+      if (!data) return false;
+      if (data.files && data.files.length) return false; // the webview delivered it
+      var types = Array.prototype.slice.call(data.types || []);
+      return types.indexOf("text/plain") === -1;
+    };
+    drop.pasteFromClipboard = function () {
+      return invoke("paste_clipboard").then(function (b64) {
+        // "" means no image: either nothing usable was on the clipboard, or Rust
+        // is streaming copied files through the drop feed. undefined means the
+        // command was refused (locked, background account).
+        if (typeof b64 !== "string" || !b64) return;
+        // "image.png" is the name Chrome gives a pasted image.
+        var file = new File([drop.b64ToBytes(b64)], "image.png", { type: "image/png" });
+        drop.log("paste: attaching clipboard image (" + file.size + " bytes)");
+        drop.runQueued(function () {
+          return drop.injectBatch([file]).catch(function (e) {
+            drop.log("paste inject error: " + e);
+            drop.attachFailed();
+          });
+        });
+      });
+    };
+    // Capture phase on window: runs before WhatsApp's own handlers, so a
+    // stopPropagation there cannot hide the paste from us. We only read the
+    // event and never cancel it, so text pastes behave exactly as before.
+    window.addEventListener("paste", function (e) {
+      if (drop.pasteNeedsNativeRead(e && e.clipboardData)) drop.pasteFromClipboard();
+    }, true);
   } catch (e) {}
 })();

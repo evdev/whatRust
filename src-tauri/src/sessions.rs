@@ -47,6 +47,11 @@ pub struct Sessions {
     view_visibility: Mutex<HashMap<String, bool>>,
     applied_bounds: Mutex<HashMap<String, (i32, i32, u32, u32)>>,
     pending_layout: Mutex<HashSet<String>>,
+    /// Latest controls report per account view, applied once it has held
+    /// for FALLBACK_SETTLE (see `integration_changed`).
+    controls_seq: Mutex<HashMap<String, u64>>,
+    /// When each account view was last shown (or built), for idle sleep.
+    last_seen: Mutex<HashMap<String, std::time::Instant>>,
 }
 
 fn state(app: &AppHandle) -> tauri::State<'_, Sessions> {
@@ -131,15 +136,17 @@ pub fn initialize(app: &AppHandle, hidden: bool) -> tauri::Result<Window> {
     if let Some(w) = app.get_window("main") {
         return Ok(w);
     }
+    let icon = crate::appicon::current(app);
     let w = WindowBuilder::new(app, "main")
         .title("whatRust")
         .background_color(tauri::utils::config::Color(22, 23, 23, 255))
         .inner_size(1100., 800.)
         .min_inner_size(560., 480.)
         .decorations(crate::decorations::show(app))
-        .icon(crate::appicon::current(app))?
+        .icon(icon.clone())?
         .visible(!hidden)
         .build()?;
+    crate::appicon::set_taskbar_icon(&w, &icon);
     #[cfg(windows)]
     install_menu(app, &w)?;
     let shell = WebviewBuilder::new("shell-main", WebviewUrl::App("shell.html".into()))
@@ -193,6 +200,11 @@ pub fn initialize(app: &AppHandle, hidden: bool) -> tauri::Result<Window> {
         }
         _ => {}
     });
+    // #91: the shell child is created at a fixed 1100x800 and only resized by the
+    // handlers above. A maximized/fullscreen size restored by the window-state
+    // plugin lands before they exist, leaving the shell (empty-state card and top
+    // bar) stuck at its initial size in the top-left. Apply the real size now.
+    schedule_layout(app, "main");
     Ok(w)
 }
 
@@ -290,6 +302,9 @@ fn install_menu(app: &AppHandle, w: &Window) -> tauri::Result<()> {
         .build()?;
     let menu = MenuBuilder::new(app).item(&submenu).build()?;
     w.set_menu(menu)?;
+    // set_menu shows the bar; re-apply the current visibility right away.
+    crate::lock::guard(&state(app).menus_hidden).remove(w.label());
+    sync_menu(app, w.label());
     let a = app.clone();
     let parent = w.label().to_string();
     w.on_menu_event(move |_, event| {
@@ -335,6 +350,7 @@ pub fn open_account(app: &AppHandle, account: &Account, hidden: bool) -> tauri::
     if app.get_webview(&label).is_none() {
         let view = crate::window::build_account_view(app, &parent, account, false)?;
         set_view_visible(app, &view, false);
+        crate::lock::guard(&state(app).last_seen).insert(label.clone(), std::time::Instant::now());
     }
     if crate::lock::guard(&state(app).main_active).is_none() {
         *crate::lock::guard(&state(app).main_active) = Some(label.clone());
@@ -376,11 +392,34 @@ fn activate_on_main(app: &AppHandle, label: &str) {
         crate::lock::show_lock_window(app);
         return;
     }
+    if app.get_webview(label).is_none() {
+        // Switched to an account the staggered startup has not built yet.
+        let account = accounts::id_from_label(label).and_then(|id| {
+            accounts::load(app)
+                .accounts
+                .into_iter()
+                .find(|a| a.id == id)
+        });
+        if let Some(account) = account {
+            let _ = crate::window::open_account_window(app, &account, true);
+        }
+    }
     let Some(view) = app.get_webview(label) else {
         return;
     };
     crate::window::take_over_scheduled_account(app, label);
     let parent = view.window();
+    {
+        let now = std::time::Instant::now();
+        // The account being switched away from was on screen until now.
+        let previous = crate::lock::guard(&state(app).main_active).clone();
+        let sessions = state(app);
+        let mut seen = crate::lock::guard(&sessions.last_seen);
+        if let Some(previous) = previous {
+            seen.insert(previous, now);
+        }
+        seen.insert(label.to_string(), now);
+    }
     if parent.label() == "main" {
         *crate::lock::guard(&state(app).main_active) = Some(label.to_string());
     }
@@ -397,16 +436,7 @@ fn activate_on_main(app: &AppHandle, label: &str) {
     }
     *app.state::<ActiveAccount>().lock().unwrap() = label.to_string();
     sync_menu(app, parent.label());
-    let name = accounts::id_from_label(label)
-        .and_then(|id| {
-            accounts::load(app)
-                .accounts
-                .into_iter()
-                .find(|a| a.id == id)
-        })
-        .map(|a| a.name)
-        .unwrap_or_else(|| "WhatsApp".into());
-    let _ = parent.set_title(&format!("whatRust — {name}"));
+    refresh_title(app, &parent, label);
     let _ = parent.show();
     let _ = parent.unminimize();
     set_view_visible(app, &view, true);
@@ -415,6 +445,51 @@ fn activate_on_main(app: &AppHandle, label: &str) {
     let _ = parent.set_focus();
     let _ = view.set_focus();
     crate::integration::broadcast(app);
+}
+
+/// "whatRust — Personal · Work (3)": the shown account, then any other
+/// account with unread chats, so they are visible without switching.
+pub fn window_title(app: &AppHandle, label: &str) -> String {
+    let f = accounts::load(app);
+    let unread = app.state::<crate::accounts::UnreadMap>();
+    let unread = crate::lock::guard(&unread);
+    let shown = accounts::id_from_label(label);
+    let name = f
+        .accounts
+        .iter()
+        .find(|a| Some(a.id.as_str()) == shown)
+        .map_or("WhatsApp", |a| a.name.as_str());
+    let mut others: Vec<_> = f
+        .accounts
+        .iter()
+        .filter(|a| Some(a.id.as_str()) != shown)
+        .collect();
+    others.sort_by_key(|a| a.order);
+    let mut title = format!("whatRust — {name}");
+    for a in others {
+        if let Some(n) = unread.get(&a.id).filter(|n| **n > 0) {
+            title.push_str(&format!(" · {} ({n})", a.name));
+        }
+    }
+    title
+}
+
+/// Title and (Windows 11) border colour of a window showing `label`.
+pub fn refresh_title(app: &AppHandle, window: &Window, label: &str) {
+    let _ = window.set_title(&window_title(app, label));
+    #[cfg(windows)]
+    crate::accent::apply(app, window, label);
+}
+
+/// Re-title every account window, after an unread count or a name changed.
+pub fn refresh_titles(app: &AppHandle) {
+    for (wlabel, w) in app.windows() {
+        if wlabel == "main" || wlabel.starts_with("detached-") {
+            if let Some(label) = selected(app, &wlabel) {
+                refresh_title(app, &w, &label);
+            }
+        }
+    }
 }
 
 pub fn layout(app: &AppHandle, parent: &str) {
@@ -535,14 +610,11 @@ fn sync_menu(app: &AppHandle, parent: &str) {
         return;
     }
     let _health = crate::ui_health::enter("native menu");
-    let hidden = selected(app, parent).is_some_and(|label| {
-        app.state::<crate::integration::Integration>()
-            .0
-            .lock()
-            .unwrap()
-            .get(&label)
-            .is_some_and(|adapter| adapter.mounted)
-    });
+    // Shown only when the chat list loaded but the in-page controls could not
+    // attach. Before the first report, and with no account selected (the shell
+    // page has its own controls), the window keeps a single title bar.
+    let hidden = selected(app, parent)
+        .is_none_or(|label| !crate::lock::guard(&state(app).fallback).contains(&label));
     let changed = {
         let s = state(app);
         let mut menus = crate::lock::guard(&s.menus_hidden);
@@ -558,15 +630,42 @@ fn sync_menu(app: &AppHandle, parent: &str) {
     }
 }
 
-pub fn integration_changed(app: &AppHandle, label: &str, mounted: bool) {
+/// How long a controls report must hold before the fallback chrome follows it.
+/// Showing or hiding the chrome moves the page, which re-lays WhatsApp's header
+/// out and can flip the in-page controls; acting at once made the two chase
+/// each other every frame. Brief flips never reach the layout.
+const FALLBACK_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+
+pub fn integration_changed(app: &AppHandle, label: &str, controls_ok: bool) {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    crate::lock::guard(&state(app).controls_seq).insert(label.to_string(), seq);
+    let handle = app.clone();
+    let label = label.to_string();
+    std::thread::spawn(move || {
+        std::thread::sleep(FALLBACK_SETTLE);
+        // A newer report for this view supersedes this one.
+        if crate::lock::guard(&state(&handle).controls_seq).get(&label) != Some(&seq) {
+            return;
+        }
+        let ui = handle.clone();
+        let _ = handle.run_on_main_thread(move || apply_controls(&ui, &label, controls_ok));
+    });
+}
+
+fn apply_controls(app: &AppHandle, label: &str, controls_ok: bool) {
     let s = state(app);
     let mut f = crate::lock::guard(&s.fallback);
-    if mounted {
-        f.remove(label);
+    let changed = if controls_ok {
+        f.remove(label)
     } else {
-        f.insert(label.into());
-    }
+        f.insert(label.into())
+    };
     drop(f);
+    // Re-laying out for an unchanged state would only move the page again.
+    if !changed {
+        return;
+    }
     if let Some(v) = app.get_webview(label) {
         let parent = v.window();
         if selected(app, parent.label()).as_deref() == Some(label) {
@@ -589,17 +688,19 @@ pub fn detach(app: &AppHandle, id: &str) -> Result<(), String> {
         return Ok(());
     }
     let parent_label = format!("detached-{id}");
+    let icon = crate::appicon::for_account(app, id);
     let w = WindowBuilder::new(app, &parent_label)
         .title(tr("whatRust — Conta destacada"))
         .background_color(tauri::utils::config::Color(22, 23, 23, 255))
         .inner_size(1000., 760.)
         .min_inner_size(560., 480.)
         .decorations(crate::decorations::show(app))
-        .icon(crate::appicon::for_account(app, id))
+        .icon(icon.clone())
         .map_err(|e| e.to_string())?
         .visible(false)
         .build()
         .map_err(|e| e.to_string())?;
+    crate::appicon::set_taskbar_icon(&w, &icon);
     #[cfg(windows)]
     install_menu(app, &w).map_err(|e| e.to_string())?;
     reparent_on_ui(app, &v, &w)?;
@@ -727,16 +828,7 @@ fn restore_main_after_detached_close(
     *app.state::<ActiveAccount>().lock().unwrap() = selected.clone();
     sync_menu(app, "main");
     if let (Some(window), Some(view)) = (app.get_window("main"), app.get_webview(&selected)) {
-        let name = accounts::id_from_label(&selected)
-            .and_then(|id| {
-                accounts::load(app)
-                    .accounts
-                    .into_iter()
-                    .find(|a| a.id == id)
-            })
-            .map(|account| account.name)
-            .unwrap_or_else(|| "WhatsApp".into());
-        let _ = window.set_title(&format!("whatRust — {name}"));
+        refresh_title(app, &window, &selected);
         let _ = window.show();
         let _ = window.unminimize();
         layout(app, "main");
@@ -809,6 +901,50 @@ pub fn remove_view(app: &AppHandle, id: &str) -> tauri::Result<()> {
     close_account_view(app, id)?;
     choose_remaining(app, None);
     Ok(())
+}
+
+/// Should an account last shown `idle` ago sleep, given the setting in hours?
+fn idle_too_long(idle: std::time::Duration, hours: u32) -> bool {
+    hours > 0 && idle >= std::time::Duration::from_secs(u64::from(hours) * 3600)
+}
+
+/// Unload background accounts in the main window that have not been shown for
+/// `sleep_idle_hours`. Main thread. The shown account and detached windows are
+/// never touched; a sleeping account is rebuilt when switched to (activate).
+pub fn sleep_idle(app: &AppHandle) {
+    let hours = crate::settings::load(app).sleep_idle_hours;
+    if hours == 0 {
+        return;
+    }
+    let shown = crate::lock::guard(&state(app).main_active).clone();
+    for (label, view) in app.webviews() {
+        if !label.starts_with("wa-")
+            || view.window().label() != "main"
+            || shown.as_deref() == Some(label.as_str())
+            || crate::window::is_scheduled_account(app, &label)
+        {
+            continue;
+        }
+        let idle = crate::lock::guard(&state(app).last_seen)
+            .get(&label)
+            .map(|t| t.elapsed());
+        if !idle.is_some_and(|idle| idle_too_long(idle, hours)) {
+            continue;
+        }
+        if view.close().is_ok() {
+            crate::lock::guard(&state(app).view_visibility).remove(&label);
+            crate::lock::guard(&state(app).last_seen).remove(&label);
+            crate::lock::guard(&state(app).fallback).remove(&label);
+            // A controls report still settling for this view is now moot.
+            crate::lock::guard(&state(app).controls_seq).remove(&label);
+            app.state::<crate::integration::Integration>()
+                .0
+                .lock()
+                .unwrap()
+                .remove(&label);
+            crate::dlog::log("sleep: idle account unloaded");
+        }
+    }
 }
 
 pub fn open_panel(app: &AppHandle, parent: Option<&str>) -> tauri::Result<()> {
@@ -947,4 +1083,17 @@ pub fn account_focused(app: &AppHandle, label: &str) -> bool {
             && selected(app, parent.label()).as_deref() == Some(label)
             && crate::lock::guard(&state(app).panel_parent).as_deref() != Some(parent.label())
     })
+}
+
+#[cfg(test)]
+mod sleep_tests {
+    use super::idle_too_long;
+    use std::time::Duration;
+
+    #[test]
+    fn sleeps_only_when_enabled_and_idle_long_enough() {
+        assert!(!idle_too_long(Duration::from_secs(10 * 3600), 0));
+        assert!(!idle_too_long(Duration::from_secs(3599), 1));
+        assert!(idle_too_long(Duration::from_secs(3600), 1));
+    }
 }

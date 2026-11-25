@@ -82,10 +82,13 @@ fn main() {
             "standin_cli_status",
             "set_standin_secret",
             "standin_agent_status",
+            "paste_clipboard",
             // settings window
             "get_settings",
             "set_settings",
             "restart_app",
+            "export_backup",
+            "import_backup",
             "open_settings",
             "pick_download_dir",
             "choose_app_icon",

@@ -159,6 +159,11 @@ pub fn open_account_window(app: &AppHandle, account: &Account, hidden: bool) -> 
 #[derive(Default)]
 pub(crate) struct ScheduledAccountViews(std::sync::Mutex<std::collections::HashSet<String>>);
 
+pub(crate) fn is_scheduled_account(app: &AppHandle, label: &str) -> bool {
+    app.try_state::<ScheduledAccountViews>()
+        .is_some_and(|views| crate::lock::guard(&views.0).contains(label))
+}
+
 pub(crate) fn take_over_scheduled_account(app: &AppHandle, label: &str) -> bool {
     app.try_state::<ScheduledAccountViews>()
         .is_some_and(|views| crate::lock::guard(&views.0).remove(label))
@@ -236,6 +241,18 @@ macro_rules! account_webview {
             } else {
                 String::new()
             })
+            .initialization_script(if crate::settings::load($app).page_overlays {
+                ""
+            } else {
+                // Issue #95: keep the page's header untouched.
+                "window.__WHATRUST_NO_OVERLAY=true;"
+            })
+            // bridge.js mutes WhatsApp's own alert tones and reads this before
+            // the page's sound modules create their Audio elements.
+            .initialization_script(format!(
+                "window.__whatrustSound={};",
+                crate::settings::load($app).notification_sound
+            ))
             .initialization_script(include_str!("../resources/integration.js"))
             .initialization_script(BRIDGE_JS)
             .initialization_script(MEDIA_JS)
@@ -319,9 +336,14 @@ macro_rules! account_webview {
                                 .file_name()
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("download");
+                            // Issue #123: `photo.jpg.jpeg` -> `photo.jpg`.
+                            let suggested = crate::downloads::drop_alias_extension(suggested);
                             let Some(path) = choose_download_destination(
                                 suggested,
-                                custom_dir.as_deref(),
+                                custom_dir
+                                    .clone()
+                                    .or_else(|| app.path().download_dir().ok())
+                                    .as_deref(),
                                 webview.window().hwnd().ok(),
                             ) else {
                                 crate::dlog::log("download: save dialog cancelled");
@@ -331,7 +353,21 @@ macro_rules! account_webview {
                         }
                         #[cfg(not(windows))]
                         {
-                            ensure_download_destination(destination, app.path().download_dir().ok());
+                            let base = app.path().download_dir().ok();
+                            ensure_download_destination(destination, base.clone());
+                            // Issue #92: WebKitGTK gives blob: downloads no name.
+                            crate::downloads::name_unnamed(
+                                destination,
+                                &base.unwrap_or_else(std::env::temp_dir),
+                                &crate::downloads::timestamp_name(
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs())
+                                        .unwrap_or(0),
+                                ),
+                            );
+                            // Issue #123: `photo.jpg.jpeg` -> `photo.jpg`.
+                            crate::downloads::fix_alias_extension(destination);
                             if let Some(dir) = &custom_dir {
                                 crate::downloads::place_in(dir, destination);
                             }
@@ -431,7 +467,7 @@ pub(crate) fn build_account_window(
         .inner_size(1100.0, 800.0)
         .min_inner_size(560.0, 480.0)
         .decorations(crate::decorations::show(app))
-        .icon(icon)?;
+        .icon(icon.clone())?;
     let builder = account_webview!(builder, app, label)
         .additional_browser_args(WEBVIEW2_SYNC_ARGS)
         .visible(!start_hidden);
@@ -460,6 +496,7 @@ pub(crate) fn build_account_window(
     #[cfg(target_os = "macos")]
     crate::webcrypto::attach(account.store_uuid);
     let win = builder.build()?;
+    crate::appicon::set_taskbar_icon(&win.as_ref().window(), &icon);
     // Issue #73: covers windows created after startup too (no-op once done).
     #[cfg(target_os = "macos")]
     crate::keyfix::install();
@@ -619,14 +656,17 @@ fn choose_download_destination(
     for (slot, unit) in buffer.iter_mut().zip(suggested_name.encode_utf16()) {
         *slot = unit;
     }
-    let filter: Vec<u16> = format!("{}\0*.*\0\0", tr("Todos os arquivos"))
+    // Issue #90: our own strings follow the app language (the dialog's buttons
+    // follow Windows'). Filter is "<label>\0*.*\0\0"; title is NUL-terminated.
+    let filter: Vec<u16> = format!("{}\0*.*\0\0", crate::i18n::tr("Todos os arquivos"))
         .encode_utf16()
         .collect();
-    let title: Vec<u16> = format!("{}\0", tr("Salvar arquivo"))
+    let title: Vec<u16> = format!("{}\0", crate::i18n::tr("Salvar arquivo"))
         .encode_utf16()
         .collect();
-    // The dialog opens in the configured download folder (issue #40); without
-    // one, Windows picks its usual last-used folder.
+    // The dialog opens in the configured download folder (issue #40) or else
+    // the user's Downloads folder; without an initial dir Windows falls back to
+    // the process folder (System32 when launched from autostart, issue #90).
     let initial: Vec<u16> = {
         use std::os::windows::ffi::OsStrExt;
         initial_dir
@@ -695,6 +735,14 @@ fn route_new_window(
             if from_whatsapp && crate::lock::is_unlocked(app) {
                 match build_call_popout(app, features) {
                     Ok(window) => {
+                        if let Some(opener) = app.get_webview(label) {
+                            let popup = window.clone();
+                            opener.window().on_window_event(move |event| {
+                                if matches!(event, tauri::WindowEvent::Destroyed) {
+                                    let _ = popup.destroy();
+                                }
+                            });
+                        }
                         if crate::lock::is_unlocked(app) && window.show().is_ok() {
                             return NewWindowResponse::Create { window };
                         }
@@ -782,6 +830,19 @@ pub fn apply_zoom_all(app: &AppHandle, zoom: f64) {
     for a in accounts::load(app).accounts {
         if let Some(w) = app.get_webview(&accounts::window_label(&a.id)) {
             let _ = w.set_zoom(crate::settings::sanitize_zoom(zoom));
+        }
+    }
+}
+
+/// Apply the notification-sound setting to every open account page, so the
+/// toggle in Settings takes effect without reloading WhatsApp. Pages that are
+/// not open read the same value from their initialization script.
+pub fn apply_notification_sound(app: &AppHandle, on: bool) {
+    for a in accounts::load(app).accounts {
+        if let Some(v) = app.get_webview(&accounts::window_label(&a.id)) {
+            let _ = v.eval(format!(
+                "window.__whatrustSetNotificationSound&&window.__whatrustSetNotificationSound({on});"
+            ));
         }
     }
 }
@@ -882,6 +943,15 @@ fn enqueue_drop(
             tr("Não foi possível processar os arquivos. Tente novamente.").as_ref(),
         );
     }
+}
+
+/// Stream files the user copied in a file manager and pasted into `view`
+/// (clipboard.rs) exactly as if they had been dropped on it: same caps, MIME
+/// routing, composer queue and toasts. Blocks while streaming, so call it off
+/// the main thread and off the async workers.
+pub(crate) fn stream_pasted_files(view: &tauri::Webview, paths: &[std::path::PathBuf]) {
+    let drop_id = DROP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    stream_drop(view, drop_id, paths);
 }
 
 /// Per-account windows. Listen on the WEBVIEW, not the window: with tauri's
@@ -1397,7 +1467,7 @@ fn mime_for(name: &str) -> &'static str {
 /// across multiple calls (streaming) MUST pass whole 3-byte groups on every call except the
 /// last — otherwise an interior partial group would be padded mid-stream. [`stream_chunks`]
 /// upholds that contract by emitting whole [`DROP_CHUNK_BYTES`] (multiple-of-3) chunks.
-fn base64_encode_into(out: &mut String, data: &[u8]) {
+pub(crate) fn base64_encode_into(out: &mut String, data: &[u8]) {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     out.reserve(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
@@ -2222,6 +2292,18 @@ fn show_account_legacy(app: &AppHandle, label: &str) {
         crate::lock::show_lock_window(app);
         return;
     }
+    if app.get_webview_window(label).is_none() {
+        // Not built yet by the staggered startup: build it (hidden) now.
+        let account = accounts::id_from_label(label).and_then(|id| {
+            accounts::load(app)
+                .accounts
+                .into_iter()
+                .find(|a| a.id == id)
+        });
+        if let Some(account) = account {
+            let _ = build_account_window(app, &account, true);
+        }
+    }
     #[cfg(target_os = "macos")]
     if crate::menubar::enabled(app) {
         crate::menubar::reveal(app, Some(label), None);
@@ -2407,7 +2489,9 @@ fn open_settings_legacy(app: &AppHandle) {
         .resizable(true)
         .visible(false)
         .build()
-    {
+        .inspect(|w| {
+            crate::appicon::set_taskbar_icon(&w.as_ref().window(), &crate::appicon::current(app))
+        }) {
         Ok(w) if crate::lock::is_unlocked(app) => {
             let _ = w.show();
             let _ = w.set_focus();

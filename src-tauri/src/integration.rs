@@ -6,12 +6,17 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, Webview};
+/// Process start, for the "chat list ready" startup timing in the log.
+pub static STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+static FIRST_CHAT_LIST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[derive(Default)]
 pub struct Integration(pub Mutex<HashMap<String, Adapter>>);
 #[derive(Clone, Default, Serialize)]
 pub struct Adapter {
     pub mounted: bool,
     pub detector: bool,
+    /// The chat list (`#pane-side`) is on screen: WhatsApp finished loading.
+    pub loaded: bool,
     pub theme: Option<String>,
     #[serde(skip)]
     pub last_signal: Option<Instant>,
@@ -124,8 +129,10 @@ pub fn report_integration(
     app: AppHandle,
     mounted: bool,
     detector: bool,
+    loaded: Option<bool>,
     theme: Option<String>,
 ) -> Result<(), String> {
+    let loaded = loaded.unwrap_or(false);
     remote(&window)?;
     app.state::<Integration>()
         .0
@@ -136,14 +143,25 @@ pub fn report_integration(
         .clone_from(&Adapter {
             mounted,
             detector,
+            loaded,
             theme: theme.filter(|t| matches!(t.as_str(), "dark" | "light")),
             last_signal: None,
             signals: 0,
         });
-    crate::sessions::integration_changed(&app, window.label(), mounted);
+    // Fallback chrome only when the chat list loaded but our controls could not
+    // attach; while WhatsApp is still loading the window keeps a single title bar.
+    crate::sessions::integration_changed(&app, window.label(), mounted || !loaded);
     crate::dlog::log(&format!(
         "integration: layout completed controls_mounted={mounted} detector={detector}"
     ));
+    if loaded && !FIRST_CHAT_LIST.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if let Some(t) = STARTED.get() {
+            crate::dlog::log(&format!(
+                "startup: first chat list ready after {:.1}s",
+                t.elapsed().as_secs_f64()
+            ));
+        }
+    }
     Ok(())
 }
 #[derive(Deserialize)]

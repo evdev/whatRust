@@ -127,6 +127,10 @@ The upstream demo shows the app layout, account windows, and privacy blur. [Watc
 | --- | --- |
 | ![WhatsApp Web in whatRust with chats blurred](docs/media/main.jpg) | ![Controls for choosing what to blur](docs/media/privacy-blur.jpg) |
 
+## Settings backup
+
+Settings → Appearance can save and restore upstream and fork preferences and the account list. Custom alert sound files, credentials, logins, chats, scheduled messages and transcripts stay on this computer. Restored new accounts require a QR login after restarting. The local download folder, icon and alert sounds stay unchanged.
+
 ## Build from source
 
 Clone this fork and install the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your operating system. For Linux, the project's build dependencies are listed in the [check workflow](.github/workflows/check.yml).

@@ -148,23 +148,34 @@ pub fn set_unread(
 
     crate::tray::update_badge(&app, total);
     crate::tray::rebuild_menu(&app);
+    if previous != Some(count) {
+        let ui = app.clone();
+        let _ = app.run_on_main_thread(move || crate::sessions::refresh_titles(&ui));
+    }
     crate::integration::broadcast(&app);
 
     // A new unread chat while the window is in the background: make sure the
     // user hears about it even when WhatsApp raises its own notification where
     // whatRust can't see it (issue #3). Covered by a real notification, this
-    // stays silent; see notify::unread_increased. A dismissed menu-bar panel
-    // is a hidden window, so `is_visible()` already says nobody is watching.
-    let focused = if crate::sessions::enabled() {
-        crate::sessions::account_focused(&app, window.label())
-    } else {
-        window.window().is_focused().unwrap_or(false)
-            && window.window().is_visible().unwrap_or(false)
-    };
+    // stays silent; see notify::unread_increased.
+    let focused = account_in_front(&app, &window);
     if !cfg!(windows)
         && crate::notify::fallback_due(previous, count, focused, settled.unwrap_or(false))
     {
         crate::notify::unread_increased(&app, window.label(), count);
+    }
+}
+
+/// Whether the account shown in `window` is the one the user is looking at:
+/// its window is visible and focused, and in single-window mode it is also the
+/// selected account. A dismissed menu-bar panel is a hidden window, so
+/// `is_visible()` already rules it out.
+pub(crate) fn account_in_front(app: &tauri::AppHandle, window: &tauri::Webview) -> bool {
+    if crate::sessions::enabled() {
+        crate::sessions::account_focused(app, window.label())
+    } else {
+        window.window().is_focused().unwrap_or(false)
+            && window.window().is_visible().unwrap_or(false)
     }
 }
 
@@ -284,6 +295,282 @@ pub fn set_settings(
     crate::mention::push_prefs(&app, &settings);
     crate::window::push_device_icons(&app, settings.show_message_device);
     Ok(warning)
+}
+
+/// A whatRust settings backup: preferences and the account list (names and
+/// order). Never logins, chats or the app-lock password.
+#[derive(Serialize, serde::Deserialize)]
+struct Backup {
+    app: String,
+    format: u32,
+    settings: serde_json::Value,
+    accounts: Vec<BackupAccount>,
+    startup_account: Option<String>,
+}
+#[derive(Serialize, serde::Deserialize)]
+struct BackupAccount {
+    id: String,
+    name: String,
+    order: u32,
+}
+const BACKUP_APP: &str = "whatRust";
+const BACKUP_MAX_BYTES: u64 = 1 << 20;
+const ACCOUNT_NAME_MAX: usize = 64;
+
+/// Save settings + account list to a JSON file the user picks. `false` = cancelled.
+#[tauri::command]
+pub async fn export_backup(window: tauri::Webview, app: tauri::AppHandle) -> Result<bool, String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    let f = accounts::load(&app);
+    let backup = Backup {
+        app: BACKUP_APP.into(),
+        format: 1,
+        settings: serde_json::to_value(crate::settings::load(&app)).map_err(|e| e.to_string())?,
+        accounts: f
+            .accounts
+            .iter()
+            .map(|a| BackupAccount {
+                id: a.id.clone(),
+                name: a.name.clone(),
+                order: a.order,
+            })
+            .collect(),
+        startup_account: f.startup_account.clone(),
+    };
+    use tauri_plugin_dialog::DialogExt;
+    let Some(path) = app
+        .dialog()
+        .file()
+        .set_title(tr("Salvar backup do whatRust"))
+        .add_filter("JSON", &["json"])
+        .set_file_name("whatrust-backup.json")
+        .set_parent(&window.window())
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    lock::require_unlocked(&app)?;
+    let path = path.into_path().map_err(|e| e.to_string())?;
+    let json = serde_json::to_vec_pretty(&backup).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Apply a backup to `stored` settings and `f`: returns the settings to save and
+/// how many accounts were added. Existing accounts (same id) are renamed and
+/// reordered; others are added with a fresh profile (they need a QR login).
+fn merge_backup(
+    backup: Backup,
+    stored: &Settings,
+    f: &mut accounts::AccountsFile,
+) -> Result<(Settings, usize), String> {
+    if backup.app != BACKUP_APP || backup.format != 1 {
+        return Err(tr("Este arquivo não é um backup do whatRust.").into());
+    }
+    let mut raw = backup.settings;
+    let object = raw
+        .as_object_mut()
+        .ok_or_else(|| tr("Este arquivo não é um backup do whatRust.").into_owned())?;
+    let has_mention_accounts = object.contains_key("mention_accounts");
+    let local = serde_json::to_value(stored).map_err(|e| e.to_string())?;
+    // Old and upstream backups have no fork-specific fields: retain local values.
+    const FORK_FIELDS: &[&str] = &[
+        "mention_alert",
+        "mention_alert_sound",
+        "mention_alert_popup",
+        "mention_alert_sound_file",
+        "mention_accounts",
+        "show_message_device",
+        "auto_star_todos",
+        "voice_transcribe",
+        "video_transcribe",
+        "fluidvoice_port",
+        "translate_enabled",
+        "translate_target_lang",
+        "ai_provider",
+        "ai_cli_backend",
+        "ai_model_openrouter",
+        "ai_model_gemini",
+        "ai_model_anthropic",
+        "ai_model_claude_cli",
+        "ai_model_codex_cli",
+        "ai_model_antigravity_cli",
+        "summary_model_openrouter",
+        "summary_model_gemini",
+        "summary_model_anthropic",
+        "summary_model_claude_cli",
+        "summary_model_codex_cli",
+        "summary_model_antigravity_cli",
+        "standin_enabled",
+        "standin_canned_default",
+        "standin_backend",
+        "standin_model_openrouter",
+        "standin_model_gemini",
+        "standin_model_anthropic",
+        "standin_cli_model",
+        "standin_model_claude",
+        "standin_model_grok",
+        "standin_model_codex",
+        "standin_model_antigravity",
+        "standin_claude_bin",
+        "standin_grok_bin",
+        "standin_codex_bin",
+        "standin_antigravity_bin",
+        "standin_delay_secs",
+        "standin_hourly_limit",
+        "standin_hermes_url",
+        "standin_agent_timeout_secs",
+        "standin_agent_runs_per_hour",
+        "chat_summary_consent",
+    ];
+    for key in FORK_FIELDS {
+        if !object.contains_key(*key) {
+            if let Some(value) = local.get(*key) {
+                object.insert((*key).into(), value.clone());
+            }
+        }
+    }
+    let mut settings: Settings = serde_json::from_value(raw)
+        .map_err(|_| tr("Este arquivo não é um backup do whatRust.").into_owned())?;
+    settings = settings.sanitized();
+    // Sound files are local assets; never use a filename from another machine.
+    settings.mention_alert_sound_file = stored.mention_alert_sound_file.clone();
+    // Machine-specific: keep this computer's icon and download folder.
+    settings.custom_icon = stored.custom_icon;
+    settings.download_dir = stored.download_dir.clone();
+    let mut list = backup.accounts;
+    list.sort_by_key(|a| a.order);
+    let mut order: Vec<String> = Vec::new();
+    let mut added = 0;
+    let mut id_map = std::collections::HashMap::new();
+    let existing_ids: std::collections::HashSet<String> =
+        f.accounts.iter().map(|a| a.id.clone()).collect();
+    for a in list {
+        let name: String = a.name.trim().chars().take(ACCOUNT_NAME_MAX).collect();
+        if name.is_empty() {
+            continue;
+        }
+        let source_id = a.id.clone();
+        if id_map.contains_key(&source_id) {
+            continue;
+        }
+        let id = if existing_ids.contains(&a.id) {
+            accounts::rename(f, &a.id, &name)?;
+            a.id
+        } else {
+            added += 1;
+            accounts::add(f, &name).id
+        };
+        id_map.insert(source_id, id.clone());
+        if !order.contains(&id) {
+            order.push(id);
+        }
+    }
+    if has_mention_accounts {
+        if let Some(prefs) = settings.mention_accounts.take() {
+            let mut remapped = stored.mention_accounts.clone().unwrap_or_default();
+            // An omitted entry means the default preferences for a restored account.
+            // Keep preferences for accounts that exist only on this computer.
+            for id in id_map.values() {
+                let local_sound = remapped.get(id).and_then(|p| p.sound_file.clone());
+                remapped.insert(
+                    id.clone(),
+                    crate::settings::MentionAccountPrefs {
+                        sound_file: local_sound,
+                        ..Default::default()
+                    },
+                );
+            }
+            for (source, mut pref) in prefs {
+                if let Some(id) = id_map.get(&source) {
+                    pref.sound_file = stored
+                        .mention_accounts
+                        .as_ref()
+                        .and_then(|m| m.get(id))
+                        .and_then(|p| p.sound_file.clone());
+                    remapped.insert(id.clone(), pref);
+                }
+            }
+            settings.mention_accounts = Some(remapped);
+        } else {
+            settings.mention_accounts = stored.mention_accounts.clone();
+        }
+    }
+    // Accounts only on this computer keep their place after the restored ones.
+    for a in &f.accounts {
+        if !order.contains(&a.id) {
+            order.push(a.id.clone());
+        }
+    }
+    accounts::reorder(f, &order)?;
+    if let Some(id) = backup
+        .startup_account
+        .and_then(|id| id_map.get(&id).cloned().or(Some(id)))
+        .filter(|id| f.accounts.iter().any(|a| &a.id == id))
+    {
+        accounts::set_startup_account(f, &id)?;
+    }
+    Ok((settings, added))
+}
+
+/// Restore a backup file the user picks. Returns `None` if cancelled, else the
+/// number of accounts added (they open after a restart).
+#[tauri::command]
+pub async fn import_backup(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+) -> Result<Option<usize>, String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    use tauri_plugin_dialog::DialogExt;
+    let Some(path) = app
+        .dialog()
+        .file()
+        .set_title(tr("Restaurar backup do whatRust"))
+        .add_filter("JSON", &["json"])
+        .set_parent(&window.window())
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    lock::require_unlocked(&app)?;
+    let path = path.into_path().map_err(|e| e.to_string())?;
+    let not_backup = || tr("Este arquivo não é um backup do whatRust.").into_owned();
+    if std::fs::metadata(&path).map_err(|e| e.to_string())?.len() > BACKUP_MAX_BYTES {
+        return Err(not_backup());
+    }
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let backup: Backup = serde_json::from_slice(&bytes).map_err(|_| not_backup())?;
+    let _guard = accounts::lock_mutations();
+    let mut f = accounts::load(&app);
+    let stored = crate::settings::load(&app);
+    let (mut settings, added) = merge_backup(backup, &stored, &mut f)?;
+    crate::settings::reconcile_mention_files(&app, &mut settings, &stored);
+    if added > 0 {
+        crate::window::ensure_isolation_supported()?;
+    }
+    crate::proxy::validate(&mut settings)?;
+    accounts::save(&app, &f).map_err(|e| e.to_string())?;
+    crate::settings::save(&app, &settings).map_err(|e| e.to_string())?;
+    // Window, menu and shortcut changes belong on the UI thread (set_settings
+    // runs there as a sync command); this command is async for the dialog.
+    let ui = app.clone();
+    app.run_on_main_thread(move || {
+        crate::settings::apply(&ui, &settings);
+        crate::voice::push_prefs(&ui, &settings);
+        crate::autoreply::push_prefs(&ui, &settings);
+        crate::mention::push_prefs(&ui, &settings);
+        crate::window::push_device_icons(&ui, settings.show_message_device);
+        crate::integration::broadcast(&ui);
+        crate::tray::rebuild_menu(&ui);
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(Some(added))
 }
 
 /// Relaunch the app (the proxy applies when webviews are created). Local
@@ -961,7 +1248,7 @@ pub async fn rename_account(
         let visible_account = !crate::sessions::enabled()
             || crate::sessions::selected(&app, w.window().label()).as_deref() == Some(w.label());
         if visible_account {
-            let _ = w.window().set_title(&format!("whatRust — {name}"));
+            crate::sessions::refresh_title(&app, &w.window(), w.label());
         }
     }
     crate::tray::rebuild_menu(&app);
@@ -1275,6 +1562,154 @@ pub fn reset_app_lock(
 #[cfg(test)]
 mod tests {
     use super::is_remote_label;
+    use super::{merge_backup, Backup, BackupAccount, BACKUP_APP};
+    use crate::accounts;
+    use crate::settings::Settings;
+
+    #[test]
+    fn backup_merge_renames_adds_and_keeps_local_paths() {
+        let mut f = accounts::AccountsFile::default();
+        let stored = Settings {
+            download_dir: Some("D:/here".into()),
+            ..Settings::default()
+        };
+        let backup = Backup {
+            app: BACKUP_APP.into(),
+            format: 1,
+            settings: serde_json::to_value(Settings {
+                zoom: 0.9,
+                download_dir: Some("/elsewhere".into()),
+                ..Settings::default()
+            })
+            .unwrap(),
+            accounts: vec![
+                BackupAccount {
+                    id: "acct-9".into(),
+                    name: "Work".into(),
+                    order: 0,
+                },
+                BackupAccount {
+                    id: "default".into(),
+                    name: "  Home  ".into(),
+                    order: 1,
+                },
+                BackupAccount {
+                    id: "x".into(),
+                    name: "   ".into(),
+                    order: 2,
+                },
+            ],
+            startup_account: Some("default".into()),
+        };
+        let (s, added) = merge_backup(backup, &stored, &mut f).unwrap();
+        assert_eq!(added, 1);
+        assert_eq!(s.zoom, 0.9);
+        assert_eq!(s.download_dir.as_deref(), Some("D:/here"));
+        let mut list = f.accounts.clone();
+        list.sort_by_key(|a| a.order);
+        let names: Vec<_> = list.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Work", "Home"]);
+        assert_eq!(f.startup_account.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn backup_preserves_missing_fork_settings_and_remaps_account_preferences() {
+        let mut f = accounts::AccountsFile::default();
+        let stored = Settings {
+            voice_transcribe: false,
+            standin_enabled: true,
+            ..Settings::default()
+        };
+        let backup: Backup = serde_json::from_value(serde_json::json!({
+            "app": "whatRust", "format": 1, "settings": {"zoom": 0.9},
+            "accounts": [], "startup_account": null
+        }))
+        .unwrap();
+        let (restored, _) = merge_backup(backup, &stored, &mut f).unwrap();
+        assert!(!restored.voice_transcribe);
+        assert!(restored.standin_enabled);
+        assert_eq!(restored.zoom, 0.9);
+        let backup: Backup = serde_json::from_value(serde_json::json!({
+            "app": "whatRust", "format": 1,
+            "settings": {"voice_transcribe": true, "mention_accounts": {"acct-99": {"mentions": true, "sound_file": "mention-alert.acct-99.mp3"}}},
+            "accounts": [{"id": "acct-99", "name": "Work", "order": 0}], "startup_account": "acct-99"
+        })).unwrap();
+        let (restored, added) = merge_backup(backup, &stored, &mut f).unwrap();
+        assert_eq!(added, 1);
+        assert!(restored.voice_transcribe);
+        let id = f
+            .accounts
+            .iter()
+            .find(|a| a.name == "Work")
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(f.startup_account.as_deref(), Some(id.as_str()));
+        let prefs = &restored.mention_accounts.unwrap()[&id];
+        assert!(prefs.mentions);
+        assert!(prefs.sound_file.is_none());
+    }
+
+    #[test]
+    fn backup_does_not_confuse_new_ids_with_later_source_ids() {
+        let mut f = accounts::AccountsFile::default();
+        let backup: Backup = serde_json::from_value(serde_json::json!({
+            "app": "whatRust", "format": 1,
+            "settings": {"mention_accounts": {"acct-99": {"mentions": true}, "acct-1": {"direct": true}}},
+            "accounts": [
+                {"id": "acct-99", "name": "First", "order": 0},
+                {"id": "acct-1", "name": "Second", "order": 1},
+                {"id": "acct-99", "name": "Duplicate", "order": 2}
+            ], "startup_account": "acct-1"
+        })).unwrap();
+        let (restored, added) = merge_backup(backup, &Settings::default(), &mut f).unwrap();
+        assert_eq!(added, 2);
+        let first = f.accounts.iter().find(|a| a.name == "First").unwrap();
+        let second = f.accounts.iter().find(|a| a.name == "Second").unwrap();
+        assert_ne!(first.id, second.id);
+        assert_eq!(f.startup_account.as_deref(), Some(second.id.as_str()));
+        let prefs = restored.mention_accounts.unwrap();
+        assert!(prefs[&first.id].mentions);
+        assert!(prefs[&second.id].direct);
+    }
+
+    #[test]
+    fn upstream_backup_keeps_local_per_account_preferences() {
+        let mut f = accounts::AccountsFile::default();
+        let mut prefs = std::collections::HashMap::new();
+        prefs.insert(
+            "default".to_string(),
+            crate::settings::MentionAccountPrefs {
+                mentions: true,
+                sound_file: Some("mention-alert.default.mp3".into()),
+                ..Default::default()
+            },
+        );
+        let stored = Settings {
+            mention_accounts: Some(prefs.clone()),
+            ..Settings::default()
+        };
+        let backup: Backup = serde_json::from_value(serde_json::json!({
+            "app": "whatRust", "format": 1, "settings": {},
+            "accounts": [{"id": "default", "name": "Home", "order": 0}], "startup_account": null
+        }))
+        .unwrap();
+        let (restored, _) = merge_backup(backup, &stored, &mut f).unwrap();
+        assert_eq!(restored.mention_accounts, Some(prefs));
+    }
+
+    #[test]
+    fn backup_from_another_app_is_refused() {
+        let mut f = accounts::AccountsFile::default();
+        let backup = Backup {
+            app: "other".into(),
+            format: 1,
+            settings: serde_json::to_value(Settings::default()).unwrap(),
+            accounts: vec![],
+            startup_account: None,
+        };
+        assert!(merge_backup(backup, &Settings::default(), &mut f).is_err());
+    }
 
     #[test]
     fn is_remote_wa_prefix_is_true() {

@@ -38,6 +38,8 @@
       </section>
       <section class="group" id="sec-notificacoes"><h2 class="group-title">Notifications</h2><div class="boxed-list">
 <label class="row"><span class="row-text"><span class="row-title">Receive notifications</span><span class="row-subtitle">Turns on whatRust message alerts.</span></span><input type="checkbox" class="switch" id="notifications"></label><label class="row"><span class="row-text"><span class="row-title">Notify while the app is open</span><span class="row-subtitle">Get alerts even when the window is in the foreground.</span></span><input type="checkbox" class="switch" id="notify_when_focused"></label><label class="row"><span class="row-text"><span class="row-title">Notify in the chat I am reading</span><span class="row-subtitle">Also alert for new messages in the open chat.</span></span><input type="checkbox" class="switch" id="notify_active_chat"></label><label class="row"><span class="row-text"><span class="row-title">Respect muted chats</span><span class="row-subtitle">When muting cannot be confirmed, the additional detector stays silent.</span></span><input type="checkbox" class="switch" id="respect_muted"></label>
+<label class="row"><span class="row-text"><span class="row-title">Notification sound</span><span class="row-subtitle">Silences WhatsApp's message alert sounds. Calls still ring.</span></span><input type="checkbox" class="switch" id="notification_sound"></label>
+<label class="row"><span class="row-text"><span class="row-title">Do not disturb</span><span class="row-subtitle">No whatRust notifications during these hours. Messages still arrive.</span></span><input type="checkbox" class="switch" id="quiet_hours"></label><div class="row" id="quiet_times_row"><span class="row-text"><span class="row-title">Do not disturb hours</span><span class="row-subtitle">May cross midnight, for example 22:00 to 08:00.</span></span><div class="hotkey-row"><input type="time" id="quiet_start" aria-label="Do not disturb start"><input type="time" id="quiet_end" aria-label="Do not disturb end"></div></div>
 <label class="row"><span class="row-text"><span class="row-title">Account</span><span class="row-subtitle">These choices apply only to the selected account.</span></span><select id="mention_account" aria-label="Account"></select></label>
 <label class="row"><span class="row-text"><span class="row-title">Mentions</span><span class="row-subtitle">A message that tags you.</span></span><input type="checkbox" class="switch" id="mention_mentions"></label>
 <label class="row"><span class="row-text"><span class="row-title">Replies</span><span class="row-subtitle">A reply to one of your messages.</span></span><input type="checkbox" class="switch" id="mention_replies"></label>
@@ -329,6 +331,11 @@ Set asked_if_ai to true only when the contact asks whether you are an AI, a bot,
               <span class="row-subtitle">Hides the prompts to download WhatsApp for Windows or Mac. Applies after restarting whatRust.</span></span>
             <input type="checkbox" class="switch" id="hide_app_banner" />
           </label>
+          <label class="row">
+            <span class="row-text"><span class="row-title">whatRust controls in WhatsApp's header</span>
+              <span class="row-subtitle">Shows the account switcher and gear inside WhatsApp's header (Windows and single-window mode). Turn off to leave the page untouched. Applies after restarting whatRust.</span></span>
+            <input type="checkbox" class="switch" id="page_overlays" />
+          </label>
           <label class="row linux-only" id="title_bar_row" hidden>
             <span class="row-text"><span class="row-title">Title bar</span>
               <span class="row-subtitle" id="title_bar_subtitle">Tiling window managers such as Hyprland don't use a title bar.</span></span>
@@ -369,6 +376,25 @@ Set asked_if_ai to true only when the contact asks whether you are an AI, a bot,
             <div class="hotkey-row">
               <button type="button" id="choose_download_dir" class="secondary">Choose folder…</button>
               <button type="button" id="reset_download_dir" class="secondary">Reset to Downloads</button>
+            </div>
+          </div>
+          <label class="row">
+            <span class="row-text"><span class="row-title">Sleep unused accounts</span>
+              <span class="row-subtitle">Frees memory used by background accounts. A sleeping account gets no notifications until you open it again.</span></span>
+            <select id="sleep_idle_hours">
+              <option value="0">Never</option>
+              <option value="1">After 1 hour</option>
+              <option value="4">After 4 hours</option>
+              <option value="8">After 8 hours</option>
+              <option value="24">After 24 hours</option>
+            </select>
+          </label>
+          <div class="row">
+            <span class="row-text"><span class="row-title">Settings backup</span>
+              <span class="row-subtitle">Saves upstream and fork preferences and the account list. Sound files, credentials, logins, chats, schedules and transcripts stay on this computer.</span></span>
+            <div class="hotkey-row">
+              <button type="button" id="export_backup" class="secondary">Save backup…</button>
+              <button type="button" id="import_backup" class="secondary">Restore backup…</button>
             </div>
           </div>
         </div>

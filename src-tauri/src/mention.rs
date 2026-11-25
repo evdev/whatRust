@@ -813,6 +813,9 @@ pub fn mention_event(
     let account = window.label().to_string();
     let account_id = account_id_from_label(&account);
     let settings = crate::settings::load(&app);
+    if crate::settings::quiet_now(&settings) {
+        return Ok(());
+    }
     let prefs = crate::settings::prefs_for(&settings, &account_id);
     let held = Held {
         account_label: account.clone(),
@@ -1405,6 +1408,9 @@ fn account_id_from_label(label: &str) -> String {
 }
 
 fn deliver(app: &AppHandle, account_id: &str, prefs: &MentionAccountPrefs, held: Held) {
+    if crate::settings::quiet_now(&crate::settings::load(app)) {
+        return;
+    }
     if app
         .state::<crate::notify::Recent>()
         .privacy_masked(&held.account_label)
@@ -1698,6 +1704,9 @@ fn pump(app: &AppHandle) {
         return;
     }
     let settings = crate::settings::load(app);
+    if crate::settings::quiet_now(&settings) {
+        return;
+    }
     let mut show = Vec::new();
     let mut chimes = Vec::new();
     {

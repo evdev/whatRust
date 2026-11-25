@@ -3,6 +3,7 @@
   function L(pt, en) { return window.__WR_LANG === "en" ? en : pt; }
   if (!(window.__WHATRUST_WINDOWS__ || window.__WHATRUST_SINGLE__) || location.origin !== "https://web.whatsapp.com") return;
   var state = { accounts: [], current_id: "", native_notifications: false };
+  var misses = 0;
   var scheduledCounts = new Map();
   var host, root, menu, gear, accountButton, accountName, accountBadge, status, lastReport = "", observer, scheduled, resizeObserver, resizeTarget, themeObserver;
   function call(cmd, args) { var t=window.__TAURI__;if(!t||!t.core)return Promise.resolve(null);return t.core.invoke(cmd, args).catch(function () { return null; }); }
@@ -91,7 +92,7 @@
     if(rgb&&rgb.length>=3)return .2126*+rgb[0]+.7152*+rgb[1]+.0722*+rgb[2]>140?"dark":"light";
     return matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";
   }
-  function report(mounted,detector){var theme=resolvedTheme();if(root){root.host.style.colorScheme=theme;}var value=mounted+":"+detector+":"+theme;if(value===lastReport)return;lastReport=value;if(mounted&&host){var h=host.closest("header").getBoundingClientRect(),r=host.getBoundingClientRect();call("dlog",{msg:"controls: safe horizontal header="+Math.round(h.width)+"x"+Math.round(h.height)+" controls="+Math.round(r.width)+"x"+Math.round(r.height)});}var t=window.__TAURI__;if(!t||!t.core){lastReport="";return;}t.core.invoke("report_integration",{mounted:mounted,detector:detector,theme:theme}).catch(function(){lastReport="";});}
+  function report(mounted,detector){var theme=resolvedTheme();if(root){root.host.style.colorScheme=theme;}var loaded=!!document.getElementById("pane-side");var value=mounted+":"+detector+":"+loaded+":"+theme;if(value===lastReport)return;lastReport=value;if(mounted&&host){var h=host.closest("header").getBoundingClientRect(),r=host.getBoundingClientRect();call("dlog",{msg:"controls: safe horizontal header="+Math.round(h.width)+"x"+Math.round(h.height)+" controls="+Math.round(r.width)+"x"+Math.round(r.height)});}var t=window.__TAURI__;if(!t||!t.core){lastReport="";return;}t.core.invoke("report_integration",{mounted:mounted,detector:detector,loaded:loaded,theme:theme}).catch(function(){lastReport="";});}
   function horizontal(e){
     var r=e.getBoundingClientRect(),style=getComputedStyle(e);
     return r.width>=260 && r.height>=36 && r.height<=100 && r.width>r.height*2 && style.visibility!=="hidden" && style.display!=="none";
@@ -121,12 +122,17 @@
   }
   function fits(target){
     var area=target.header.getBoundingClientRect(),r=host.getBoundingClientRect();
-    if(r.width<84||r.height<36||r.left<area.left||r.right>area.right+1||r.top<area.top||r.bottom>area.bottom+1)return false;
+    // 1px tolerance everywhere: at fractional device-pixel ratios (150% scaling at
+    // 85% zoom) the 84x40 controls snap to 83.9 one frame and 84 the next.
+    if(r.width<83||r.height<35||r.left<area.left-1||r.right>area.right+1||r.top<area.top-1||r.bottom>area.bottom+1)return false;
     return !Array.from(target.header.querySelectorAll("button,[role=button],h1,h2,[role=heading]")).some(function(e){
       if(host.contains(e))return false;var b=e.getBoundingClientRect();return b.width>0&&b.height>0&&r.left<b.right-1&&r.right>b.left+1&&r.top<b.bottom-1&&r.bottom>b.top+1;
     });
   }
   function mount(){
+    // Issue #95: with page overlays off we never touch WhatsApp's header; only
+    // the message adapter below keeps running (native notifications need it).
+    if(window.__WHATRUST_NO_OVERLAY){if(host&&host.isConnected)host.remove();report(false,messageRows().length>0);scanMessages();if(observer)observer.takeRecords();return;}
     var target=anchor();if(!host)create();
     var resizeNode=document.getElementById("side")||document.documentElement;
     if(resizeObserver&&resizeTarget!==resizeNode){resizeObserver.disconnect();resizeObserver.observe(resizeNode);resizeTarget=resizeNode;}
@@ -134,8 +140,11 @@
       host.dataset.compact=String(target.header.getBoundingClientRect().width<560);
       if(host.parentNode!==target.row){if(menu.open)menu.close();target.row.appendChild(host);}
       if(!fits(target)&&host.dataset.compact!=="true")host.dataset.compact="true";
-      if(!fits(target)){host.remove();target=null;}
-    }else if(host.isConnected)host.remove();
+      // Issue #95: opening/closing the contact drawer re-lays the header out for
+      // a few frames. Removing the controls on the first bad measurement made
+      // the top bar flicker; only give up after several consecutive misses.
+      if(!fits(target)){if(host.isConnected&&++misses<4)schedule();else{host.remove();target=null;misses=0;}}else misses=0;
+    }else if(host.isConnected){if(++misses<4)schedule();else{host.remove();misses=0;}}
     report(!!target,messageRows().length>0);
     scanMessages();
     if(menu.open)positionMenu();

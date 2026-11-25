@@ -48,6 +48,40 @@ function Install-Q8Model($exe) {
   if ($LASTEXITCODE -ne 0 -or -not (Has-Q8Model $exe)) { throw 'Qwen3-ASR Q8 download failed. Retry in whatRust Settings > Transcription.' }
 }
 
+function Test-GenieXNpu($exe) {
+  # Run a short, local audio inference so a blocked DLL is detected during setup.
+  $base = Join-Path $env:TEMP ('whatrust-npu-test-' + [guid]::NewGuid().ToString('N'))
+  $wav = $base + '.wav'
+  $output = $base + '.out'
+  $errors = $base + '.err'
+  $process = $null
+  try {
+    $stream = [IO.File]::OpenWrite($wav)
+    $writer = New-Object IO.BinaryWriter($stream)
+    try {
+      $writer.Write([Text.Encoding]::ASCII.GetBytes('RIFF'))
+      $writer.Write([uint32]32036)
+      $writer.Write([Text.Encoding]::ASCII.GetBytes('WAVEfmt '))
+      $writer.Write([uint32]16); $writer.Write([uint16]1); $writer.Write([uint16]1)
+      $writer.Write([uint32]16000); $writer.Write([uint32]32000)
+      $writer.Write([uint16]2); $writer.Write([uint16]16)
+      $writer.Write([Text.Encoding]::ASCII.GetBytes('data'))
+      $writer.Write([uint32]32000); $writer.Write((New-Object byte[] 32000))
+    } finally { $writer.Dispose() }
+    $prompt = 'Transcribe the speech exactly. "' + $wav + '"'
+    $args = @('--skip-update', 'infer', $model, '--compute', 'npu', '--max-tokens', '32', '--prompt', ('"' + $prompt.Replace('"', '\"') + '"'))
+    $process = Start-Process -FilePath $exe -ArgumentList $args -WindowStyle Hidden -RedirectStandardOutput $output -RedirectStandardError $errors -PassThru
+    # Keep the process handle open so Windows PowerShell can read ExitCode.
+    $null = $process.Handle
+    if (-not $process.WaitForExit(180000)) { $process.Kill(); $process.WaitForExit(); return $false }
+    return $process.ExitCode -eq 0
+  } catch { Write-Verbose "NPU test failed: $($_.Exception.Message)"; return $false }
+  finally {
+    foreach ($path in @($wav, $output, $errors)) { Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue }
+    if ($process) { $process.Dispose() }
+  }
+}
+
 function Install-Transcription([string]$Architecture) {
   if ($Architecture -eq 'arm64') {
     $exe = Find-GenieX
@@ -66,7 +100,11 @@ function Install-Transcription([string]$Architecture) {
       Write-Output 'Downloading Qwen3-ASR Q8 (about 1.1 GiB); this may take several minutes...'
       Install-Q8Model $exe
     }
-    Write-Output 'GenieX and the Q8 model are ready. A supported Snapdragon NPU is required.'
+    Write-Output 'Testing local transcription on the NPU; model loading may take a few minutes...'
+    if (-not (Test-GenieXNpu $exe)) {
+      throw 'NPU_TEST_FAILED: GenieX could not run the audio test. Windows may have blocked a GenieX component, or the NPU or model may be unavailable. Open Windows Security with: Start-Process "windowsdefender://smartapp/". If Smart App Control blocked GenieX, install a fully signed GenieX release when available. Alternatively, you may turn Smart App Control off in Windows Security; this reduces protection for the entire PC. Re-enabling it may require a reset on some Windows versions. Then retry Test NPU in whatRust Settings > Transcription.'
+    }
+    Write-Output 'GenieX and the Q8 model responded on the NPU.'
   } else {
     $fluid = Join-Path $env:LOCALAPPDATA 'FluidVoice\fluidvoice.exe'
     if ((Test-Path -LiteralPath $fluid -PathType Leaf) -or (Find-InstalledProgram 'FluidVoice')) {
@@ -89,6 +127,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     exit 0
   } catch {
     Write-Output "Transcription setup failed: $($_.Exception.Message)"
+    if ($_.Exception.Message -like 'NPU_TEST_FAILED:*') { exit 2 }
     exit 1
   }
 }

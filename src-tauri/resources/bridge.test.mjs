@@ -49,6 +49,26 @@ class FakeDataTransfer {
     return this._files.slice();
   }
 }
+class FakeMediaElement {
+  constructor() {
+    this.muted = false;
+    this.loop = false;
+    this.isConnected = false;
+    this.plays = 0;
+  }
+  play() {
+    this.plays++;
+    return Promise.resolve();
+  }
+}
+// WhatsApp's alert tones are `new Audio(...)`; chat media is created with
+// document.createElement and is not tracked by bridge.js.
+class FakeAudio extends FakeMediaElement {
+  constructor(src) {
+    super();
+    this.src = src || "";
+  }
+}
 class FakeInput {
   constructor(accept) {
     this.accept = accept;
@@ -115,6 +135,11 @@ class FakeElement {
   }
 }
 
+// Static members are inherited, so null out fromBase64 explicitly: otherwise a
+// modern host's native decoder would win over the injected atob.
+class AtobOnlyUint8Array extends Uint8Array {}
+AtobOnlyUint8Array.fromBase64 = undefined;
+
 function makeHarness(options = {}) {
   const mediaInput = new FakeInput("image/*,video/mp4,video/3gpp,video/quicktime");
   const docInput = new FakeInput("*");
@@ -130,6 +155,25 @@ function makeHarness(options = {}) {
   };
   mediaInput.onchange = onChange;
   docInput.onchange = onChange;
+  // `lazyInputs` mimics current WhatsApp Web: the file inputs do not exist until the
+  // attach menu's "Photos & videos" / "Document" entry is clicked, and the menu itself
+  // renders `menuDelayMs` after the attach (+) button is clicked.
+  const menu = { open: false, mounted: !options.lazyInputs, clicks: [] };
+  const clickable = (name, onClick) => ({
+    name,
+    closest: () => null,
+    click() {
+      menu.clicks.push(name);
+      onClick();
+    },
+  });
+  const plusButton = clickable("plus", () => {
+    setTimeout(() => (menu.open = true), options.menuDelayMs ?? 30);
+  });
+  const mediaItem = clickable("media item", () => (menu.mounted = true));
+  const docItem = clickable("document item", () => (menu.mounted = true));
+  // Something outside the menu the loose aria-label selector also matches.
+  const profilePhoto = clickable("profile photo", () => {});
   const body = new FakeElement("body");
   body.isRoot = true;
   const head = new FakeElement("head");
@@ -145,10 +189,19 @@ function makeHarness(options = {}) {
     readyState: "complete",
     addEventListener() {},
     querySelectorAll(sel) {
-      return sel === 'input[type="file"]' ? [mediaInput, docInput] : [];
+      if (sel === 'input[type="file"]') return menu.mounted ? [mediaInput, docInput] : [];
+      if (!options.lazyInputs) return [];
+      if (sel === '[aria-label*="hoto"]') return menu.open ? [profilePhoto, mediaItem] : [profilePhoto];
+      if (sel === '[data-icon="document"]' && menu.open) return [docItem];
+      return [];
     },
     querySelector(sel) {
       if (sel === "title") return null;
+      if (options.lazyInputs) {
+        if (sel === '[data-icon="plus"]') return plusButton;
+        const first = this.querySelectorAll(sel)[0];
+        if (first) return first;
+      }
       if (sel.includes("media-caption-input-container")) {
         return Date.now() < state.composerUntil ? {} : null;
       }
@@ -162,14 +215,21 @@ function makeHarness(options = {}) {
     ServiceWorkerRegistration: options.serviceWorkerRegistration,
     __WHATRUST_WINDOWS__: !!options.windows,
     __whatrustPreferNative: !!options.preferNative,
+    __whatrustSound: options.sound !== false,
+    Audio: FakeAudio,
+    HTMLMediaElement: FakeMediaElement,
     addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
     __TAURI__: {
       core: {
         invoke(cmd, args) {
           invocations.push({ cmd, args });
-          return options.invokeRejects
-            ? Promise.reject(new Error("Command " + cmd + " not allowed by ACL"))
-            : Promise.resolve();
+          if (options.invokeRejects) {
+            return Promise.reject(new Error("Command " + cmd + " not allowed by ACL"));
+          }
+          // `invokeResult(cmd, args)` or an `invokeResults` table lets a test
+          // choose what a command returns.
+          if (options.invokeResult) return Promise.resolve(options.invokeResult(cmd, args));
+          return Promise.resolve(options.invokeResults && options.invokeResults[cmd]);
         },
       },
     },
@@ -181,7 +241,11 @@ function makeHarness(options = {}) {
     console: { log: (m) => logs.push(String(m)), warn: (m) => warns.push(String(m)), error() {} },
     File: FakeFile,
     DataTransfer: FakeDataTransfer,
-    Uint8Array: options.Uint8Array || Uint8Array,
+    // bridge.js prefers Uint8Array.fromBase64 and only falls back to atob. Node
+    // 22+ ships the static, which would silently bypass every atob injected
+    // below (and hide the forced decode failures). Tests that want the fast path
+    // pass their own constructor; everyone else gets one without the static.
+    Uint8Array: options.Uint8Array || AtobOnlyUint8Array,
     Event: class {
       constructor(type) {
         this.type = type;
@@ -206,7 +270,21 @@ function makeHarness(options = {}) {
   const params = Object.keys(sandboxGlobals);
   const fn = new Function(...params, `"use strict";\n${bridgeSrc}`);
   fn(...params.map((k) => sandboxGlobals[k]));
-  return { window, listeners, document, head, mediaInput, docInput, logs, warns, invocations, navigator: sandboxGlobals.navigator };
+  return {
+    window,
+    listeners,
+    document,
+    head,
+    mediaInput,
+    docInput,
+    menu,
+    logs,
+    warns,
+    invocations,
+    navigator: sandboxGlobals.navigator,
+    Uint8Array: sandboxGlobals.Uint8Array,
+    MediaElement: FakeMediaElement,
+  };
 }
 
 // Drive the feed the way window.rs stream_drop does.
@@ -277,6 +355,13 @@ async function testChunkReassemblyByteExact() {
   assert(!!file, "file arrived");
   assert(file && file.size === content.length, "size preserved across chunks");
   assert(file && file.bytes().equals(content), "bytes identical after reassembly");
+}
+
+function testHarnessIsolatesTheBase64Decoder() {
+  console.log("the harness does not leak the host's Uint8Array.fromBase64 into tests");
+  const { Uint8Array: U8 } = makeHarness();
+  assert(U8 !== Uint8Array, "harness shadows the host constructor");
+  assert(typeof U8.fromBase64 === "undefined", "default harness has no fromBase64 static");
 }
 
 async function testFromBase64FastPath() {
@@ -599,6 +684,49 @@ async function testRiskyDownloadsAndFailures() {
   assert(toastsIn(document).length === 3, "at most three toasts stack up");
 }
 
+async function testNotificationSoundMutesAlertTones() {
+  console.log("notification sound off mutes WhatsApp's alert tones but not calls or chat media");
+  const { window: w, MediaElement } = makeHarness({ sound: false });
+
+  const tone = new w.Audio("https://static.whatsapp.net/rsrc.php/v4/tone.mp3");
+  await tone.play();
+  assert(tone.muted === true, "the message tone is muted");
+  assert(tone.plays === 1, "play still runs, so the page sees no error");
+
+  const ring = new w.Audio("https://static.whatsapp.net/rsrc.php/v4/ring.mp3");
+  ring.loop = true;
+  await ring.play();
+  assert(ring.muted === false, "a looped ringtone keeps its sound");
+
+  const media = new MediaElement();
+  await media.play();
+  assert(media.muted === false, "chat media (not created through Audio) is untouched");
+
+  const voice = new w.Audio("blob:https://web.whatsapp.com/1234");
+  await voice.play();
+  assert(voice.muted === false, "a voice note on a blob URL keeps its sound");
+
+  const attached = new w.Audio("https://static.whatsapp.net/rsrc.php/v4/attached.mp3");
+  attached.isConnected = true;
+  await attached.play();
+  assert(attached.muted === false, "an Audio element in the page is untouched");
+}
+
+async function testNotificationSoundToggleIsLive() {
+  console.log("the notification-sound toggle applies to elements already created");
+  const { window: w } = makeHarness();
+  const tone = new w.Audio("https://static.whatsapp.net/rsrc.php/v4/tone.mp3");
+  await tone.play();
+  assert(tone.muted === false, "sound on leaves the tone audible");
+  w.__whatrustSetNotificationSound(false);
+  assert(tone.muted === true, "turning it off mutes the existing element");
+  w.__whatrustSetNotificationSound(true);
+  assert(tone.muted === false, "turning it back on restores the element");
+  const next = new w.Audio("https://static.whatsapp.net/rsrc.php/v4/next.mp3");
+  await next.play();
+  assert(next.muted === false, "later tones follow the new value");
+}
+
 async function testNotificationPathIsLoggedOnceWithoutContent() {
   console.log("the notification path is logged once per path, never the content");
   const registered = [];
@@ -728,6 +856,27 @@ async function testZoomShortcuts() {
   assert(zooms(mac).join() === "in", "Cmd zooms on macOS, bare Ctrl does not");
 }
 
+async function testAccountNumberKeys() {
+  const accounts = [{ id: "default" }, { id: "acct-1" }];
+  const h = makeHarness({ navigator: { platform: "Win32" }, invokeResults: { switcher_accounts: accounts } });
+  press(h, { key: "2", code: "Digit2", ctrlKey: true });
+  press(h, { key: "1", code: "Numpad1", ctrlKey: true });
+  press(h, { key: "3", code: "Digit3", ctrlKey: true });
+  for (const o of [{ code: "Digit1" }, { code: "Digit1", ctrlKey: true, shiftKey: true }, { code: "Digit1", ctrlKey: true, altKey: true }, { code: "Digit1", metaKey: true }])
+    press(h, { key: "1", ...o });
+  await sleep(0);
+  const switched = h.invocations.filter((c) => c.cmd === "switch_account").map((c) => c.args.id);
+  assert(switched.join() === "acct-1,default", "Ctrl+2 / Ctrl+Numpad1 open accounts 2 and 1; Ctrl+3 (no 3rd account) and other modifiers do nothing");
+  const one = makeHarness({ navigator: { platform: "Win32" }, invokeResults: { switcher_accounts: [{ id: "default" }] } });
+  press(one, { key: "1", code: "Digit1", ctrlKey: true });
+  await sleep(0);
+  assert(!one.invocations.some((c) => c.cmd === "switch_account"), "a single account never switches");
+  const mac = makeHarness({ navigator: { platform: "MacIntel" }, invokeResults: { switcher_accounts: accounts } });
+  press(mac, { key: "2", code: "Digit2", metaKey: true });
+  await sleep(0);
+  assert(mac.invocations.some((c) => c.cmd === "switch_account" && c.args.id === "acct-1"), "Cmd+2 on macOS");
+}
+
 async function testZoomWheelCoalesces() {
   const h = makeHarness({ navigator: { platform: "Win32" } });
   const wheel = (o) => { const e = keyEvent({ deltaY: 0, deltaMode: 0, ...o }); for (const fn of h.listeners.wheel || []) fn(e); return e; };
@@ -775,10 +924,121 @@ async function testNativeBranchSendsNotificationIcon() {
   assert(invocations.filter((x) => x.cmd === "notification_icon").length === before, "data:/no icon: Rust handles it, nothing sent");
 }
 
+// --- clipboard image paste ---------------------------------------------------
+// Fire a paste the way the webview does. WebKitGTK sends an image-only
+// clipboard as `{ types: [], files: [] }`.
+function paste(h, clipboardData) {
+  for (const fn of h.listeners.paste || []) fn({ clipboardData });
+}
+const pasteCalls = (h) => h.invocations.filter((c) => c.cmd === "paste_clipboard").length;
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+// Rust answers paste_clipboard with the image as base64 PNG, or "" for none.
+const PNG_B64 = PNG.toString("base64");
+
+async function testEmptyPasteAttachesTheClipboardImage() {
+  console.log("an empty paste (WebKitGTK image clipboard) attaches the image Rust reads");
+  const h = makeHarness({
+    invokeResult: (cmd) => (cmd === "paste_clipboard" ? PNG_B64 : undefined),
+  });
+  paste(h, { types: [], files: [] });
+  await sleep(150);
+  assert(pasteCalls(h) === 1, "asks Rust for the clipboard image once");
+  const batch = h.mediaInput.batches[0] || [];
+  assert(batch.length === 1, "one file reaches the photo input, not the document input");
+  assert(h.docInput.batches.length === 0, "nothing goes to the document input");
+  const f = batch[0];
+  assert(f && f.name === "image.png" && f.type === "image/png", "named image.png with type image/png");
+  assert(f && f.bytes().equals(PNG), "bytes arrive unchanged");
+}
+
+async function testBrowserCopiedImageAlsoUsesTheNativeRead() {
+  console.log('"Copy image" from a browser (text/html only) still reads the image natively');
+  const h = makeHarness({ invokeResult: () => PNG_B64 });
+  paste(h, { types: ["text/html"], files: [] });
+  await sleep(150);
+  assert(pasteCalls(h) === 1, "text/html without text/plain still asks Rust");
+}
+
+async function testCopiedFilesAreReadNatively() {
+  console.log("files copied in a file manager (text/uri-list hidden by WebKitGTK) are read natively");
+  // What WebKitGTK showed for a Nautilus copy of a PDF and a PNG: the type is
+  // listed, but the list itself is withheld.
+  const h = makeHarness({ invokeResult: () => "" });
+  paste(h, { types: ["text/uri-list"], files: [], getData: () => "" });
+  await sleep(150);
+  assert(pasteCalls(h) === 1, "asks Rust, which streams the files through the drop feed");
+  assert(h.mediaInput.batches.length === 0 && h.docInput.batches.length === 0, "the empty answer attaches nothing itself");
+}
+
+async function testPastesTheWebviewHandlesNeverReachRust() {
+  console.log("text pastes and pastes that already carry a file are left alone");
+  const h = makeHarness({ invokeResult: () => PNG_B64 });
+  paste(h, { types: ["text/plain"], files: [] });
+  paste(h, { types: ["text/html", "text/plain"], files: [] });
+  paste(h, { types: ["Files"], files: [new FakeFile([PNG], "image.png", { type: "image/png" })] });
+  paste(h, null);
+  await sleep(150);
+  assert(pasteCalls(h) === 0, "no native read for text, delivered files or a missing clipboardData");
+  assert(h.mediaInput.batches.length === 0, "nothing is attached a second time");
+}
+
+async function testNoClipboardImageOrRefusalAttachesNothing() {
+  console.log("an empty answer or a refused command attaches nothing");
+  const empty = makeHarness({ invokeResult: () => "" });
+  paste(empty, { types: [], files: [] });
+  const refused = makeHarness({ invokeRejects: true });
+  paste(refused, { types: [], files: [] });
+  await sleep(150);
+  assert(pasteCalls(empty) === 1 && pasteCalls(refused) === 1, "both asked Rust");
+  assert(empty.mediaInput.batches.length === 0, "no image on the clipboard: nothing attached");
+  assert(refused.mediaInput.batches.length === 0, "locked / background account: nothing attached");
+}
+
+// --- attach menu timing --------------------------------------------------------
+// The input appears only after the menu entry is clicked. The entry must be clicked
+// as soon as the menu renders, not after a 1 s wait for an input that never comes.
+async function testMenuEntryIsClickedAsSoonAsTheMenuRenders() {
+  console.log("lazily mounted input: the menu entry is clicked as soon as it renders");
+  for (const [kind, name, type, input, item] of [
+    ["media", "photo.png", "image/png", "mediaInput", "media item"],
+    ["document", "report.pdf", "application/pdf", "docInput", "document item"],
+  ]) {
+    const h = makeHarness({ lazyInputs: true, menuDelayMs: 30 });
+    const t0 = Date.now();
+    feedFile(h.window, 50, 0, name, type, "data");
+    h.window.__whatrustDropFeed({ op: "commit", drop: 50, files: 1 });
+    while (!h[input].batches.length && Date.now() - t0 < 2500) await sleep(10);
+    const took = Date.now() - t0;
+    assert(h[input].batches.length === 1, kind + ": the file reaches the " + kind + " input");
+    assert(took < 500, kind + ": attached in " + took + "ms (was over 1000ms)");
+    assert(h.menu.clicks.join(",") === "plus," + item, kind + ": opens the menu, then clicks only its entry");
+  }
+}
+
+async function testElementsOnThePageBeforeTheMenuAreNeverClicked() {
+  console.log("a loose selector match that predates the menu is never clicked");
+  // The menu renders slowly; meanwhile "Profile photo" already matches [aria-label*="hoto"].
+  const h = makeHarness({ lazyInputs: true, menuDelayMs: 200 });
+  feedFile(h.window, 51, 0, "photo.png", "image/png", "data");
+  h.window.__whatrustDropFeed({ op: "commit", drop: 51, files: 1 });
+  const t0 = Date.now();
+  while (!h.mediaInput.batches.length && Date.now() - t0 < 2500) await sleep(10);
+  assert(!h.menu.clicks.includes("profile photo"), "the profile photo button is left alone");
+  assert(h.mediaInput.batches.length === 1, "the photo still attaches once the menu renders");
+}
+
 const tests = [
+  testMenuEntryIsClickedAsSoonAsTheMenuRenders,
+  testElementsOnThePageBeforeTheMenuAreNeverClicked,
+  testEmptyPasteAttachesTheClipboardImage,
+  testBrowserCopiedImageAlsoUsesTheNativeRead,
+  testCopiedFilesAreReadNatively,
+  testPastesTheWebviewHandlesNeverReachRust,
+  testNoClipboardImageOrRefusalAttachesNothing,
   testDownloadToastStylesheetIsWellFormed,
   testScrollbarsAreThinAndTranslucent,
   testZoomShortcuts,
+  testAccountNumberKeys,
   testZoomWheelCoalesces,
   testWindowsNativePreferenceAndFallback,
   testNativePermissionAndAsyncErrorFallback,
@@ -792,12 +1052,15 @@ const tests = [
   testChromeShimsOnlyForAChromeUserAgent,
   testNotificationsReachTheNativeNotifyCommand,
   testNotificationPictureIsForwardedAsPng,
+  testNotificationSoundMutesAlertTones,
+  testNotificationSoundToggleIsLive,
   testPermissionsApiAgreesNotificationsAreGranted,
   testRefusedCommandsWarnOnceAndNeverThrow,
   testMixedDropLosesNothing,
   testPureMediaGoesToMediaInput,
   testDistinctSameNamedFilesBothAttach,
   testChunkReassemblyByteExact,
+  testHarnessIsolatesTheBase64Decoder,
   testFromBase64FastPath,
   testChunksDecodeBeforeCommit,
   testIncompleteFileSkippedAbortHonored,

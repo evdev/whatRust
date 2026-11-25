@@ -1,3 +1,5 @@
+#[cfg(windows)]
+mod accent;
 mod accountphoto;
 mod accounts;
 mod agents;
@@ -10,6 +12,7 @@ mod autoreply;
 mod badge;
 mod biometric;
 mod chat_summary;
+mod clipboard;
 mod commands;
 mod decorations;
 mod dlog;
@@ -69,6 +72,7 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _ = integration::STARTED.set(std::time::Instant::now());
     // macOS: force overlay scrollers BEFORE any window/webview is created —
     // AppKit caches NSScroller.preferredScrollerStyle on first use, and
     // WKWebView's page scrollers are native, so web CSS cannot fix them.
@@ -275,6 +279,7 @@ pub fn run() {
             commands::switch_account,
             commands::reload_account_page,
             commands::zoom_step,
+            clipboard::paste_clipboard,
             commands::get_settings,
             commands::set_settings,
             commands::open_settings,
@@ -298,6 +303,8 @@ pub fn run() {
             commands::change_app_lock_password,
             commands::disable_app_lock,
             commands::restart_app,
+            commands::export_backup,
+            commands::import_backup,
             commands::set_app_lock_options,
             commands::set_biometric_enabled,
             commands::lock_app,
@@ -493,19 +500,23 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             let open_hidden = open_hidden || s.menubar_only;
 
-            // Before any WKWebView exists: hand WebKit its master key from a
-            // local file so the login keychain is not consulted on launch.
             #[cfg(target_os = "macos")]
             webcrypto::prepare(handle);
-
-            // Each account webview is its own browser process, and a signed-in
-            // WhatsApp Web tab holds about a gigabyte. Only the startup account
-            // is created here. The others stay signed in on disk until opened.
+            // Keep other accounts unloaded until opened or needed for a scheduled send.
             if let Some(account) = accounts::startup_account(&f) {
                 window::open_account_window(handle, account, open_hidden)?;
             }
-            dlog::log("startup: account windows built");
+            dlog::log("startup: startup account built");
             scheduled_messages::start(handle.clone());
+            // Idle sleep (Settings → sleep_idle_hours) for single-window mode.
+            if cfg!(windows) || sessions::enabled() {
+                let sleeper = handle.clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(300));
+                    let ui = sleeper.clone();
+                    let _ = sleeper.run_on_main_thread(move || sessions::sleep_idle(&ui));
+                });
+            }
             // tao's content view must not re-interpret keys the webview left
             // unhandled (issue #73); needs a tao window to exist.
             #[cfg(target_os = "macos")]

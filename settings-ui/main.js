@@ -1,6 +1,6 @@
 const invoke = window.__TAURI__.core.invoke;
 const LANGS = ["pt-BR", "en"];
-const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "auto_star_todos", "standin_enabled", "hide_app_banner"];
+const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "notification_sound", "quiet_hours", "page_overlays", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "auto_star_todos", "standin_enabled", "hide_app_banner"];
 const AI_PROVIDERS = ["openrouter", "gemini", "anthropic"];
 const TEXT_CLI_PROVIDERS = ["claude_cli", "codex_cli", "antigravity_cli"];
 const STANDIN_CLI_PROVIDERS = [...TEXT_CLI_PROVIDERS, "grok_cli"];
@@ -255,6 +255,30 @@ function paintChatSummaryConsent(on) {
   revoke.hidden = !on;
 }
 
+function syncQuietRow() {
+  document.getElementById("quiet_times_row").hidden = !document.getElementById("quiet_hours").checked;
+}
+
+async function exportBackup() {
+  try {
+    if (await invoke("export_backup")) flash("Backup saved ✓", 2500);
+  } catch (e) { flash(String(e), 6000); }
+}
+
+async function importBackup() {
+  try {
+    const added = await invoke("import_backup");
+    if (added === null || added === undefined) return;
+    await loadAccounts();
+    await load();
+    if (added > 0 && await Dlg.confirm(t("Backup restored. {0} new account(s) open after a restart and ask for the QR code.", [added]), { title: "Restart now?", okLabel: "Restart" })) {
+      await invoke("restart_app");
+    } else {
+      flash("Backup restored ✓", 2500);
+    }
+  } catch (e) { flash(String(e), 6000); }
+}
+
 async function load() {
   const s = await invoke("get_settings");
   hostPlatform = s.platform;
@@ -286,6 +310,12 @@ async function load() {
     const el = document.getElementById(f);
     if (el) el.checked = !!s[f];
   }
+  const sleep = document.getElementById("sleep_idle_hours");
+  sleep.value = String(s.sleep_idle_hours || 0);
+  if (sleep.value === "") sleep.value = "0";
+  document.getElementById("quiet_start").value = s.quiet_start || "22:00";
+  document.getElementById("quiet_end").value = s.quiet_end || "08:00";
+  syncQuietRow();
   // Menu-bar-only needs WKWebView's inactive-scheduling policy (macOS 14+).
   // Below that the backend ignores the setting, so don't offer the switch.
   const menubarOnly = document.getElementById("menubar_only");
@@ -539,6 +569,9 @@ async function save() {
     }
     s.mention_accounts = mentionAccounts;
   }
+  s.sleep_idle_hours = parseInt(document.getElementById("sleep_idle_hours").value, 10) || 0;
+  s.quiet_start = document.getElementById("quiet_start").value || "22:00";
+  s.quiet_end = document.getElementById("quiet_end").value || "08:00";
   if (proxySupported) {
     s.proxy_mode = document.getElementById("proxy_mode").value;
     s.proxy_host = document.getElementById("proxy_host").value.trim();
@@ -801,6 +834,9 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("zoom").addEventListener("change", save);
   document.getElementById("title_bar").addEventListener("change", save);
   document.getElementById("rendering").addEventListener("change", save);
+  document.getElementById("quiet_hours").addEventListener("change", syncQuietRow);
+  document.getElementById("export_backup").addEventListener("click", exportBackup);
+  document.getElementById("import_backup").addEventListener("click", importBackup);
   // The zoom shortcuts change it from the WhatsApp window; catch up on return.
   window.addEventListener("focus", () => {
     invoke("get_settings").then((s) => {
