@@ -63,6 +63,9 @@ fn safari_ua(macos_major: u64) -> String {
 const BRIDGE_JS: &str = include_str!("../resources/bridge.js");
 /// Hides WhatsApp's "get the desktop app" prompts (issue #83, upsell.js).
 const UPSELL_JS: &str = include_str!("../resources/upsell.js");
+/// Opens WhatsApp's socket-worker bootstrap as a classic worker. As a module
+/// worker it dies on importScripts and the chat list never leaves the splash.
+const CLASSIC_WORKER_JS: &str = include_str!("../resources/classic-worker.js");
 /// Opens (or closes) the privacy blur panel in an account page (privacy.js).
 #[cfg(windows)]
 pub(crate) const PRIVACY_PANEL_JS: &str =
@@ -253,6 +256,7 @@ macro_rules! account_webview {
                 "window.__whatrustSound={};",
                 crate::settings::load($app).notification_sound
             ))
+            .initialization_script(CLASSIC_WORKER_JS)
             .initialization_script(include_str!("../resources/integration.js"))
             .initialization_script(BRIDGE_JS)
             .initialization_script(MEDIA_JS)
