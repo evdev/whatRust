@@ -140,7 +140,9 @@
   function findBody(row, layer) {
     if (!row || !row.querySelectorAll) return null;
     var nodes = row.querySelectorAll("span, div");
-    for (var i = 0; i < nodes.length; i++) {
+    // Quoted replies can contain selectable text before the message itself.
+    // The message body is the last such element before the timestamp.
+    for (var i = nodes.length - 1; i >= 0; i--) {
       var el = nodes[i];
       if (layer && (el === layer || (layer.contains && layer.contains(el)))) continue;
       if (classText(el).indexOf(" selectable-text ") !== -1) return el;
@@ -217,29 +219,21 @@
     return best;
   }
 
-  // The clock is the icon plus the gap before the digits. Count that gap, or
-  // the icon looks clear while it still covers the last letters.
-  function hitRect(icon, clock) {
-    var r = rectOf(icon);
-    if (!r) return null;
-    var left = r.left;
-    var right = r.right;
-    var c = rectOf(clock);
-    if (c) {
-      if (c.right > r.right + 1) right += Math.min(4, c.right - r.right);
-      if (c.left < r.left - 1) left -= Math.min(4, r.left - c.left);
-    }
-    return { left: left, right: right, top: r.top, bottom: r.bottom };
-  }
-
-  function overlapAmount(icon, clock, host) {
+  // Check the whole clock, including a little breathing room around it.
+  function clockClearance(icon, clock, host) {
     var text = lastTextRect(host);
-    var box = hitRect(icon, clock);
-    if (!text || !box) return null;
-    var x = Math.min(box.right, text.right) - Math.max(box.left, text.left);
-    var y = Math.min(box.bottom, text.bottom) - Math.max(box.top, text.top);
-    if (y <= 0.5) return 0;
-    return x > 0.5 ? x : 0;
+    var boxes = [rectOf(clock), rectOf(icon)];
+    if (!text || (!boxes[0] && !boxes[1])) return null;
+    var clearance = 0;
+    for (var i = 0; i < boxes.length; i++) {
+      var box = boxes[i];
+      if (!box) continue;
+      var y = Math.min(box.bottom, text.bottom) - Math.max(box.top, text.top);
+      if (y > 0.5 && text.right > box.left - 4 && text.left < box.right + 4) {
+        clearance = Math.max(clearance, Math.ceil(text.right - box.left + 4));
+      }
+    }
+    return clearance;
   }
 
   function directChild(el, name) {
@@ -253,15 +247,17 @@
   function styleSpacer(spacer, width) {
     var s = spacer.style;
     if (!s) return;
+    // The inline spacer takes only the missing horizontal space. If it does
+    // not fit, normal line wrapping moves the time below the message.
     s.display = "inline-block";
     s.height = "1px";
+    s.width = width + "px";
     s.overflow = "hidden";
     s.verticalAlign = "bottom";
     s.userSelect = "none";
     s.pointerEvents = "none";
     s.flex = "none";
     s.flexShrink = "0";
-    s.width = width + "px";
   }
 
   function removeSpacers(node) {
@@ -279,9 +275,7 @@
     removeSpacers(node);
   }
 
-  // The corner time is only as wide as the digits. The icon hangs off its left
-  // side, over the last letters. Reserve just that overlap, on the same line
-  // as the words, and leave messages that already clear the icon alone.
+  // Reserve only the horizontal clearance missing beside the corner metadata.
   function reserve(row, layer, clock) {
     var body = findBody(row, layer);
     if (!body || !root.document) {
@@ -300,12 +294,12 @@
       hidden.push(existing[i].style ? existing[i].style.display : "");
       if (existing[i].style) existing[i].style.display = "none";
     }
-    var amount = overlapAmount(icon, clock, host);
+    var clearance = clockClearance(icon, clock, host);
     for (var h = 0; h < hidden.length; h++) {
       if (existing[h].style) existing[h].style.display = hidden[h] || "";
     }
-    // No layout boxes: keep a single icon-width gap. A measured miss removes it.
-    var width = amount === null ? 15 : amount <= 0.5 ? 0 : Math.min(16, Math.ceil(amount + 1));
+    // Fall back to the icon and its gap when layout cannot be measured.
+    var width = clearance === null ? 16 : clearance;
     if (!width) {
       removeSpacers(row);
       return;
@@ -317,7 +311,7 @@
       spacer.setAttribute("aria-hidden", "true");
       styleSpacer(spacer, width);
       host.appendChild(spacer);
-    } else if (!spacer.style || spacer.style.width !== width + "px") {
+    } else if (!spacer.style || spacer.style.width !== width + "px" || spacer.style.display !== "inline-block") {
       styleSpacer(spacer, width);
     }
     var all = row.querySelectorAll("[data-wr-device-spacer]");
@@ -406,7 +400,7 @@
     span.setAttribute("data-wr-device", kind);
     span.setAttribute("title", label(kind));
     span.setAttribute("aria-hidden", "true");
-    span.style.cssText = "display:inline-flex;align-items:center;flex:none;width:12px;height:12px;color:inherit;user-select:none;line-height:0;pointer-events:auto";
+    span.style.cssText = "display:inline-flex;align-items:center;flex:none;width:13px;height:13px;color:inherit;user-select:none;line-height:0;pointer-events:auto";
     var color = timeColor(clock);
     if (color && color !== "rgba(0, 0, 0, 0)" && color !== "transparent") span.style.color = color;
     var graphic = svgEl(GLYPH[kind] || []);
@@ -434,8 +428,7 @@
       var before = clock.firstChild || null;
       if (clock.insertBefore) clock.insertBefore(icon, before);
       else if (clock.appendChild) clock.appendChild(icon);
-      var floated = floatOf(clock);
-      if (clock.style && floated !== "left" && floated !== "right") {
+      if (clock.style) {
         clock.style.display = "inline-flex";
         clock.style.alignItems = "center";
         clock.style.columnGap = "3px";

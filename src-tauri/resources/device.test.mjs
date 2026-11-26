@@ -229,7 +229,7 @@ api.paint(corner.message);
 api.paint(corner.message);
 const spacers = corner.message.querySelectorAll("[data-wr-device-spacer]");
 assert(spacers.length === 1 && spacers[0].parentNode === cornerBody, "an overlaid time reserves space at the end of the text");
-assert(spacers[0].style.width === "15px", "the reserved space is only the icon width");
+assert(spacers[0].style.display === "inline-block" && spacers[0].style.width === "16px", "unmeasured text gets an inline icon-width gap");
 assert(corner.message.querySelector("[data-wr-device]").parentNode === corner.clock, "the overlaid icon stays inside the time");
 assert(corner.clock.style.zIndex === "2", "the time stays above the last line");
 
@@ -264,6 +264,16 @@ const deletedSpacers = deleted.message.querySelectorAll("[data-wr-device-spacer]
 assert(deletedSpacers.length === 1 && deletedSpacers[0].parentNode === deleted.line, "a deleted message reserves space on the icon-and-text row");
 assert(deleted.message.querySelector("[data-wr-device]").parentNode === deleted.clock, "the deleted-message icon stays inside the time");
 
+const reply = row(web, "10:39 AM");
+const replyBody = reply.message.querySelector("span");
+replyBody.setAttribute("class", "selectable-text");
+const quote = new El("span");
+quote.setAttribute("class", "selectable-text");
+replyBody.parentNode.insertBefore(quote, replyBody);
+positions.set(reply.clock, "absolute");
+api.paint(reply.message);
+assert(reply.message.querySelector("[data-wr-device-spacer]").parentNode === replyBody, "a reply reserves space in its own text rather than its quote");
+
 const clear = row(apple, "8:05");
 const clearBody = clear.message.querySelector("span");
 clearBody.setAttribute("class", "selectable-text");
@@ -293,7 +303,21 @@ api.paint(tight.message);
 api.paint(tight.message);
 const tightSpacers = tight.message.querySelectorAll("[data-wr-device-spacer]");
 assert(tightSpacers.length === 1 && tightSpacers[0].parentNode === tightBody, "an overlapping last line keeps a single gap");
-assert(tightSpacers[0].style.width === "11px", "the gap matches the overlap instead of a fixed pad");
+assert(tightSpacers[0].style.display === "inline-block" && tightSpacers[0].style.width === "14px", "the gap reserves only the missing horizontal clearance");
+
+const digits = row(web, "10:40 AM");
+const digitsBody = digits.message.querySelector("span");
+digitsBody.setAttribute("class", "selectable-text");
+positions.set(digits.clock, "absolute");
+digits.clock.rect = { left: 70, right: 140, top: 0, bottom: 14, width: 70, height: 14 };
+digitsBody._nodes = [{ nodeType: 3, textContent: "long text", rect: { left: 100, right: 130, top: 0, bottom: 14, width: 30, height: 14 } }];
+api.paint(digits.message);
+assert(digits.message.querySelector("[data-wr-device-spacer]").style.width === "64px", "clearance covers text overlapping the timestamp, not just the icon");
+
+const floated = row(web, "10:40 AM");
+globalThis.getComputedStyle = (el) => ({ position: positions.get(el) || "static", color: "", float: el === floated.clock ? "right" : "none", cssFloat: el === floated.clock ? "right" : "none" });
+api.paint(floated.message);
+assert(floated.clock.style.display === "inline-flex" && floated.clock.style.columnGap === "3px", "a floated clock keeps a gap between the icon and digits");
 
 api.setEnabled(false);
 api.paint(sample.message);
