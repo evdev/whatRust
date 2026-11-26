@@ -1350,6 +1350,10 @@ pub fn resolve_cli(backend: CliBackend, explicit: &str) -> Option<PathBuf> {
         return path.is_file().then_some(path);
     }
     pick_program(&program_dirs(), names).or_else(|| {
+        #[cfg(windows)]
+        if backend == CliBackend::Codex {
+            return bundled_windows_codex();
+        }
         if backend != CliBackend::Antigravity {
             return None;
         }
@@ -1367,6 +1371,36 @@ pub fn resolve_cli(backend: CliBackend, explicit: &str) -> Option<PathBuf> {
             names,
         )
     })
+}
+
+/// Ask Windows for the current user's registered package location each time,
+/// since the WindowsApps directory changes when the Store updates the app.
+#[cfg(windows)]
+fn bundled_windows_codex() -> Option<PathBuf> {
+    let powershell = PathBuf::from(std::env::var_os("SystemRoot")?)
+        .join("System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    let output = hidden_command(&powershell)
+        .args([
+            "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version -Descending | ForEach-Object { $_.InstallLocation }",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let locations = String::from_utf8(output.stdout).ok()?;
+    bundled_codex_from_locations(locations.lines().map(Path::new))
+}
+
+#[cfg(any(windows, test))]
+fn bundled_codex_from_locations<'a>(
+    locations: impl IntoIterator<Item = &'a Path>,
+) -> Option<PathBuf> {
+    locations
+        .into_iter()
+        .map(|location| location.join("app").join("resources").join("codex.exe"))
+        .find(|path| path.is_file())
 }
 
 /// Directories where the Antigravity CLI installer places `agy`, apart from PATH.
@@ -2944,6 +2978,23 @@ mod tests {
         let found = first_program(&dir, cli_names(CliBackend::Codex)).unwrap();
         assert_eq!(found.file_name().unwrap(), "codex.exe");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bundled_codex_uses_the_available_registered_package() {
+        let root =
+            std::env::temp_dir().join(format!("whatrust-codex-package-{}", std::process::id()));
+        let missing = root.join("OpenAI.Codex_new_arm64");
+        let installed = root.join("OpenAI.Codex_old_arm64");
+        let resources = installed.join("app").join("resources");
+        std::fs::create_dir_all(&resources).unwrap();
+        let exe = resources.join("codex.exe");
+        std::fs::write(&exe, b"MZ").unwrap();
+        assert_eq!(
+            bundled_codex_from_locations([missing.as_path(), installed.as_path()]),
+            Some(exe)
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
