@@ -14,6 +14,7 @@
     "allow-set-unread",
     "allow-dlog",
     "allow-open-download",
+    "allow-calendar-event",
     "allow-reveal-download",
     "allow-switcher-accounts",
     "allow-switch-account",

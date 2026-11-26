@@ -25,6 +25,7 @@ fn main() {
             "set_unread",
             "dlog",
             "open_download",
+            "calendar_event",
             "reveal_download",
             "switcher_accounts",
             "switch_account",

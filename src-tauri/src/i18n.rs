@@ -133,6 +133,7 @@ static EN_TABLE: &[(&str, &str)] = &[
     ("Salvar arquivo", "Save file"),
     ("Pasta de downloads", "Download folder"),
     ("Salvar backup do whatRust", "Save whatRust backup"),
+    ("Salvar evento", "Save event"),
     ("Restaurar backup do whatRust", "Restore whatRust backup"),
     ("Este arquivo não é um backup do whatRust.", "This file is not a whatRust backup."),
     ("Ícone do aplicativo", "App icon"),

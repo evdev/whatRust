@@ -11,6 +11,8 @@
 // page switches it live with I18n.setLang().
 (function (root) {
   var PT = {
+    "Message actions": "Ações de mensagens",
+    "Offer chat, dialer, email, and map actions beside WhatsApp menus.": "Mostra ações de conversa, telefone, email e mapa ao lado dos menus do WhatsApp.",
     "whatRust — Settings": "whatRust — Configurações",
     "whatRust — Locked": "whatRust — Bloqueado",
     "Settings": "Configurações",

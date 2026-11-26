@@ -58,6 +58,7 @@ pub struct Settings {
     /// Icon beside a message's time when its id indicates an Apple device,
     /// Android, or a computer. On by default.
     pub show_message_device: bool,
+    pub message_actions: bool,
     /// Star newly created message-linked tasks and follow-ups.
     pub auto_star_todos: bool,
     /// macOS only (issue #44): show the icon in the menu bar. With it off, the
@@ -211,6 +212,7 @@ impl Default for Settings {
             hide_dock_icon: false,
             zoom: 1.0,
             show_message_device: true,
+            message_actions: true,
             auto_star_todos: true,
             menu_bar_icon: true,
             language: crate::i18n::EN.to_string(),
@@ -1585,6 +1587,9 @@ mod tests {
         assert!(s.voice_transcribe);
         assert!(!s.video_transcribe);
         assert!(s.show_message_device);
+        assert!(s.message_actions);
+        let disabled: Settings = serde_json::from_str(r#"{"message_actions":false}"#).unwrap();
+        assert!(!disabled.message_actions);
         assert_eq!(s.fluidvoice_port, FLUIDVOICE_PORT_DEFAULT);
         assert!(!s.translate_enabled);
         assert_eq!(s.ai_provider, "openrouter");

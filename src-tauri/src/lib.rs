@@ -11,6 +11,7 @@ mod aumid;
 mod autoreply;
 mod badge;
 mod biometric;
+mod calendar_event;
 mod chat_summary;
 mod clipboard;
 mod commands;
@@ -274,6 +275,7 @@ pub fn run() {
             commands::set_unread,
             commands::dlog,
             commands::open_download,
+            calendar_event::calendar_event,
             commands::reveal_download,
             commands::switcher_accounts,
             commands::switch_account,
@@ -407,6 +409,8 @@ pub fn run() {
             // way to see notification failures on a Windows GUI build with no
             // console. See dlog.rs.
             dlog::init();
+            #[cfg(any(windows, target_os = "macos"))]
+            calendar_event::cleanup(handle);
             voice::sweep_note_files();
             #[cfg(target_os = "macos")]
             dlog::log(if scrollers_forced {

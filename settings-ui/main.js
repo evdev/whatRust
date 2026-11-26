@@ -1,6 +1,6 @@
 const invoke = window.__TAURI__.core.invoke;
 const LANGS = ["pt-BR", "en"];
-const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "notification_sound", "quiet_hours", "page_overlays", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "auto_star_todos", "standin_enabled", "hide_app_banner"];
+const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "notification_sound", "quiet_hours", "page_overlays", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "message_actions", "auto_star_todos", "standin_enabled", "hide_app_banner"];
 const AI_PROVIDERS = ["openrouter", "gemini", "anthropic"];
 const TEXT_CLI_PROVIDERS = ["claude_cli", "codex_cli", "antigravity_cli"];
 const STANDIN_CLI_PROVIDERS = [...TEXT_CLI_PROVIDERS, "grok_cli"];

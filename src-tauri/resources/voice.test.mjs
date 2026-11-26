@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, "voice.js"), "utf8");
@@ -81,6 +82,9 @@ assert(api.isVoiceMessage({ type: "ptt" }), "ptt is a voice note");
 assert(api.isVoiceMessage({ attributes: { type: "audio" } }), "audio messages count");
 assert(!api.isVoiceMessage({ type: "chat" }), "text messages are skipped");
 assert(!api.isVoiceMessage(null), "missing messages are skipped");
+assert(api.incomingVoiceId({ id: { _serialized: id }, type: "ptt" }) === id, "incoming voice models expose their serialized id");
+assert(!api.incomingVoiceId({ id: "true_123@c.us_SENT", type: "ptt" }), "outgoing notes are not treated as incoming");
+assert(!api.incomingVoiceId({ id, type: "video" }), "incoming videos remain on demand");
 assert(api.isVideoMessage({ type: "video" }) && api.isVideoMessage({ attributes: { type: "ptv" } }), "regular and instant videos are eligible");
 assert(!api.isVideoMessage({ type: "image" }) && !api.isVideoMessage({ type: "video", isGif: true }) && !api.isVideoMessage({ type: "video", isViewOnce: true }), "photos, GIFs and view-once videos are excluded");
 const thumbnailRow = {
@@ -256,6 +260,43 @@ for (let n = 0; n < 405; n++) stale["s" + n] = { skip: true };
 stale.keep = { skip: true };
 api.capIdMap(stale, { keep: true }, 400);
 assert(Object.keys(stale).length === 400 && stale.keep.skip === true, "stale markers stay under the cap and a kept id survives");
+
+// Exercise the live event path with no chat DOM: a saved transcript must be
+// reused, while a new incoming note is downloaded and saved immediately.
+const listeners = {};
+const calls = [];
+const savedId = "false_123@c.us_SAVED";
+const newId = "false_456@c.us_NEW";
+const live = {
+  location: { origin: "https://web.whatsapp.com" },
+  WPP: { isReady: true, on: (event, fn) => { listeners[event] = fn; }, chat: {
+    getMessageById: async () => { throw new Error("unexpected lookup"); },
+    downloadMedia: async (noteId) => { calls.push(["download", noteId]); return new Blob(["audio"]); },
+  } },
+  __TAURI__: { core: { invoke: async (cmd, args) => {
+    calls.push([cmd, args?.id]);
+    if (cmd === "voice_prefs") return { enabled: true };
+    if (cmd === "voice_lookup") return args.id === savedId ? { id: args.id, status: "ready", text: "saved" } : { status: "missing" };
+    if (cmd === "transcribe_voice") return { id: newId, status: "ready", text: "new" };
+  } } },
+  setInterval: () => 1, clearInterval: () => {}, setTimeout: () => 1,
+  Blob, Uint8Array, TextEncoder, Promise,
+};
+live.window = live;
+runInNewContext(source, live);
+await new Promise((resolve) => setImmediate(resolve));
+listeners["chat.new_message"]({ id: { _serialized: savedId }, type: "ptt" });
+listeners["chat.new_message"]({ id: newId, type: "audio" });
+listeners["chat.new_message"]({ id: newId, type: "audio" });
+for (let n = 0; n < 5; n++) await new Promise((resolve) => setImmediate(resolve));
+assert(calls.some(([cmd, noteId]) => cmd === "voice_lookup" && noteId === savedId), "incoming notes check the saved transcript first");
+assert(!calls.some(([cmd, noteId]) => cmd === "download" && noteId === savedId), "a saved transcript avoids another download");
+assert(calls.filter(([cmd, noteId]) => cmd === "download" && noteId === newId).length === 1, "a new note is downloaded once without opening its chat");
+assert(calls.filter(([cmd]) => cmd === "transcribe_voice").length === 1, "the incoming note is sent for transcription");
+live.__whatrustVoicePrefs({ enabled: false });
+listeners["chat.new_message"]({ id: "false_456@c.us_DISABLED", type: "ptt" });
+await new Promise((resolve) => setImmediate(resolve));
+assert(!calls.some(([cmd, noteId]) => cmd === "voice_lookup" && noteId === "false_456@c.us_DISABLED"), "disabled transcription ignores incoming notes");
 
 if (failures) {
   console.error(`\n${failures} failed`);

@@ -62,6 +62,11 @@ pub fn open_file(app: &tauri::AppHandle, path: PathBuf) {
     });
 }
 
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn open_associated_file(path: &Path) -> Result<(), String> {
+    first_success(&attempts_file(path))
+}
+
 /// Show a file selected in the file manager (or at least its folder).
 pub fn reveal_file(app: &tauri::AppHandle, path: PathBuf) {
     let app = app.clone();

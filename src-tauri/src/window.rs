@@ -111,6 +111,15 @@ pub(crate) fn push_device_icons(app: &AppHandle, enabled: bool) {
     }
 }
 
+pub(crate) fn push_message_actions(app: &AppHandle, enabled: bool) {
+    let script = format!("window.__wrMessageActionsPrefs?.({enabled})");
+    for (label, view) in app.webviews() {
+        if label.starts_with("wa-") {
+            let _ = view.eval(&script);
+        }
+    }
+}
+
 /// WA-JS at document start breaks WhatsApp's login page (the QR never paints).
 /// Run it only after the chat list exists.
 fn wajs_when_ready() -> String {
@@ -134,7 +143,7 @@ window.__wrScheduleDeliveryStart?.();
       if(t&&t.core&&typeof t.core.invoke==="function")t.core.invoke("dlog",{msg:"wajs: released stuck loader"}).catch(function(){});
     }
   }catch(e){}
-  try{if(window.WPP&&window.WPP.isReady)return;}catch(e){}
+  try{if(window.WPP&&window.WPP.isReady){window.dispatchEvent(new Event("whatrust-calendar-source-ready"));return;}}catch(e){}
   setTimeout(releaseStuckLoader,500);
 })();
 }start();})();"#,
@@ -274,6 +283,10 @@ macro_rules! account_webview {
                 crate::settings::load($app).show_message_device
             ))
             .initialization_script(include_str!("../resources/device.js"))
+            .initialization_script(format!("window.__WR_MESSAGE_ACTIONS={};", crate::settings::load($app).message_actions))
+            .initialization_script(if cfg!(any(windows, target_os = "macos")) { include_str!("../resources/calendar-chrono.js") } else { "" })
+            .initialization_script(if cfg!(any(windows, target_os = "macos")) { include_str!("../resources/calendar-actions.js") } else { "" })
+            .initialization_script(include_str!("../resources/message-actions.js"))
             // To-do list: a button under the account switcher, message capture,
             // and reminders. todo.js reads the account from this webview's label
             // via the todo_* commands.

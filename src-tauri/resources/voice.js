@@ -25,6 +25,13 @@
     return type === "ptt" || type === "audio";
   }
 
+  function incomingVoiceId(msg) {
+    if (!isVoiceMessage(msg)) return "";
+    var key = msg.id || (msg.attributes && msg.attributes.id);
+    var id = typeof key === "string" ? key : key && key._serialized;
+    return isMessageId(id) && id.indexOf("false_") === 0 ? id : "";
+  }
+
   function messageType(msg) {
     return (msg && (msg.type || (msg.attributes && msg.attributes.type))) || "";
   }
@@ -666,6 +673,7 @@
     root.__whatrustVoiceApi = {
       isMessageId: isMessageId,
       isVoiceMessage: isVoiceMessage,
+      incomingVoiceId: incomingVoiceId,
       isVideoMessage: isVideoMessage,
       looksLikeVoiceRow: looksLikeVoiceRow,
       chatApiReady: chatApiReady,
@@ -985,7 +993,7 @@
     }
   }
 
-  function consider(id) {
+  function consider(id, incoming) {
     if (!prefs.enabled || known[id] || checking[id]) return;
     if (retryAt[id] && Date.now() < retryAt[id]) return;
     var cached = releasedView(released, id);
@@ -995,7 +1003,8 @@
     }
     checking[id] = true;
     var at = 0;
-    root.WPP.chat.getMessageById(id).then(function (msg) {
+    var message = incoming ? Promise.resolve(incoming) : root.WPP.chat.getMessageById(id);
+    message.then(function (msg) {
       at = messageTime(msg);
       if (isVideoMessage(msg)) {
         times[id] = at;
@@ -1162,6 +1171,21 @@
   }
 
   var menuQuietUntil = 0;
+  var incomingArmed = false;
+  var pendingIncoming = [];
+  function armIncoming() {
+    if (incomingArmed || !root.WPP || typeof root.WPP.on !== "function") return;
+    incomingArmed = true;
+    root.WPP.on("chat.new_message", function (msg) {
+      var id = incomingVoiceId(msg);
+      if (!id) return;
+      if (!prefsReady) {
+        pendingIncoming.push({ id: id, msg: msg });
+        return;
+      }
+      if (prefs.enabled) consider(id, msg);
+    });
+  }
   function noteMenuGesture(event) {
     var target = event && event.target;
     if (!target || !target.closest || !target.closest("#main")) return;
@@ -1244,6 +1268,9 @@
         target: next.target || "English",
       };
     }
+    var pending = pendingIncoming;
+    pendingIncoming = [];
+    if (prefs.enabled) pending.forEach(function (entry) { consider(entry.id, entry.msg); });
     if (prefs.video) {
       Object.keys(known).forEach(function (id) {
         if (known[id] && known[id].status === "hidden") delete known[id];
@@ -1264,6 +1291,7 @@
   };
 
   whenReady(function () {
+    armIncoming();
     invoke("voice_prefs").then(function (next) {
       root.__whatrustVoicePrefs(next || { enabled: true, video: false, translate: false, target: "English" });
     }).catch(function () {

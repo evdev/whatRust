@@ -294,6 +294,7 @@ pub fn set_settings(
     crate::autoreply::push_prefs(&app, &settings);
     crate::mention::push_prefs(&app, &settings);
     crate::window::push_device_icons(&app, settings.show_message_device);
+    crate::window::push_message_actions(&app, settings.message_actions);
     Ok(warning)
 }
 
@@ -384,6 +385,7 @@ fn merge_backup(
         "mention_alert_sound_file",
         "mention_accounts",
         "show_message_device",
+        "message_actions",
         "auto_star_todos",
         "voice_transcribe",
         "video_transcribe",
@@ -566,6 +568,7 @@ pub async fn import_backup(
         crate::autoreply::push_prefs(&ui, &settings);
         crate::mention::push_prefs(&ui, &settings);
         crate::window::push_device_icons(&ui, settings.show_message_device);
+        crate::window::push_message_actions(&ui, settings.message_actions);
         crate::integration::broadcast(&ui);
         crate::tray::rebuild_menu(&ui);
     })

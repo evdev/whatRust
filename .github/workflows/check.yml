@@ -97,6 +97,10 @@ jobs:
         if: matrix.js
         run: node src-tauri/resources/device.test.mjs
 
+      - name: message actions tests
+        if: matrix.js
+        run: node --test src-tauri/resources/message-actions.test.mjs src-tauri/resources/calendar-actions.test.mjs
+
       - name: todo.js tests — message capture, rail, filters
         if: matrix.js
         run: node src-tauri/resources/todo.test.mjs
