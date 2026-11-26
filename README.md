@@ -10,13 +10,13 @@ whatRust is a desktop app for WhatsApp Web, built with Rust and Tauri. It uses y
 
 ## Install whatRust
 
-The Windows installers are **0.7.0** builds from this fork, including scheduled messages and transcript search. The macOS disk image remains at **0.6.16**, including the voice-note fixes and retry when FluidVoice is busy. Pick the one for your computer.
+These **0.7.0** installers are built from this fork, including scheduled messages, transcript search, message actions, and transcription of incoming voice notes. Pick the one for your computer.
 
 | Your computer | Download |
 | --- | --- |
 | Windows 10 or 11, Intel or AMD | [Windows x64 installer](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.7.0_x64-setup.exe) |
 | Windows 10 or 11, ARM64 | [Windows ARM64 installer](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.7.0_arm64-setup.exe) |
-| Mac with Apple Silicon | [macOS disk image](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.6.16_aarch64.dmg) |
+| Mac with Apple Silicon | [macOS disk image](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.7.0_aarch64.dmg) |
 
 [SHA-256 checksums](installers/SHA256SUMS)
 
@@ -67,7 +67,7 @@ Under **Settings → Transcription → AI provider**, choose Claude Code, Codex,
 
 Type in the regular chat search box and choose **Transcripts** below it to search saved voice-note and video transcripts for the active account. You can also open transcript search with **Ctrl+Alt+F** (**Cmd+Option+F** on Mac). Select a match to jump to the original message. Search runs locally and includes existing saved transcripts.
 
-The Windows installers include transcript search. On macOS, it’s available in builds from the current source.
+The Windows and macOS installers include transcript search.
 
 ### Catch up on a chat
 
