@@ -1257,7 +1257,12 @@ pub async fn set_account_notifications(
     let mut f = accounts::load(&app);
     accounts::set_notifications(&mut f, &id, on)?;
     accounts::save(&app, &f).map_err(|e| e.to_string())?;
-    crate::window::apply_notification_sound(&app, crate::settings::load(&app).notification_sound);
+    let settings = crate::settings::load(&app);
+    crate::window::apply_notification_sound(&app, settings.notification_sound);
+    crate::mention::push_prefs(&app, &settings);
+    if !on {
+        crate::mention::drop_account(&app, &accounts::window_label(&id));
+    }
     crate::integration::broadcast(&app);
     Ok(())
 }

@@ -180,10 +180,27 @@ pub(crate) struct Heard {
     data: String,
 }
 
+fn effective_prefs(
+    settings: &crate::settings::Settings,
+    accounts: &crate::accounts::AccountsFile,
+    label: &str,
+) -> MentionAccountPrefs {
+    let id = crate::accounts::id_from_label(label).unwrap_or("default");
+    let mut prefs = crate::settings::prefs_for(settings, id);
+    if !crate::accounts::notifications_on(accounts, label) {
+        prefs.popup = false;
+        prefs.sound = false;
+    }
+    prefs
+}
+
 pub fn boot_script(app: &AppHandle, label: &str) -> String {
     let settings = crate::settings::load(app);
-    let id = crate::accounts::id_from_label(label).unwrap_or("default");
-    boot_script_from(&crate::settings::prefs_for(&settings, id))
+    boot_script_from(&effective_prefs(
+        &settings,
+        &crate::accounts::load(app),
+        label,
+    ))
 }
 
 pub fn boot_script_from(prefs: &MentionAccountPrefs) -> String {
@@ -194,11 +211,12 @@ pub fn boot_script_from(prefs: &MentionAccountPrefs) -> String {
 }
 
 pub fn push_prefs(app: &AppHandle, settings: &crate::settings::Settings) {
+    let accounts = crate::accounts::load(app);
     for (label, view) in app.webviews() {
-        let Some(id) = crate::accounts::id_from_label(&label) else {
+        let Some(_id) = crate::accounts::id_from_label(&label) else {
             continue;
         };
-        let prefs = crate::settings::prefs_for(settings, id);
+        let prefs = effective_prefs(settings, &accounts, &label);
         let script = format!(
             "window.__whatrustMentionPrefs&&window.__whatrustMentionPrefs({{mentions:{},replies:{},direct:{},everyone:{},popup:{},sound:{}}});",
             prefs.mentions, prefs.replies, prefs.direct, prefs.everyone, prefs.popup, prefs.sound
@@ -816,7 +834,7 @@ pub fn mention_event(
     if crate::settings::quiet_now(&settings) {
         return Ok(());
     }
-    let prefs = crate::settings::prefs_for(&settings, &account_id);
+    let prefs = effective_prefs(&settings, &crate::accounts::load(&app), &account);
     let held = Held {
         account_label: account.clone(),
         chat_id,
@@ -1408,7 +1426,9 @@ fn account_id_from_label(label: &str) -> String {
 }
 
 fn deliver(app: &AppHandle, account_id: &str, prefs: &MentionAccountPrefs, held: Held) {
-    if crate::settings::quiet_now(&crate::settings::load(app)) {
+    if crate::settings::quiet_now(&crate::settings::load(app))
+        || !crate::accounts::notifications_on(&crate::accounts::load(app), &held.account_label)
+    {
         return;
     }
     if app
@@ -1707,6 +1727,7 @@ fn pump(app: &AppHandle) {
     if crate::settings::quiet_now(&settings) {
         return;
     }
+    let accounts = crate::accounts::load(app);
     let mut show = Vec::new();
     let mut chimes = Vec::new();
     {
@@ -1728,7 +1749,7 @@ fn pump(app: &AppHandle) {
                 continue;
             }
             let account_id = account_id_from_label(&item.account_label);
-            let prefs = crate::settings::prefs_for(&settings, &account_id);
+            let prefs = effective_prefs(&settings, &accounts, &item.account_label);
             match release_of(&prefs, &item) {
                 Release::Drop => {}
                 Release::Chime => {
@@ -2298,6 +2319,27 @@ mod tests {
         assert!(js.contains(r#"say \"hi\""#));
         assert!(js.starts_with("window.__whatrustMentionSend&&"));
         assert!(!js.contains("say \"hi\""));
+    }
+
+    #[test]
+    fn account_notification_switch_gates_mention_delivery_without_losing_preferences() {
+        let mut accounts = crate::accounts::AccountsFile::default();
+        let mut settings = crate::settings::Settings::default();
+        let prefs = MentionAccountPrefs {
+            mentions: true,
+            ..Default::default()
+        };
+        settings.mention_accounts = Some(std::collections::HashMap::from([(
+            "default".into(),
+            prefs.clone(),
+        )]));
+        assert_eq!(super::effective_prefs(&settings, &accounts, "wa-default"), prefs);
+        crate::accounts::set_notifications(&mut accounts, "default", false).unwrap();
+        let muted = super::effective_prefs(&settings, &accounts, "wa-default");
+        assert!(muted.mentions);
+        assert!(!muted.popup && !muted.sound);
+        crate::accounts::set_notifications(&mut accounts, "default", true).unwrap();
+        assert_eq!(super::effective_prefs(&settings, &accounts, "wa-default"), prefs);
     }
 
     #[test]
