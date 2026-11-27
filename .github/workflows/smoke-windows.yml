@@ -94,6 +94,11 @@ jobs:
         if: steps.install.outputs.skip != 'true' && (matrix.token != 'arm64' || github.event_name == 'workflow_dispatch')
         shell: pwsh
         run: |
+          $capabilities = 'HKCU:\Software\whatRust\Capabilities'
+          if ((Get-ItemProperty "$capabilities\URLAssociations").whatsapp -ne 'whatRust.WhatsApp') { throw 'Missing WhatsApp URL association' }
+          if ((Get-ItemProperty 'HKCU:\Software\RegisteredApplications').whatRust -ne 'Software\whatRust\Capabilities') { throw 'Missing Default Apps registration' }
+          $command = (Get-ItemProperty 'HKCU:\Software\Classes\whatRust.WhatsApp\shell\open\command').'(default)'
+          if ($command -ne "`"$env:EXE`" `"%1`"") { throw "Unexpected WhatsApp handler: $command" }
           foreach ($root in 'HKCU:\Software\Classes\whatsapp', 'HKLM:\Software\Classes\whatsapp') {
             if (Test-Path $root) {
               "$root -> " + (Get-ItemProperty "$root\shell\open\command").'(default)'

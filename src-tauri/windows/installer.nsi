@@ -785,11 +785,24 @@ Section Install
 
   ; Register deep links
   {{#each deep_link_protocols as |protocol| ~}}
-    WriteRegStr SHCTX "Software\Classes\\{{protocol}}" "URL Protocol" ""
-    WriteRegStr SHCTX "Software\Classes\\{{protocol}}" "" "URL:${BUNDLEID} protocol"
-    WriteRegStr SHCTX "Software\Classes\\{{protocol}}\DefaultIcon" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\",0"
-    WriteRegStr SHCTX "Software\Classes\\{{protocol}}\shell\open\command" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\" $\"%1$\""
+    ReadRegStr $R7 HKCR "{{protocol}}\shell\open\command" ""
+    ${If} $R7 == ""
+      WriteRegStr SHCTX "Software\Classes\\{{protocol}}" "URL Protocol" ""
+      WriteRegStr SHCTX "Software\Classes\\{{protocol}}" "" "URL:${BUNDLEID} protocol"
+      WriteRegStr SHCTX "Software\Classes\\{{protocol}}\DefaultIcon" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\",0"
+      WriteRegStr SHCTX "Software\Classes\\{{protocol}}\shell\open\command" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\" $\"%1$\""
+    ${EndIf}
   {{/each}}
+
+  ; Offer whatRust as a separate Default Apps protocol handler.
+  WriteRegStr SHCTX "Software\Classes\whatRust.WhatsApp" "" "whatRust WhatsApp link"
+  WriteRegStr SHCTX "Software\Classes\whatRust.WhatsApp" "URL Protocol" ""
+  WriteRegStr SHCTX "Software\Classes\whatRust.WhatsApp\DefaultIcon" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\",0"
+  WriteRegStr SHCTX "Software\Classes\whatRust.WhatsApp\shell\open\command" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\" $\"%1$\""
+  WriteRegStr SHCTX "Software\whatRust\Capabilities" "ApplicationName" "whatRust"
+  WriteRegStr SHCTX "Software\whatRust\Capabilities" "ApplicationDescription" "Open WhatsApp chats and group invitations in whatRust"
+  WriteRegStr SHCTX "Software\whatRust\Capabilities\URLAssociations" "whatsapp" "whatRust.WhatsApp"
+  WriteRegStr SHCTX "Software\RegisteredApplications" "whatRust" "Software\whatRust\Capabilities"
 
   ; Create uninstaller
   WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -964,6 +977,13 @@ Section Uninstall
     ${EndIf}
   {{/each}}
 
+
+  ReadRegStr $R7 SHCTX "Software\Classes\whatRust.WhatsApp\shell\open\command" ""
+  ${If} $R7 == "$\"$INSTDIR\${MAINBINARYNAME}.exe$\" $\"%1$\""
+    DeleteRegKey SHCTX "Software\Classes\whatRust.WhatsApp"
+    DeleteRegKey SHCTX "Software\whatRust\Capabilities"
+    DeleteRegValue SHCTX "Software\RegisteredApplications" "whatRust"
+  ${EndIf}
 
   ; Delete uninstaller
   Delete "$INSTDIR\uninstall.exe"
