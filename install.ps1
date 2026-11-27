@@ -62,8 +62,8 @@ Write-Host "CPU architecture: $arch"
 # Update these together with the checked-in installers and SHA256SUMS.
 $installers = @{
   arm64 = @{
-    name = 'whatRust_0.7.0_arm64-setup.exe'
-    sha256 = '17e779ff2d2dab888af79b465442c78992945f112273ef582f43dc4cec431933'
+    name = 'whatRust_0.7.1_arm64-setup.exe'
+    sha256 = 'd7d93954c2d47f6f91a73d0918e627caa34a18a8a7a0a01506173b8a1fb7fc28'
   }
   x64 = @{
     name = 'whatRust_0.7.0_x64-setup.exe'

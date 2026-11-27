@@ -444,8 +444,15 @@ mod tests {
     fn real_npu_transcription() {
         let path = std::env::var_os("WHATRUST_ASR_TEST_WAV").expect("test WAV path");
         let audio = std::fs::read(path).expect("read test WAV");
-        let result = transcribe(&audio);
-        let first_pid = state().lock().unwrap().as_ref().unwrap().child.id();
+        let text = transcribe(&audio)
+            .expect("initial NPU transcription (WAV must be 16 kHz mono 16-bit PCM)");
+        let first_pid = state()
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("NPU server should be running after transcription")
+            .child
+            .id();
         let again = transcribe(&audio).expect("warm transcription");
         assert!(again.to_lowercase().contains("country"));
         assert_eq!(
@@ -461,7 +468,7 @@ mod tests {
         let restarted = transcribe(&audio).expect("restart after server exit");
         assert!(restarted.to_lowercase().contains("country"));
         shutdown();
-        let text = result.expect("NPU transcription").to_lowercase();
+        let text = text.to_lowercase();
         assert!(text.contains("country"), "unexpected transcript: {text}");
     }
     #[test]

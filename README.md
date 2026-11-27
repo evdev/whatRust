@@ -10,12 +10,12 @@ whatRust is a desktop app for WhatsApp Web, built with Rust and Tauri. It uses y
 
 ## Install whatRust
 
-These **0.7.0** installers are built from this fork, including scheduled messages, transcript search, message actions, and transcription of incoming voice notes. Pick the one for your computer.
+These installers are built from this fork. The Windows ARM64 installer is version **0.7.1**; the Windows x64 and macOS installers are version **0.7.0**. Pick the one for your computer.
 
 | Your computer | Download |
 | --- | --- |
 | Windows 10 or 11, Intel or AMD | [Windows x64 installer](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.7.0_x64-setup.exe) |
-| Windows 10 or 11, ARM64 | [Windows ARM64 installer](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.7.0_arm64-setup.exe) |
+| Windows 10 or 11, ARM64 | [Windows ARM64 installer](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.7.1_arm64-setup.exe) |
 | Mac with Apple Silicon | [macOS disk image](https://github.com/evdev/whatRust/raw/refs/heads/master/installers/whatRust_0.7.0_aarch64.dmg) |
 
 [SHA-256 checksums](installers/SHA256SUMS)

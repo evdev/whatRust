@@ -7,7 +7,7 @@ clear the quarantine flag once with
 
 ## Windows installers
 
-The checked-in 0.7.0 setup files install this fork for the current Windows user.
+The checked-in setup files install this fork for the current Windows user. The ARM64 build is 0.7.1; the x64 build is 0.7.0.
 Choose `arm64` for a Windows-on-ARM PC or `x64` for an Intel/AMD PC. The
 setup executable is unsigned; Windows may ask you to confirm that you trust it.
 The wizard offers to install the local transcription tools. ARM64 installs
