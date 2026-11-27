@@ -166,6 +166,36 @@ struct Chat {
     muted: BTreeSet<Kind>,
     seen: BTreeMap<String, (u64, String)>,
     edits: BTreeMap<String, (u64, u64)>,
+    decisions: Vec<DecisionRecord>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct DecisionRecord {
+    message_id: String,
+    passage: String,
+    provider: Provider,
+    checked_at: u64,
+    choice: Option<String>,
+    probability: Option<f64>,
+    #[serde(default)]
+    outcome: Option<CheckOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CheckOutcome {
+    NoUsableText,
+    NoDecision,
+    NoFollowup,
+    AlreadyResolved,
+    LowConfidence,
+    ExistingReminder,
+    QuestionForReview,
+    Review,
+    Reminder,
+    Waiting,
+    Delayed,
+    Muted,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -563,7 +593,13 @@ fn prune(chat: &mut Chat, at: u64) -> bool {
         context += 1;
         context <= 24 && at.saturating_sub(m.at_ms) <= LOOKBACK
     });
-    changed || old != chat.messages.len()
+    let count = chat.decisions.len();
+    chat.decisions.retain(|d| {
+        chat.messages
+            .iter()
+            .any(|m| !m.deleted && m.message.msg_id == d.message_id)
+    });
+    changed || old != chat.messages.len() || count != chat.decisions.len()
 }
 
 fn usage(tx: &Connection, id: Option<&str>, at: u64) -> Result<Vec<serde_json::Value>, String> {
@@ -671,6 +707,7 @@ fn snapshot(
         let ready = session_ready(runtime, id, at);
         let mut items = Vec::new();
         let mut rules = Vec::new();
+        let mut decisions = Vec::new();
         let mut pending = 0;
         for (id_chat, mut c) in chats(tx, id)? {
             if prune(&mut c, at) {
@@ -678,6 +715,22 @@ fn snapshot(
             }
             let included = allowed(&a.prefs, &id_chat);
             pending += usize::from(included && c.pending_since > 0);
+            if included {
+                for decision in &c.decisions {
+                    if let Some(message) = c
+                        .messages
+                        .iter()
+                        .find(|m| m.message.msg_id == decision.message_id && !m.deleted)
+                    {
+                        decisions.push(serde_json::json!({
+                            "message": message.message, "passage": decision.passage,
+                            "provider": decision.provider, "checked_at": decision.checked_at,
+                            "choice": decision.choice, "probability": decision.probability,
+                            "outcome": decision.outcome,
+                        }));
+                    }
+                }
+            }
             for &kind in &c.muted {
                 let name = c.items.first().map(|i| &i.message.chat_name);
                 rules.push(serde_json::json!({"id": rule_id(&id_chat, kind), "chat_name": name, "kind": kind}));
@@ -724,6 +777,8 @@ fn snapshot(
                 }));
             }
         }
+        decisions.sort_by_key(|d| std::cmp::Reverse(d["checked_at"].as_u64().unwrap_or(0)));
+        decisions.truncate(100);
         let pause = if !a.prefs.enabled {
             ""
         } else if key(app, &a.prefs).is_none() {
@@ -743,7 +798,7 @@ fn snapshot(
             "backfill_from": a.backfill_from, "next_check": next_check(&a, at),
             "key_configured": key(app, &a.prefs).is_some(), "time_zone": a.prefs.time_zone,
             "excluded_chats": a.prefs.excluded_chats, "group_chats": a.prefs.group_chats,
-            "items":items, "rules":rules, "undo_note":undo_note,
+            "items":items, "rules":rules, "decisions":decisions, "undo_note":undo_note,
         }))
     })
 }
@@ -827,6 +882,8 @@ fn merge_message(c: &mut Chat, mut incoming: Message, at: u64) {
                 }
             }
         }
+        c.decisions
+            .retain(|d| d.message_id != incoming.message.msg_id);
         c.revision += 1;
         incoming.incoming_revision = c.revision;
         *existing = incoming;
@@ -1113,6 +1170,7 @@ pub fn attention_action(
                 if !allowed(&a.prefs, key) {
                     let mut c = chat(tx, &account_id, key)?;
                     c.messages.clear();
+                    c.decisions.clear();
                     c.checked = c.revision;
                     c.pending_since = 0;
                     for item in &mut c.items {
@@ -1475,6 +1533,7 @@ pub fn attention_configure(
             a.backfill_from = None;
             for (key, mut c) in chats(tx, &account_id)? {
                 c.messages.clear();
+                c.decisions.clear();
                 c.pending_since = 0;
                 c.checked = c.revision;
                 save_chat(tx, &account_id, &key, &c)?;
@@ -1988,6 +2047,165 @@ mod tests {
     }
 
     #[test]
+    fn attention_unanswered_question_and_decision_history() {
+        let mut chat = Chat::default();
+        merge_message(
+            &mut chat,
+            message(1, "Did you take care of subscribing?"),
+            1_000,
+        );
+        let batch = model::prepare(&chat, 4);
+        model::apply(
+            &mut chat,
+            &batch,
+            &answers(&[("work_p1", "none", 0.95)]),
+            Provider::Openai,
+            5_000,
+        )
+        .unwrap();
+        assert_eq!(chat.items.len(), 1);
+        assert!(matches!(chat.items[0].state, Status::Review));
+        assert_eq!(chat.decisions[0].choice.as_deref(), Some("none"));
+        assert_eq!(
+            chat.decisions[0].outcome,
+            Some(CheckOutcome::QuestionForReview)
+        );
+        let mut answered = Chat::default();
+        merge_message(
+            &mut answered,
+            message(1, "Did you take care of subscribing?"),
+            1_000,
+        );
+        let mut response = message(2, "Yes.");
+        response.from_me = true;
+        merge_message(&mut answered, response, 2_000);
+        let batch = model::prepare(&answered, 4);
+        model::apply(
+            &mut answered,
+            &batch,
+            &answers(&[("work_p1", "none", 0.95), ("work_p2", "none", 0.95)]),
+            Provider::Openai,
+            5_000,
+        )
+        .unwrap();
+        assert!(answered.items.is_empty());
+        let mut reply = Chat::default();
+        merge_message(&mut reply, message(1, "Could you send it?"), 1_000);
+        let batch = model::prepare(&reply, 4);
+        model::apply(
+            &mut reply,
+            &batch,
+            &answers(&[("work_p1", "reply", 0.99)]),
+            Provider::Openai,
+            5_000,
+        )
+        .unwrap();
+        assert_eq!(reply.items[0].eligible_at, 5_000);
+    }
+
+    #[test]
+    fn attention_partial_decision_preserves_direct_question_without_flagging_group() {
+        for (chat_id, expected) in [
+            ("123@c.us", CheckOutcome::QuestionForReview),
+            ("123@g.us", CheckOutcome::NoDecision),
+        ] {
+            let mut chat = Chat::default();
+            let mut question = message(1, "確認してもらえますか？");
+            question.message.chat_id = Some(chat_id.into());
+            merge_message(&mut chat, question, 1_000);
+            let mut unrelated = message(2, "Thanks for the update.");
+            unrelated.from_me = true;
+            unrelated.quoted_id = Some("OTHER_MESSAGE".into());
+            merge_message(&mut chat, unrelated, 2_000);
+            let batch = model::prepare(&chat, 4);
+            model::apply(
+                &mut chat,
+                &batch,
+                &answers(&[("work_p2", "none", 0.99)]),
+                Provider::Openai,
+                5_000,
+            )
+            .unwrap();
+            let decision = &chat.decisions[0];
+            assert_eq!(decision.choice, None);
+            assert_eq!(decision.probability, None);
+            assert_eq!(decision.outcome, Some(expected));
+            assert_eq!(
+                chat.items.first().map(|i| i.kind),
+                (chat_id == "123@c.us").then_some(Kind::Reply)
+            );
+            let mut edited = message(1, "Thank you.");
+            edited.message.chat_id = Some(chat_id.into());
+            edited.edited_at = Some(6_000);
+            merge_message(&mut chat, edited, 6_000);
+            assert_eq!(chat.decisions.len(), 1);
+            assert_eq!(chat.decisions[0].passage, "Thanks for the update.");
+        }
+    }
+
+    #[test]
+    fn attention_later_reply_is_visible_to_model_across_batch_boundary() {
+        let mut chat = Chat::default();
+        merge_message(&mut chat, message(1, "Can you confirm?"), 1_000);
+        let mut answer = message(2, "Confirmed.");
+        answer.from_me = true;
+        merge_message(&mut chat, answer, 2_000);
+        let batch = model::prepare(&chat, 1);
+        let input: serde_json::Value = serde_json::from_str(&batch.input).unwrap();
+        assert_eq!(batch.through, 1);
+        assert_eq!(input["later_outgoing_context"][0]["text"], "Confirmed.");
+        model::apply(
+            &mut chat,
+            &batch,
+            &answers(&[("work_p1", "answered", 0.95)]),
+            Provider::Openai,
+            5_000,
+        )
+        .unwrap();
+        assert!(chat.items.is_empty());
+        assert_eq!(chat.decisions[0].outcome, Some(CheckOutcome::NoFollowup));
+    }
+
+    #[test]
+    fn attention_email_request_stays_whole_and_explicit_cancellation_prevents_a_reminder() {
+        let mut chat = Chat::default();
+        merge_message(
+            &mut chat,
+            message(1, "Could you email the invoice to billing@example.com?"),
+            1_000,
+        );
+        let batch = model::prepare(&chat, 4);
+        assert_eq!(batch.questions.len(), 1);
+        merge_message(
+            &mut chat,
+            message(2, "Never mind, I downloaded it myself."),
+            2_000,
+        );
+        let batch = model::prepare(&chat, 4);
+        model::apply(
+            &mut chat,
+            &batch,
+            &answers(&[
+                ("work_p1", "reply", 0.99),
+                ("resolve_p1", "p2", 0.99),
+                ("work_p2", "no_reply_needed", 0.99),
+            ]),
+            Provider::Openai,
+            5_000,
+        )
+        .unwrap();
+        assert!(chat.items.is_empty());
+        assert_eq!(
+            chat.decisions[0].outcome,
+            Some(CheckOutcome::AlreadyResolved)
+        );
+        assert_eq!(
+            chat.decisions[0].passage,
+            "Could you email the invoice to billing@example.com?"
+        );
+    }
+
+    #[test]
     fn attention_overlapping_work_and_suggested_closure_are_independent() {
         let mut chat = Chat::default();
         merge_message(
@@ -2010,7 +2228,7 @@ mod tests {
         .unwrap();
         assert_eq!(chat.items.len(), 2);
         assert_ne!(chat.items[0].id, chat.items[1].id);
-        assert_eq!(chat.items[0].eligible_at, 5_000 + HOUR);
+        assert_eq!(chat.items[0].eligible_at, 5_000);
         chat.checked = chat.revision;
         merge_message(&mut chat, message(2, "Thanks."), 5_100);
         let batch = model::prepare(&chat, 4);
@@ -2156,86 +2374,353 @@ mod tests {
     #[test]
     #[ignore = "sends billable synthetic requests with explicitly supplied provider keys"]
     fn attention_live_synthetic_pilot() {
-        // These examples are smoke cases for the hosted API and end-to-end
-        // decisions. Use a larger held-out set for release calibration.
-        let cases: &[(&str, &[(&str, bool)], usize, usize)] = &[
-            ("quiet", &[("Thanks, have a nice weekend.", false)], 0, 0),
-            (
-                "reply",
-                &[("Can you confirm which invoices are overdue?", false)],
-                1,
-                0,
-            ),
-            (
-                "promise",
-                &[
+        // Each inner slice is one scheduled check. Expected reminders exclude
+        // closure suggestions, and ambiguous Review entries are counted separately.
+        type Turns = &'static [(&'static str, bool)];
+        struct Case {
+            name: &'static str,
+            checks: &'static [Turns],
+            group: bool,
+            reminders: &'static [Kind],
+            closures: usize,
+        }
+        use Kind::{Action, Reply, Waiting};
+        let cases = [
+            Case {
+                name: "quiet",
+                checks: &[&[("Thanks, have a nice weekend.", false)]],
+                group: false,
+                reminders: &[],
+                closures: 0,
+            },
+            Case {
+                name: "business question",
+                checks: &[&[("Can you confirm which invoices are overdue?", false)]],
+                group: false,
+                reminders: &[Reply],
+                closures: 0,
+            },
+            Case {
+                name: "personal status check",
+                checks: &[&[("Did you renew the streaming subscription?", false)]],
+                group: false,
+                reminders: &[Reply],
+                closures: 0,
+            },
+            Case {
+                name: "Portuguese",
+                checks: &[&[("Você pode enviar a segunda via do boleto?", false)]],
+                group: false,
+                reminders: &[Reply],
+                closures: 0,
+            },
+            Case {
+                name: "no punctuation",
+                checks: &[&[("hey can you confirm the pickup time", false)]],
+                group: false,
+                reminders: &[Reply],
+                closures: 0,
+            },
+            Case {
+                name: "rhetorical",
+                checks: &[&[("Who doesn't love a long weekend? Enjoy yours!", false)]],
+                group: false,
+                reminders: &[],
+                closures: 0,
+            },
+            Case {
+                name: "addressed to someone else",
+                checks: &[&[("Sam, can you send the revised estimate?", false)]],
+                group: true,
+                reminders: &[],
+                closures: 0,
+            },
+            Case {
+                name: "answered in initial batch",
+                checks: &[&[
+                    ("What time is pickup?", false),
+                    ("Pickup is at 4 pm.", true),
+                ]],
+                group: false,
+                reminders: &[],
+                closures: 0,
+            },
+            Case {
+                name: "unrelated outgoing",
+                checks: &[&[
+                    ("Where should I drop off the rental keys?", false),
+                    ("Thanks for sending the invoice.", true),
+                ]],
+                group: false,
+                reminders: &[Reply],
+                closures: 0,
+            },
+            Case {
+                name: "mere acknowledgement",
+                checks: &[&[
+                    ("Did the warranty renewal go through?", false),
+                    ("Got your message.", true),
+                ]],
+                group: false,
+                reminders: &[Reply],
+                closures: 0,
+            },
+            Case {
+                name: "outgoing promise",
+                checks: &[&[
                     ("I'll send the replacement packing slip tomorrow.", true),
                     ("Thanks.", false),
+                ]],
+                group: false,
+                reminders: &[Action],
+                closures: 0,
+            },
+            Case {
+                name: "waiting on contact",
+                checks: &[&[("Please send me the signed quote.", true)]],
+                group: false,
+                reminders: &[Waiting],
+                closures: 0,
+            },
+            Case {
+                name: "two requests",
+                checks: &[&[(
+                    "Can you confirm my appointment? Can you also send the invoice?",
+                    false,
+                )]],
+                group: false,
+                reminders: &[Reply, Reply],
+                closures: 0,
+            },
+            Case {
+                name: "email in request",
+                checks: &[&[("Could you email the invoice to billing@example.com?", false)]],
+                group: false,
+                reminders: &[Reply],
+                closures: 0,
+            },
+            Case {
+                name: "later fulfillment",
+                checks: &[
+                    &[("What's the packing slip number?", false)],
+                    &[("Here's the packing slip number PS-614.", true)],
                 ],
-                1,
-                0,
-            ),
-            (
-                "portuguese",
-                &[("Você pode enviar a segunda via do boleto?", false)],
-                1,
-                0,
-            ),
-            (
-                "fulfilled",
-                &[
-                    ("Can you send the packing slip?", false),
-                    ("Here's the packing slip number PS-614.", true),
+                group: false,
+                reminders: &[Reply],
+                closures: 1,
+            },
+            Case {
+                name: "partial fulfillment",
+                checks: &[
+                    &[("Can you send the packing slip?", false)],
+                    &[("The packing slip number is PS-614.", true)],
                 ],
-                1,
-                1,
-            ),
+                group: false,
+                reminders: &[Reply],
+                closures: 0,
+            },
+            Case {
+                name: "repeated question",
+                checks: &[
+                    &[("Can you confirm tomorrow's opening time?", false)],
+                    &[("Following up, what time do you open tomorrow?", false)],
+                ],
+                group: false,
+                reminders: &[Reply],
+                closures: 0,
+            },
+            Case {
+                name: "explicit cancellation",
+                checks: &[&[
+                    ("Can you reserve a table for four?", false),
+                    ("Never mind, I booked it myself.", false),
+                ]],
+                group: false,
+                reminders: &[],
+                closures: 0,
+            },
+        ];
+        let mut providers = 0;
+        let mut mismatches = Vec::new();
+        // These cases were written after the first run passed, to check the
+        // adjustment against new examples as well as the cases that drove it.
+        let new_cases = [
+            Case {
+                name: "Spanish delivery",
+                checks: &[&[("¿Me puedes confirmar la dirección de entrega?", false)]],
+                group: false,
+                reminders: &[Reply],
+                closures: 0,
+            },
+            Case {
+                name: "personal pickup",
+                checks: &[&[("Are you picking up the kids at 5 or should I?", false)]],
+                group: false,
+                reminders: &[Reply],
+                closures: 0,
+            },
+            Case {
+                name: "quoted price",
+                checks: &[&[("Does the $24.50 price include shipping?", false)]],
+                group: false,
+                reminders: &[Reply],
+                closures: 0,
+            },
+            Case {
+                name: "simple greeting",
+                checks: &[&[("Good morning! Hope you're doing well.", false)]],
+                group: false,
+                reminders: &[],
+                closures: 0,
+            },
+            Case {
+                name: "informal shorthand",
+                checks: &[&[("lmk if the 2pm appointment still works", false)]],
+                group: false,
+                reminders: &[Reply],
+                closures: 0,
+            },
+            Case {
+                name: "contact commitment",
+                checks: &[&[("I'll email you the signed estimate tomorrow.", false)]],
+                group: false,
+                reminders: &[Waiting],
+                closures: 0,
+            },
+            Case {
+                name: "two text turns answered",
+                checks: &[&[
+                    ("How many boxes do you need?", false),
+                    ("Six boxes, please.", true),
+                ]],
+                group: false,
+                reminders: &[],
+                closures: 0,
+            },
+            Case {
+                name: "candidate closure is acknowledgement",
+                checks: &[
+                    &[(
+                        "Can you confirm whether the courier collected the returns?",
+                        false,
+                    )],
+                    &[("Thanks for following up.", true)],
+                ],
+                group: false,
+                reminders: &[Reply],
+                closures: 0,
+            },
+            Case {
+                name: "late cancellation",
+                checks: &[
+                    &[("Can you check the tracking link again?", false)],
+                    &[("Never mind, I found the package myself.", false)],
+                ],
+                group: false,
+                reminders: &[Reply],
+                closures: 1,
+            },
+            Case {
+                name: "separate quote and appointment",
+                checks: &[
+                    &[("Can you accept the updated quote?", false)],
+                    &[("What time is the service appointment?", false)],
+                ],
+                group: false,
+                reminders: &[Reply, Reply],
+                closures: 0,
+            },
         ];
         for (provider, variable) in [
             (Provider::Openai, "WHATRUST_ATTENTION_OPENAI_KEY"),
             (Provider::Gemini, "WHATRUST_ATTENTION_GEMINI_KEY"),
             (Provider::Jev, "WHATRUST_ATTENTION_JEV_KEY"),
         ] {
-            let key = std::env::var(variable)
-                .unwrap_or_else(|_| panic!("Set {variable} to run the comparison"));
-            let mut totals = (0, 0, 0, 0, 0, 0);
-            for (name, turns, expected, expected_closures) in cases {
+            let Ok(key) = std::env::var(variable) else {
+                continue;
+            };
+            if key.trim().is_empty() {
+                continue;
+            }
+            providers += 1;
+            let mut tokens = 0;
+            let mut requests = 0;
+            for case in cases.iter().chain(&new_cases) {
                 let mut chat = Chat::default();
-                for (index, (text, business)) in turns.iter().enumerate() {
-                    let turn = index as u64 + 1;
-                    let mut m = message(turn, text);
-                    m.from_me = *business;
-                    merge_message(&mut chat, m, turn * 1000);
+                let mut turn = 0;
+                for turns in case.checks {
+                    for &(text, outgoing) in *turns {
+                        turn += 1;
+                        let mut m = message(turn, text);
+                        m.from_me = outgoing;
+                        if case.group {
+                            m.message.chat_id = Some("123@g.us".into());
+                        }
+                        merge_message(&mut chat, m, turn * 1000);
+                    }
                     let (batch, request) = model::pack(&chat, provider);
                     let request = request.unwrap().unwrap();
                     let result = tauri::async_runtime::block_on(request.execute(&key));
                     assert!(
                         result.failure.is_none() && !result.answers.is_empty(),
-                        "{provider:?} {name}: {:?}",
+                        "{provider:?} {}: {:?}",
+                        case.name,
                         result.failure
                     );
+                    let supporting: Vec<_> = result
+                        .answers
+                        .iter()
+                        .filter(|(question, _)| !question.starts_with("work_"))
+                        .map(|(question, answer)| (question, &answer.choice, answer.probability))
+                        .collect();
+                    if !supporting.is_empty() {
+                        println!(
+                            "{} {}: links/closure {supporting:?}",
+                            provider.model(),
+                            case.name
+                        );
+                    }
                     model::apply(&mut chat, &batch, &result.answers, provider, turn * 1000)
                         .unwrap();
                     chat.checked = batch.through;
-                    totals.5 += result.input_tokens.unwrap_or(request.upper_input_tokens());
+                    requests += 1;
+                    tokens += result.input_tokens.unwrap_or(request.upper_input_tokens());
                 }
-                let surfaced = chat
+                let mut reminders: Vec<_> = chat
                     .items
                     .iter()
-                    .filter(|item| item.state == Status::Open)
+                    .filter(|i| i.state == Status::Open)
+                    .map(|i| i.kind)
+                    .collect();
+                reminders.sort();
+                let mut expected = case.reminders.to_vec();
+                expected.sort();
+                let reviews = chat
+                    .items
+                    .iter()
+                    .filter(|i| i.state == Status::Review)
                     .count();
-                let proposed = chat.items.iter().filter(|item| item.review_close).count();
-                totals.0 += surfaced.min(*expected);
-                totals.1 += surfaced;
-                totals.2 += expected;
-                totals.3 += proposed.saturating_sub(*expected_closures);
-                totals.4 += proposed;
-                println!("{} {name}: surfaced {surfaced}/{expected}, proposed closure {proposed}/{expected_closures}", provider.model());
+                let closures = chat.items.iter().filter(|i| i.review_close).count();
+                let decisions: Vec<_> = chat
+                    .decisions
+                    .iter()
+                    .map(|d| (d.choice.as_deref(), d.probability, d.outcome))
+                    .collect();
+                println!("{} {}: open {reminders:?}, review {reviews}, close {closures}, decisions {decisions:?}", provider.model(), case.name);
+                if reminders != expected || reviews != 0 || closures != case.closures {
+                    mismatches.push((provider, case.name));
+                }
             }
             println!(
-                "{}: actionable {}/{}, recall {}/{}, wrong closure proposals {}/{}, input tokens {}",
-                provider.model(), totals.0, totals.1, totals.0, totals.2, totals.3, totals.4, totals.5
+                "{}: {} conversations, {requests} requests, {tokens} input tokens",
+                provider.model(),
+                cases.len() + new_cases.len()
             );
         }
+        assert!(
+            providers > 0,
+            "Set at least one WHATRUST_ATTENTION_*_KEY in the test process"
+        );
+        assert!(mismatches.is_empty(), "Unexpected results: {mismatches:?}");
     }
 }

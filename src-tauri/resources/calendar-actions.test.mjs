@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
-const page = vm.createContext({ location: { origin: "https://web.whatsapp.com" }, window: {} });
+// The supplied message timestamp and the parser must share the same Date constructor.
+const page = vm.createContext({ location: { origin: "https://web.whatsapp.com" }, window: {}, Date });
 for (const script of ["calendar-chrono.js", "calendar-actions.js"]) {
   vm.runInContext(readFileSync(new URL(script, import.meta.url), "utf8"), page);
 }

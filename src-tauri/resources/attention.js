@@ -51,12 +51,28 @@
       && (item.kind !== "waiting" || (item.due_at && item.due_at <= now));
   }
 
+  function needsReview(item) {
+    return item.state === "review" || (item.state === "open" && (item.muted || item.review_close));
+  }
+
+  function groupByMessage(items) {
+    const groups = new Map();
+    for (const item of items) {
+      const source = item.message;
+      const id = source?.msg_id || source?.msg_token;
+      const key = source?.chat_id && id ? JSON.stringify([source.chat_id, id]) : item.id;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    }
+    return groups;
+  }
+
   function badge() {
     if (!snapshot || root.__whatrustLocked) return { count: 0, overdue: false };
     const now = Date.now();
     const visible = snapshot.items.filter(item => item.actionable ?? (showInInbox(item, now)
       && (item.manual || (snapshot.enabled && snapshot.awake))));
-    return { count: visible.length, overdue: visible.some(item => item.due_at && item.due_at < now) };
+    return { count: groupByMessage(visible).size, overdue: visible.some(item => item.due_at && item.due_at < now) };
   }
 
   function applyState(value) {
@@ -149,12 +165,15 @@
     .attention .due{color:#b9543c;font-weight:650}
     .attention .empty{padding:16px 0;color:var(--dim)}
     .attention label{display:grid;gap:4px}
+    .attention .check-search{margin-bottom:10px}
     .attention form{margin:2px 0 0}
     .attention form input,.attention form select{width:100%}
     .attention .error{color:#b9543c;font-weight:600}
     .attention details{padding:0 12px 8px}
     .attention details summary{cursor:pointer;font-size:12px;color:var(--dim)}
     .attention details .actions{margin-top:6px}
+    .attention .suggestions{padding:0}
+    .attention .suggestion{margin-top:8px;padding-top:8px;border-top:1px solid var(--line);display:grid;gap:8px}
   `;
 
   function detailTime(item) {
@@ -171,10 +190,11 @@
   }
 
   function mount(slot, options) {
-    let section = "inbox";
+    let section = "review";
     let editor = null;
     let fingerprint = "";
     let active = true;
+    const expandedMessages = new Set();
     const style = el("style", CSS);
     const frame = el("div", null, "attention");
     const head = el("header");
@@ -421,15 +441,26 @@
       loadMatches();
     }
 
-    function card(item) {
-      const box = el("article");
+    function appendSource(box, row, item) {
+      const source = item.message;
+      if (source?.snippet) box.append(el("blockquote", source.snippet));
+      else if (source) box.append(el("p", L("O trecho original não está disponível.", "The original excerpt is unavailable."), "muted"));
+      if (!source?.chat_id) return;
+      const unavailable = item.unavailable || !(source.msg_id || source.msg_token) || source.kind === "revoked";
+      row.append(button(unavailable ? L("Abrir conversa", "Open chat") : L("Abrir mensagem", "Open message"), () => {
+        if (unavailable) options.openChat(source.chat_id);
+        else options.openMessage(source);
+      }));
+    }
+
+    function card(item, showSource = true) {
+      const box = showSource ? el("article") : el("div", null, "suggestion");
       box.setAttribute("data-attention-id", item.id);
       const time = detailTime(item);
       box.append(el("p", kindLabel(item.kind) + (time ? " · " + time : ""), time && item.due_at < Date.now() ? "muted due" : "muted"));
       box.append(el("h3", item.title || kindLabel(item.kind)));
-      if (item.message?.snippet) box.append(el("blockquote", item.message.snippet));
-      else if (item.message) box.append(el("p", L("O trecho original não está disponível.", "The original excerpt is unavailable."), "muted"));
       const row = el("div", null, "actions");
+      if (showSource) appendSource(box, row, item);
       const doAction = (label, name, className, pressed) => {
         const node = button(label, () => {
           node.disabled = true;
@@ -438,14 +469,6 @@
         if (pressed !== undefined) node.setAttribute("aria-pressed", String(pressed));
         row.append(node);
       };
-      if (item.message?.chat_id) {
-        const source = item.message.msg_id || item.message.msg_token;
-        const unavailable = item.unavailable || !source || item.message.kind === "revoked";
-        row.append(button(unavailable ? L("Abrir conversa", "Open chat") : L("Abrir mensagem", "Open message"), () => {
-          if (unavailable) options.openChat(item.message.chat_id);
-          else options.openMessage(item.message);
-        }));
-      }
       if (item.state === "moved") {
         if (item.moved_id) row.append(button(L("Abrir destino", "Open destination"), () => options.openDestination(item.moved_id, item.moved_kind)));
         row.append(button(L("Desfazer", "Undo"), () => undo(item.id)));
@@ -461,6 +484,8 @@
           }
           doAction(L("Já resolvido", "Already handled"), "already_handled", "primary");
           doAction(L("Manter aberto", "Keep open"), "keep_open");
+        } else if (item.state === "review" && !item.muted && !item.unavailable) {
+          doAction(L("Manter como lembrete", "Keep as reminder"), "keep_open");
         }
         row.append(button(L("Mover para Tarefas", "Move to To-Do"), () => editMove(box, item, true), "primary"));
         row.append(button(L("Mover para acompanhamento", "Move to Follow-up"), () => editMove(box, item, false)));
@@ -488,6 +513,95 @@
       return box;
     }
 
+    function messageCard(key, items) {
+      if (items.length === 1) return card(items[0]);
+      const box = el("article");
+      const row = el("div", null, "actions");
+      const source = items.find(item => item.message?.snippet && !item.unavailable) || items[0];
+      appendSource(box, row, source);
+      if (row.childElementCount) box.append(row);
+      const suggestions = el("details", null, "suggestions");
+      suggestions.open = expandedMessages.has(key);
+      suggestions.addEventListener("toggle", () => {
+        if (suggestions.open) expandedMessages.add(key);
+        else expandedMessages.delete(key);
+      });
+      suggestions.append(el("summary", L("Ver sugestões", "See suggestions")));
+      for (const item of items) suggestions.append(card(item, false));
+      box.append(suggestions);
+      return box;
+    }
+
+    let checkSearch = "";
+
+    function renderChecks(decisions) {
+      if (!decisions.length) {
+        body.append(el("p", L("Ainda não há verificações recentes registradas.", "No recent checks recorded yet."), "empty"));
+        return;
+      }
+      const label = el("label", L("Buscar por conversa ou mensagem", "Search by chat or message"), "check-search");
+      const search = el("input");
+      search.type = "search";
+      search.value = checkSearch;
+      label.append(search);
+      const results = el("div");
+      body.append(label, results);
+      const outcomes = {
+        no_usable_text: L("Sem texto disponível para verificar.", "There was no usable text to check."),
+        no_decision: L("O modelo não retornou uma decisão utilizável.", "The model returned no usable decision."),
+        no_followup: L("Nenhum lembrete foi criado.", "No reminder was created."),
+        already_resolved: L("Uma mensagem posterior respondeu ou cancelou o pedido.", "A later message answered or canceled the request."),
+        low_confidence: L("Confiança insuficiente para criar um lembrete.", "Confidence was too low to create a reminder."),
+        existing_reminder: L("Já existe um lembrete para esta mensagem ou tarefa.", "This message or task already has a reminder."),
+        question_for_review: L("Enviado à Revisão porque pode haver uma pergunta sem resposta.", "Sent to Review because the question may be unanswered."),
+        review: L("Enviado à Revisão porque a decisão foi incerta.", "Sent to Review because the decision was uncertain."),
+        reminder: L("Marcado como precisando de atenção.", "Flagged as needing attention."),
+        waiting: L("Aguardando outra pessoa.", "Waiting on the other person."),
+        delayed: L("Lembrete adiado.", "The reminder was delayed."),
+        muted: L("Silenciado pela sua regra para este tipo de lembrete.", "Muted by your rule for this type of reminder."),
+      };
+      const choices = {
+        reply: L("Resposta necessária", "Reply needed"),
+        action: L("Ação necessária", "Action needed"),
+        waiting: L("Aguardando outra pessoa", "Waiting on them"),
+        answered: L("Já respondida", "Already answered"),
+        no_reply_needed: L("Resposta desnecessária", "No reply needed"),
+        none: L("Nenhuma pendência", "No outstanding work"),
+        unclear: L("Indefinido", "Unclear"),
+        renew: L("Tarefa retomada", "Work resumed"),
+      };
+      const providers = { openai: "OpenAI Luna", gemini: "Gemini Decision", jev: "TypeSafe Jev" };
+      function renderResults() {
+        const query = checkSearch.trim().toLocaleLowerCase();
+        const entries = [];
+        for (const decision of decisions) {
+          const source = decision.message;
+          const title = source?.chat_name || L("Conversa", "Chat");
+          if (query && ![title, source?.sender, decision.passage].some(value => value?.toLocaleLowerCase().includes(query))) continue;
+          const entry = el("article");
+          entry.append(el("h3", title));
+          if (decision.passage) entry.append(el("blockquote", decision.passage));
+          const outcome = outcomes[decision.outcome];
+          if (outcome) entry.append(el("p", outcome));
+          const detail = [decision.choice && providers[decision.provider], choices[decision.choice],
+            Number.isFinite(decision.probability) && Math.round(decision.probability * 100) + "%", dateLabel(decision.checked_at)];
+          entry.append(el("p", detail.filter(Boolean).join(" · "), "muted"));
+          if (source?.chat_id && (source.msg_id || source.msg_token)) {
+            const actions = el("div", null, "actions");
+            actions.append(button(L("Abrir mensagem", "Open message"), () => options.openMessage(source)));
+            entry.append(actions);
+          }
+          entries.push(entry);
+        }
+        results.replaceChildren(...(entries.length ? entries : [el("p", L("Nenhuma verificação encontrada.", "No matching checks."), "empty")]));
+      }
+      search.addEventListener("input", () => {
+        checkSearch = search.value;
+        renderResults();
+      });
+      renderResults();
+    }
+
     function render() {
       if (!active || root.__whatrustLocked) return;
       const state = snapshot;
@@ -500,11 +614,14 @@
       renderStatus();
       renderScope();
       nav.replaceChildren();
+      const reviewCount = groupByMessage(activeItems.filter(needsReview)).size;
+      const reviewLabel = L("Revisão", "Review");
       const views = [
+        ["review", reviewCount ? reviewLabel + " (" + reviewCount + ")" : reviewLabel],
         ["inbox", L("Caixa de entrada", "Inbox")],
         ["waiting", L("Esperando", "Waiting")],
-        ["review", L("Revisão", "Review")],
         ["history", L("Histórico", "History")],
+        ["decisions", L("Verificações", "Checks")],
         ["rules", L("Preferências", "Preferences")],
       ];
       for (const [key, text] of views) {
@@ -521,6 +638,11 @@
       }
       body.replaceChildren();
       if (!state) return;
+      if (section === "decisions") {
+        renderChecks(state.decisions || []);
+        body.scrollTop = previousPosition;
+        return;
+      }
       if (section === "rules") {
         const rules = state.rules || [];
         if (!rules.length) body.append(el("p", L("Nenhuma regra de silêncio.", "No mute rules."), "empty"));
@@ -542,7 +664,7 @@
       const visible = activeItems.filter(item => {
         if (section === "history") return ["done", "dismissed", "moved"].includes(item.state);
         if (item.state !== "open" && item.state !== "review") return false;
-        if (section === "review") return item.state === "review" || item.muted || item.review_close;
+        if (section === "review") return needsReview(item);
         if (section === "waiting") return item.state === "open" && !item.muted && !showInInbox(item, now)
           && (item.kind === "waiting" || item.snooze_until > now);
         return showInInbox(item, now) && (item.actionable !== false || !state.awake);
@@ -563,7 +685,8 @@
         return (b.message?.msg_epoch || 0) - (a.message?.msg_epoch || 0);
       });
       const groups = new Map();
-      for (const item of visible) {
+      for (const [messageKey, items] of groupByMessage(visible)) {
+        const item = items[0];
         const key = item.message?.chat_id || "";
         if (!groups.has(key)) {
           const group = el("section");
@@ -571,7 +694,7 @@
           body.append(group);
           groups.set(key, group);
         }
-        groups.get(key).append(card(item));
+        groups.get(key).append(messageCard(messageKey, items));
       }
       body.scrollTop = previousPosition;
     }
