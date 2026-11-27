@@ -1,7 +1,7 @@
 # Installers
 
 The macOS file is an unsigned Apple Silicon disk image,
-`whatRust_0.6.16_aarch64.dmg`. Open it, drag whatRust into Applications, and
+`whatRust_0.7.0_aarch64.dmg`. Open it, drag whatRust into Applications, and
 clear the quarantine flag once with
 `xattr -dr com.apple.quarantine /Applications/whatRust.app`.
 
