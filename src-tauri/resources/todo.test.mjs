@@ -210,6 +210,43 @@ railStack.parentNode.removeChild(railStack);
 for (let attempt = 0; attempt < 10; attempt++) mountTestRail();
 assert(railDoc.getElementById("__whatrust_todo_fallback").style.bottom === "12px", "without the scheduler the To-Do fallback returns to its original position");
 
+const nativeRail = new RailEl("header");
+nativeRail.getBoundingClientRect = () => box(64, 600);
+const nativeUpper = new RailEl("div");
+const museWrap = new RailEl("div");
+const nativeButton = (label, top) => {
+  const button = new RailEl("button");
+  button.setAttribute("aria-label", label);
+  button.getBoundingClientRect = () => box(40, 40, 12, top);
+  return button;
+};
+const muse = nativeButton("Muse", 210);
+const media = nativeButton("Media", 504);
+museWrap.append(muse);
+nativeUpper.append(nativeButton("Chats", 12), nativeButton("Status", 98), nativeButton("Communities", 146), museWrap);
+nativeRail.append(nativeUpper, media, nativeButton("You", 552));
+railBody.appendChild(nativeRail);
+const originalCreate = railDoc.createElement;
+railDoc.createElement = (tag) => {
+  const node = originalCreate(tag);
+  node.getBoundingClientRect = () => node.getAttribute("data-wr-todo-stack") === "native"
+    ? box(64, 180, 0, 250 + (parseInt(node.style.marginTop, 10) || 0)) : null;
+  return node;
+};
+railContext.__wrAttention = { badge: () => ({ count: 0, overdue: false }) };
+railContext.__wrMountScheduledPage = () => {};
+mountTestRail();
+const nativeStack = museWrap.nextElementSibling;
+assert(muse.parentNode === museWrap && museWrap.parentNode === nativeUpper && media.parentNode === nativeRail,
+  "navigation mount leaves Muse and the other WhatsApp buttons in their native wrappers");
+assert(nativeStack?.children.map(node => node.id).join() === "__whatrust_todo_tab,__whatrust_todo_replies,__whatrust_attention_tab,__whatrust_todo_scheduled",
+  "all four whatRust shortcuts have their own group below the native controls");
+assert(nativeStack?.style.marginTop === "12px" && nativeStack?.style.maxHeight === "236px",
+  "the shortcut group clears Muse's painted bounds and stays above Media");
+mountTestRail();
+assert(museWrap.nextElementSibling === nativeStack && nativeStack.style.marginTop === "12px",
+  "remounting keeps the same group and clearance");
+
 const star = { item_ids: ["a", "b"], state: "pending" };
 const openStars = [{ id: "a", done: false }, { id: "b", done: false }];
 assert(api.starAction(star, openStars) === "inspect", "new tracked messages check for a personal star");

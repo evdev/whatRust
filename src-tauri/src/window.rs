@@ -284,13 +284,15 @@ macro_rules! account_webview {
             ))
             .initialization_script(include_str!("../resources/device.js"))
             .initialization_script(format!("window.__WR_MESSAGE_ACTIONS={};", crate::settings::load($app).message_actions))
-            .initialization_script(if cfg!(any(windows, target_os = "macos")) { include_str!("../resources/calendar-chrono.js") } else { "" })
-            .initialization_script(if cfg!(any(windows, target_os = "macos")) { include_str!("../resources/calendar-actions.js") } else { "" })
+            .initialization_script(format!("window.__wrCalendarLinks={};", cfg!(any(windows, target_os = "macos"))))
+            .initialization_script(include_str!("../resources/calendar-chrono.js"))
+            .initialization_script(include_str!("../resources/calendar-actions.js"))
             .initialization_script(include_str!("../resources/message-actions.js"))
             // To-do list: a button under the account switcher, message capture,
             // and reminders. todo.js reads the account from this webview's label
             // via the todo_* commands.
             .initialization_script(include_str!("../resources/todo.js"))
+            .initialization_script(include_str!("../resources/attention.js"))
             .initialization_script(include_str!("../resources/transcript-search.js"))
             .initialization_script(include_str!("../resources/autoreply.js"))
             .initialization_script(include_str!("../resources/schedule-recorder.js"))

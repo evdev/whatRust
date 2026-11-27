@@ -57,7 +57,7 @@ button:hover:not(:disabled) { filter: brightness(.95); }
 .app-header span { font-size: 12px; color: var(--dim); }
 .app-header button { color: var(--dim); font-weight: 400; }
 .settings-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
-.settings-nav { flex: 0 0 300px; padding: 12px 8px; display: flex; flex-direction: column; gap: 4px; border-right: 1px solid var(--border); }
+.settings-nav { flex: 0 0 300px; padding: 12px 8px; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; border-right: 1px solid var(--border); }
 .settings-nav a { display: flex; align-items: center; gap: 24px; padding: 16px 20px; border-radius:8px; min-height:56px; font-size: 15px; color: inherit; text-decoration: none; }
 .settings-nav a:hover, .settings-nav a[aria-current=page] { background: var(--hover); }
 .settings-nav svg { width: 22px; height: 22px; stroke: var(--dim); fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
@@ -135,7 +135,7 @@ select option { background: var(--bg); color: var(--fg); }
 @media(max-width:900px) { .settings-nav { flex-basis: 220px; } .settings-nav a { padding: 16px 20px; gap: 18px; } .prefs { padding: 26px 24px; } }
 @media(max-width:640px) {
   .settings-layout { flex-direction: column; }
-  .settings-nav { flex: none; flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--border); padding: 8px; }
+  .settings-nav { flex: none; flex-direction: row; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--border); padding: 8px; }
   .settings-nav a { font-size: 14px; white-space: nowrap; padding: 10px 14px; min-height: 40px; gap: 8px; }
   .prefs { padding: 24px 18px; } .app-header { padding: 14px 18px; min-height: 66px; } .row { gap: 12px; flex-wrap: wrap; } .row-text { flex-basis: 160px; }
   .account-row { gap: 10px; } .account-avatar { width: 40px; height: 40px; flex-basis: 40px; } .group-title { font-size: 19px; }

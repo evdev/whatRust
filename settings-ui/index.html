@@ -10,7 +10,7 @@
   </head>
   <body>
     <header class="app-header"><div><strong>Settings</strong><span>whatRust</span></div><button id="back-to-chat" type="button" class="secondary back-button" aria-label="Back to WhatsApp" title="Back to WhatsApp" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5 M12 5l-7 7 7 7"/></svg><span>Back to WhatsApp</span></button></header>
-    <div class="settings-layout"><nav class="settings-nav" aria-label="Settings"><a href="#sec-contas">Accounts</a><a href="#sec-notificacoes">Notifications</a><a href="#sec-voz">Transcription</a><a href="#sec-standin">Stand-in</a><a href="#sec-aparencia">Appearance</a><a href="#sec-seguranca">Security</a><a href="#sec-sistema">Startup</a><a href="#sec-rede">Network</a><!-- Fork: hide self-update. Upstream releases would replace this build. <a href="#sec-atualizacoes">Updates</a> --><a href="#sec-atalhos">Shortcuts</a><a href="#sec-diagnostico">Diagnostics</a></nav>
+    <div class="settings-layout"><nav class="settings-nav" aria-label="Settings"><a href="#sec-contas">Accounts</a><a href="#sec-notificacoes">Notifications</a><a href="#sec-voz">Transcription</a><a href="#sec-attention">Needs Attention</a><a href="#sec-standin">Stand-in</a><a href="#sec-aparencia">Appearance</a><a href="#sec-seguranca">Security</a><a href="#sec-sistema">Startup</a><a href="#sec-rede">Network</a><!-- Fork: hide self-update. Upstream releases would replace this build. <a href="#sec-atualizacoes">Updates</a> --><a href="#sec-atalhos">Shortcuts</a><a href="#sec-diagnostico">Diagnostics</a></nav>
     <!-- Local preferences use familiar WhatsApp rows: titled
          groups of boxed-list rows, a title + subtitle on the left and the control
          on the right. Element ids are what main.js uses; keep them stable. -->
@@ -179,6 +179,12 @@
         <p class="group-note">Chat summaries are saved on this computer.</p>
       </section>
 
+      <section class="group" id="sec-attention">
+        <h2 class="group-title">Needs Attention</h2>
+        <div id="attention-settings"></div>
+        <p id="attention-settings-status" class="group-note" role="status" aria-live="polite"></p>
+      </section>
+
       <section class="group" id="sec-standin">
         <h2 class="group-title">Stand-in</h2>
         <div class="boxed-list">
@@ -189,7 +195,8 @@
           </label>
           <label class="row">
             <span class="row-text"><span class="row-title">How to reply</span>
-              <span class="row-subtitle" id="standin_backend_hint">A saved provider key or a program you have already signed in to.</span></span>
+              <span class="row-subtitle" id="standin_backend_hint">A saved provider key or a program you have already signed in to.</span>
+              <span class="row-subtitle" id="standin_api_key_state" hidden></span></span>
             <select id="standin_backend" aria-label="How to reply">
               <option value="api">OpenRouter API</option>
               <option value="claude_cli">Claude Code</option>
@@ -582,6 +589,7 @@ Set asked_if_ai to true only when the contact asks whether you are an AI, a bot,
     <script src="hotkey.js"></script>
     <script src="mention-alert.js"></script>
     <script src="main.js"></script>
+    <script src="attention-settings.js"></script>
     <script src="panel.js"></script>
     <script src="notes.js"></script>
     <!-- <script src="updates.js"></script> -->

@@ -36,3 +36,43 @@ commands.allow = [
 identifier = "allow-lock-commands"
 description = "Read lock status and unlock or reset from the bundled lock screen."
 commands.allow = ["get_lock_status", "unlock_password", "unlock_biometric", "reset_app_lock"]
+
+[[permission]]
+identifier = "allow-attention-list"
+description = "Allow the attention_list command."
+commands.allow = ["attention_list"]
+
+[[permission]]
+identifier = "allow-attention-ingest"
+description = "Allow the attention_ingest command."
+commands.allow = ["attention_ingest"]
+
+[[permission]]
+identifier = "allow-attention-action"
+description = "Allow the attention_action command."
+commands.allow = ["attention_action"]
+
+[[permission]]
+identifier = "allow-attention-matches"
+description = "Allow the attention_matches command."
+commands.allow = ["attention_matches"]
+
+[[permission]]
+identifier = "allow-attention-move"
+description = "Allow the attention_move command."
+commands.allow = ["attention_move"]
+
+[[permission]]
+identifier = "allow-attention-settings"
+description = "Allow the attention_settings command."
+commands.allow = ["attention_settings"]
+
+[[permission]]
+identifier = "allow-attention-configure"
+description = "Allow the attention_configure command."
+commands.allow = ["attention_configure"]
+
+[[permission]]
+identifier = "allow-attention-set-key"
+description = "Allow the attention_set_key command."
+commands.allow = ["attention_set_key"]

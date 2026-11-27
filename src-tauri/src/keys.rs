@@ -1,7 +1,8 @@
-//! API keys for translation and summaries.
+//! API keys for AI providers.
 //!
 //! The key lives in a `0600` file under the app config directory. It never
-//! goes in `settings.json` and never reaches the WhatsApp webview. The macOS
+//! goes in `settings.json` and never reaches the WhatsApp webview. Settings
+//! can display a masked prefix. The macOS
 //! login keychain is not used: this app is ad-hoc signed, so that keychain
 //! cannot remember an "Always Allow" choice and asks for the login password
 //! on every launch. WebKit's own master key is the same problem and is
@@ -12,10 +13,21 @@ use tauri::AppHandle;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tauri::Manager;
 
+static WRITE_GATE: Mutex<()> = Mutex::new(());
+
 pub fn known_provider(provider: &str) -> bool {
-    matches!(provider, "openrouter" | "gemini" | "anthropic")
+    matches!(
+        provider,
+        "openrouter"
+            | "gemini"
+            | "anthropic"
+            | "attention_openai"
+            | "attention_gemini"
+            | "attention_jev"
+    )
 }
 
 /// Empty `key` deletes the stored secret. Rejects control characters and
@@ -45,6 +57,21 @@ pub fn has_key(app: &AppHandle, provider: &str) -> bool {
     matches!(get_key(app, provider), Ok(Some(key)) if !key.is_empty())
 }
 
+pub(crate) fn preview_for(app: &AppHandle, provider: &str) -> Option<String> {
+    masked_preview(&get_key(app, provider).ok()??)
+}
+
+pub(crate) fn masked_preview(key: &str) -> Option<String> {
+    if key.is_empty() {
+        return None;
+    }
+    match key.char_indices().nth(10) {
+        Some((end, _)) => Some(format!("{}••••", &key[..end])),
+        // A short key must still have a hidden portion.
+        None => Some("••••".into()),
+    }
+}
+
 fn store_secret(app: &AppHandle, provider: &str, key: &str) -> Result<(), &'static str> {
     write_store(&store_path(app)?, provider, key)
 }
@@ -69,7 +96,12 @@ struct Store {
 }
 
 pub(crate) fn write_store(path: &Path, provider: &str, key: &str) -> Result<(), &'static str> {
-    let mut store = read_all(path);
+    let _gate = crate::lock::guard(&WRITE_GATE);
+    let mut store = match crate::jsonfile::read(path) {
+        crate::jsonfile::Loaded::Ok(store) | crate::jsonfile::Loaded::Recovered(store) => store,
+        crate::jsonfile::Loaded::Missing => Store::default(),
+        crate::jsonfile::Loaded::Corrupt => return Err("keychain"),
+    };
     if key.is_empty() {
         store.keys.remove(provider);
     } else {
@@ -155,5 +187,54 @@ mod tests {
         assert!(!known_provider(""));
         assert!(!known_provider("openai"));
         assert!(known_provider("anthropic"));
+    }
+
+    #[test]
+    fn previews_mask_the_rest_and_keep_short_keys_hidden() {
+        assert_eq!(masked_preview(""), None);
+        assert_eq!(masked_preview("0123456789").as_deref(), Some("••••"));
+        assert_eq!(
+            masked_preview("0123456789private").as_deref(),
+            Some("0123456789••••"),
+        );
+        assert_eq!(
+            masked_preview("αβγδεζηθικλμ").as_deref(),
+            Some("αβγδεζηθικ••••"),
+        );
+    }
+
+    #[test]
+    fn a_save_preserves_an_unreadable_key_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ai-keys.json");
+        std::fs::write(&path, b"{ damaged").unwrap();
+        assert_eq!(
+            write_store(&path, "gemini", "synthetic-key"),
+            Err("keychain")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ damaged");
+    }
+
+    #[test]
+    fn replacing_a_provider_key_preserves_the_other_provider_and_feature_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ai-keys.json");
+        let entries = [
+            ("openrouter", "example-or-current"),
+            ("gemini", "example-gemini-text"),
+            ("attention_gemini", "example-gemini-decisions"),
+            ("attention_openai", "example-openai-before"),
+        ];
+        for (provider, key) in entries {
+            write_store(&path, provider, key).unwrap();
+        }
+        write_store(&path, "attention_openai", "example-openai-after").unwrap();
+        for (provider, key) in entries.into_iter().take(3) {
+            assert_eq!(read_store(&path, provider).unwrap().as_deref(), Some(key));
+        }
+        assert_eq!(
+            read_store(&path, "attention_openai").unwrap().as_deref(),
+            Some("example-openai-after"),
+        );
     }
 }

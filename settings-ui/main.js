@@ -18,6 +18,7 @@ let standinShown = "api";
 let standinCli = false;
 let personaLoaded = false;
 let keyFlags = { openrouter: false, gemini: false, anthropic: false };
+let keyPreviews = {};
 // Successful model lists, keyed by provider. Null means not loaded yet.
 let modelCatalogs = { gemini: null, anthropic: null };
 // Model lists for each program, keyed by backend plus the program path that
@@ -410,6 +411,7 @@ async function load() {
     gemini: !!s.ai_key_gemini,
     anthropic: !!s.ai_key_anthropic,
   };
+  keyPreviews = s.ai_key_previews || {};
   refreshKeyState();
   syncModelControls();
   menuBarIconChecked = document.getElementById("menu_bar_icon").checked;
@@ -854,12 +856,14 @@ window.addEventListener("DOMContentLoaded", () => {
     const provider = document.getElementById("ai_provider").value;
     shownCli = TEXT_CLI_PROVIDERS.includes(provider) ? provider : "";
     if (!shownCli) shownProvider = provider;
+    document.getElementById("ai_key").value = "";
     refreshKeyState();
     syncModelControls();
     showStandinFields();
   });
   document.getElementById("standin_backend").addEventListener("change", () => {
     commitStandinFields();
+    clearAgentDraft(standinShown);
     syncStandinAvailability();
     showStandinFields();
     if (shownCli && standinShown === "api" && usesModelList(shownProvider)) loadModelCatalog(shownProvider);
@@ -970,6 +974,7 @@ function showStandinFields() {
   const providerOption = document.querySelector(`#ai_provider option[value="${shownProvider}"]`);
   backendSelect.querySelector('option[value="api"]').textContent = providerOption.textContent;
   const backend = backendSelect.value;
+  document.getElementById("standin_api_key_state").hidden = backend !== "api";
   const cli = STANDIN_CLI_PROVIDERS.includes(backend);
   const agent = backend === "hermes" || backend === "grok_bot";
   const listed = cli || (!agent && usesModelList(shownProvider));
@@ -1019,23 +1024,34 @@ async function refreshAgentStatus() {
     document.getElementById("standin_hermes_key_state").textContent = status.hermes_key_stored
       ? "A key is stored on this computer, not in settings and not in WhatsApp."
       : "Stored on this computer, not in settings and not in WhatsApp.";
+    document.getElementById("standin_hermes_key").placeholder = status.hermes_key_preview || "";
+    document.getElementById("standin_grok_key").placeholder = status.grok_key_preview || "";
   } catch (e) {}
+}
+
+function clearAgentDraft(kind) {
+  if (kind === "hermes") document.getElementById("standin_hermes_key").value = "";
+  if (kind === "grok_bot") {
+    document.getElementById("standin_grok_key").value = "";
+    document.getElementById("standin_grok_url").value = "";
+  }
 }
 
 async function saveStandinSecret(kind, remove) {
   const note = document.getElementById("note");
+  const keyInput = document.getElementById(kind === "hermes" ? "standin_hermes_key" : "standin_grok_key");
+  const urlInput = kind === "grok_bot" ? document.getElementById("standin_grok_url") : null;
+  const keyDraft = keyInput.value;
+  const urlDraft = urlInput?.value || "";
   try {
     await invoke("set_standin_secret", {
       kind,
-      secret: remove ? "" : (kind === "hermes"
-        ? document.getElementById("standin_hermes_key").value
-        : document.getElementById("standin_grok_key").value),
-      url: kind === "grok_bot" ? document.getElementById("standin_grok_url").value : "",
+      secret: remove ? "" : keyDraft,
+      url: urlDraft,
       remove,
     });
-    document.getElementById("standin_hermes_key").value = "";
-    document.getElementById("standin_grok_key").value = "";
-    document.getElementById("standin_grok_url").value = "";
+    if (keyInput.value === keyDraft) keyInput.value = "";
+    if (urlInput && urlInput.value === urlDraft) urlInput.value = "";
     await refreshAgentStatus();
     note.textContent = "Saved ✓";
     setTimeout(() => (note.textContent = ""), 1500);
@@ -1292,6 +1308,24 @@ function setKeyStatus(text, tone) {
 function refreshKeyState() {
   const on = keyFlags[shownProvider];
   setKeyStatus(on ? "Key saved on this computer." : "No key saved.", "ok");
+  paintKeyPreviews();
+}
+
+function paintKeyPreviews() {
+  const preview = keyPreviews[shownProvider];
+  document.getElementById("ai_key").placeholder = preview || "";
+  document.getElementById("standin_api_key_state").textContent = preview
+    ? t("Using the key saved in Transcription ({0})", [preview])
+    : t("Save an API key in Transcription.");
+}
+
+function updateSavedKey(provider, report) {
+  keyFlags[provider] = !!report.stored;
+  keyPreviews[provider] = report.key_preview || null;
+  paintKeyPreviews();
+  window.dispatchEvent(new CustomEvent("whatrust-ai-key-changed", {
+    detail: { provider, preview: keyPreviews[provider] },
+  }));
 }
 
 async function offerFluidVoiceIfMissing() {
@@ -1359,12 +1393,12 @@ async function saveAiKey() {
   setKeyStatus("Checking the key…", "ok");
   try {
     const result = await invoke("set_ai_key", { provider, key, remove: false });
-    keyFlags[provider] = !!result.stored;
-    if (result.accepted) input.value = "";
+    updateSavedKey(provider, result);
     if (result.accepted && usesModelList(provider)) {
       modelCatalogs[provider] = Array.isArray(result.models) ? result.models : [];
     }
     if (document.getElementById("ai_provider").value === provider) {
+      if (result.accepted && input.value.trim() === key) input.value = "";
       setKeyStatus(result.detail || "", result.tone || "ok");
       syncModelControls();
     }
@@ -1392,10 +1426,12 @@ async function removeAiKey() {
   })) return;
   try {
     const result = await invoke("set_ai_key", { provider, key: "", remove: true });
-    keyFlags[provider] = false;
+    updateSavedKey(provider, result);
     modelCatalogs[provider] = null;
-    setKeyStatus(result.detail || "This provider's key was removed from this computer.", "ok");
-    if (provider === shownProvider) syncModelControls();
+    if (document.getElementById("ai_provider").value === provider) {
+      setKeyStatus(result.detail || "This provider's key was removed from this computer.", "ok");
+      syncModelControls();
+    }
   } catch (e) {
     setKeyStatus(errorText(e), "bad");
   }

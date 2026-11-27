@@ -29,7 +29,7 @@
     return time;
   }
 
-  function matches(value, lang, sent) {
+  function matches(value, lang, sent, sourceInstant) {
     var found = [];
     var needsSent = false;
     // Discard ordinary conversation before initializing the parser.
@@ -54,7 +54,7 @@
         var offset = zoneMatch[1] ? (zoneMatch[1] === "-" ? -1 : 1) * (+zoneMatch[2] * 60 + +zoneMatch[3]) : 0;
         if (!result.start.isCertain("timezoneOffset") || result.start.get("timezoneOffset") !== offset) continue;
         if (sent && (!explicitYear || isRelative)) {
-          var inZone = parse(phrase, { instant: sent, timezone: offset }, { forwardDate: true });
+          var inZone = parse(phrase, { instant: sourceInstant || sent, timezone: offset }, { forwardDate: true });
           if (inZone.length !== 1 || inZone[0].text !== phrase) continue;
           result = inZone[0];
         }
@@ -239,5 +239,56 @@
     title.focus();
   }
 
-  window.__wrCalendarActions = { matches: matches, sentDate: sentDate, review: review, dismiss: dismiss };
+  function zonedWallTime(value, zone) {
+    var wall = Date.parse(value + "Z");
+    if (!Number.isFinite(wall)) return null;
+    if (/^[+-]/.test(zone)) return Date.parse(value + zone);
+    try {
+      var formatter = new Intl.DateTimeFormat("en-CA", {
+        timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"
+      });
+      function asWall(at) {
+        var parts = {};
+        formatter.formatToParts(at).forEach(function (p) { parts[p.type] = p.value; });
+        return Date.parse(parts.year + "-" + parts.month + "-" + parts.day + "T" +
+          parts.hour + ":" + parts.minute + ":" + parts.second + "Z");
+      }
+      var offsets = new Set([-86400000, 0, 86400000].map(function (offset) {
+        return asWall(wall + offset) - (wall + offset);
+      }));
+      var candidates = Array.from(offsets).map(function (offset) { return wall - offset; })
+        .filter(function (at) { return wall === asWall(at); });
+      return candidates.length === 1 ? candidates[0] : null;
+    } catch (_) { return null; }
+  }
+
+  window.__wrAttentionDate = function (value, at, zone) {
+    if (!Number.isFinite(at) || at <= 0) return null;
+    var sent = new Date(at);
+    // Anchor relative phrases to the date of the source turn in the account's
+    // zone. Chrono reads a local reference date for unzoned phrases.
+    try {
+      var parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+      }).formatToParts(sent).reduce(function (value, part) {
+        value[part.type] = part.value;
+        return value;
+      }, {});
+      var localWall = new Date(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute);
+      var times = new Set();
+      ["en", "pt"].forEach(function (lang) {
+        matches(value, lang, localWall, sent).found.forEach(function (match) {
+          var draft = match.draft;
+          var due = zonedWallTime(draft.start, draft.zone === "local" ? zone : draft.zone);
+          if (Number.isFinite(due)) times.add(due);
+        });
+      });
+      return times.size === 1 ? times.values().next().value : null;
+    } catch (_) { return null; }
+  };
+  if (window.__wrCalendarLinks !== false) {
+    window.__wrCalendarActions = { matches: matches, sentDate: sentDate, review: review, dismiss: dismiss };
+  }
 })();

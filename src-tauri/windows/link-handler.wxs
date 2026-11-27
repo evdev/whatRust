@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="WhatsAppLinkHandler" Guid="*">
+        <RegistryValue Root="HKCU" Key="Software\Classes\whatRust.WhatsApp" Type="string" Value="whatRust WhatsApp link" KeyPath="yes" />
+        <RegistryValue Root="HKCU" Key="Software\Classes\whatRust.WhatsApp" Name="URL Protocol" Type="string" Value="" />
+        <RegistryValue Root="HKCU" Key="Software\Classes\whatRust.WhatsApp\DefaultIcon" Type="string" Value="&quot;[INSTALLDIR]whatrust.exe&quot;,0" />
+        <RegistryValue Root="HKCU" Key="Software\Classes\whatRust.WhatsApp\shell\open\command" Type="string" Value="&quot;[INSTALLDIR]whatrust.exe&quot; &quot;%1&quot;" />
+        <RegistryValue Root="HKCU" Key="Software\whatRust\Capabilities" Name="ApplicationName" Type="string" Value="whatRust" />
+        <RegistryValue Root="HKCU" Key="Software\whatRust\Capabilities" Name="ApplicationDescription" Type="string" Value="Open WhatsApp chats and group invitations in whatRust" />
+        <RegistryValue Root="HKCU" Key="Software\whatRust\Capabilities\URLAssociations" Name="whatsapp" Type="string" Value="whatRust.WhatsApp" />
+        <RegistryValue Root="HKCU" Key="Software\RegisteredApplications" Name="whatRust" Type="string" Value="Software\whatRust\Capabilities" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

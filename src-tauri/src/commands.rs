@@ -215,6 +215,8 @@ pub struct SettingsView {
     pub ai_key_openrouter: bool,
     pub ai_key_gemini: bool,
     pub ai_key_anthropic: bool,
+    /// Masked prefixes for the bundled Settings page.
+    pub ai_key_previews: std::collections::BTreeMap<&'static str, String>,
     /// False inside Flatpak, where the host CLIs are not visible.
     pub standin_cli_available: bool,
 }
@@ -229,6 +231,16 @@ pub fn get_settings(window: tauri::Webview, app: tauri::AppHandle) -> Result<Set
         ai_key_openrouter: crate::keys::has_key(&app, "openrouter"),
         ai_key_gemini: crate::keys::has_key(&app, "gemini"),
         ai_key_anthropic: crate::keys::has_key(&app, "anthropic"),
+        ai_key_previews: if window.label() == "settings" {
+            ["openrouter", "gemini", "anthropic"]
+                .into_iter()
+                .filter_map(|provider| {
+                    crate::keys::preview_for(&app, provider).map(|preview| (provider, preview))
+                })
+                .collect()
+        } else {
+            Default::default()
+        },
         settings: crate::settings::load(&app),
         platform: std::env::consts::OS,
         geniex_transcription: cfg!(all(windows, target_arch = "aarch64")),
@@ -1174,6 +1186,7 @@ pub async fn remove_account(
     }
     accounts::delete_profile(&app, &removed.id);
     crate::todo::delete_account(&app, &removed.id);
+    crate::attention::delete_account(&app, &removed.id);
     crate::voice::delete_account(&app, &removed.id);
     crate::mention::drop_account(&app, &removed_label);
     crate::mention_sound::clear_account(&app, &removed.id);
@@ -1739,6 +1752,7 @@ mod tests {
             include_str!("../resources/bridge.js"),
             include_str!("../resources/integration.js"),
             include_str!("../resources/todo.js"),
+            include_str!("../resources/attention.js"),
             include_str!("../resources/transcript-search.js"),
             include_str!("../resources/voice.js"),
             include_str!("../resources/summary.js"),
@@ -1754,6 +1768,7 @@ mod tests {
             include_str!("commands.rs"),
             include_str!("integration.rs"),
             include_str!("todo.rs"),
+            include_str!("attention.rs"),
             include_str!("voice.rs"),
             include_str!("chat_summary.rs"),
             include_str!("mention.rs"),

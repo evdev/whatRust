@@ -1,7 +1,6 @@
 /* Per-account to-do list inside web.whatsapp.com.
  *
- * The button sits under the account switcher, in the same rail cell, so it
- * cannot land beside it. Messages are captured from the message menu, and a
+ * The button sits with the other whatRust shortcuts. Messages are captured from the message menu, and a
  * summarized voice card can add that summary as a task while keeping the
  * link to the voice message. The actions sit to the left or right of that
  * menu, never on its rows and never inside it: writing into the menu, or
@@ -173,7 +172,7 @@
   }
 
   function isMetaButton(el) {
-    if (/meta\s*ai/.test(buttonLabel(el))) return true;
+    if (/^(?:muse|meta\s*(?:ai|ia)|ia da meta)$/.test(buttonLabel(el))) return true;
     var hit = false;
     walk(el, function (node) {
       var icon = (attr(node, "data-icon") + " " + attr(node, "data-testid")).toLowerCase();
@@ -191,26 +190,25 @@
     return null;
   }
 
-  // The account switcher is the anchor. Meta AI is only a fallback, because a
-  // to-do button beside that icon looks like part of WhatsApp's own rail.
+  // Prefer the whatRust switcher where it is present. On WhatsApp's rail
+  // insert after the last upper control and keep the bottom controls separate.
   function chooseAnchor(doc) {
     if (!doc || typeof doc.getElementById !== "function") return null;
     var switcher = doc.getElementById("__whatrust_accounts");
     if (switcher && switcher.parentNode) return { el: switcher, mode: "switcher" };
     var rail = findRail(doc);
     if (rail) {
-      var meta = findMetaButton(rail);
-      if (meta && meta.parentNode) return { el: meta, mode: "rail" };
       var buttons = collectButtons(rail);
       // The profile and settings controls may be at the bottom of the rail.
       // Prefer the last navigation control in its upper half instead.
       var railBox = rectOf(rail);
       var upper = buttons.filter(function (button) {
         var r = rectOf(button);
-        return r && r.width > 0 && r.height > 0 && r.top < railBox.top + railBox.height / 2;
+        return (r && r.width > 0 && r.height > 0 && r.top < railBox.top + railBox.height / 2)
+          || isMetaButton(button);
       });
       var last = upper.length ? upper[upper.length - 1] : null;
-      if (last && last.parentNode) return { el: last, mode: "rail" };
+      if (last && last.parentNode) return { el: last, mode: "rail", rail: rail };
     }
     var controls = doc.getElementById("__whatrust_controls");
     if (controls && controls.parentNode) return { el: controls, mode: "switcher" };
@@ -967,6 +965,10 @@
   var tabButton;
   var tabBadge;
   var replyButton;
+  var attentionButton;
+  var attentionBadge;
+  var attentionFallback;
+  var attentionFallbackBadge;
   var scheduleButton;
   var scheduleFallback;
   var scheduleReady = false;
@@ -1033,10 +1035,6 @@
 
   function lookupExtract(extract) {
     return lookupMapped(openTracked, extract);
-  }
-
-  function lookupWatch(extract) {
-    return lookupMapped(watchOpen, extract);
   }
 
   function defaultTitle(kind) {
@@ -1246,6 +1244,7 @@
 
   var ICON_TAB = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="m4 6 1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></svg>';
   var ICON_REPLY = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6h12a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H10l-3 3v-3H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"/></svg>';
+  var ICON_ATTENTION = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16l2 9v5H2v-5zm-2 9h6l2 3h4l2-3h6M12 8v3m0 2h.01"/></svg>';
   var ICON_SEARCH = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>';
   var ICON_CLOSE = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>';
 
@@ -1293,6 +1292,34 @@
       event.preventDefault();
       event.stopPropagation();
       togglePage("replies");
+    });
+    return button;
+  }
+
+  function attentionLabel() {
+    return L("Precisa de atenção", "Needs Attention");
+  }
+
+  function buildAttentionTab(isFallback) {
+    var button = el("button");
+    button.type = "button";
+    button.id = isFallback ? "__whatrust_attention_fallback" : "__whatrust_attention_tab";
+    var badge = el("span");
+    if (isFallback) {
+      button.dataset.mode = "fallback";
+      button.style.cssText = "position:fixed;left:12px;bottom:144px;z-index:100000;display:none;gap:6px;align-items:center;padding:8px 12px;border:0;border-radius:999px;background:#f0bd68;color:#30230b;font:13px system-ui;cursor:pointer";
+      button.appendChild(el("span", attentionLabel()));
+      attentionFallbackBadge = badge;
+    } else {
+      button.innerHTML = ICON_ATTENTION;
+      attentionBadge = badge;
+    }
+    badge.style.cssText = (isFallback ? "" : "position:absolute;top:-2px;right:-2px;") + "min-width:16px;height:16px;padding:0 4px;border-radius:8px;text-align:center;font:10px/16px system-ui;display:none";
+    button.appendChild(badge);
+    button.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!root.__whatrustLocked && root.__wrAttention) togglePage("attention");
     });
     return button;
   }
@@ -1406,6 +1433,14 @@
     if (replyFallbackLabel) replyFallbackLabel.textContent = L("Respostas", "Replies");
     paintRailButton(tabButton, L("Lista de tarefas", "To-Do") + (text ? " (" + text + ")" : ""), open && page === "todo");
     paintRailButton(replyButton, L("Respostas", "Replies") + (replyText ? " (" + replyText + ")" : ""), open && page === "replies", "#53bdeb");
+    var attention = root.__wrAttention;
+    if (attention) {
+      var count = paintCount([attentionBadge, attentionFallbackBadge], attention.badge(), dark, "#f0bd68");
+      var label = attentionLabel() + (count ? " (" + count + ")" : "");
+      paintRailButton(attentionButton, label, open && page === "attention", "#f0bd68");
+      paintRailButton(attentionFallback, label, open && page === "attention", "#30230b");
+      if (attentionFallback) attentionFallback.firstChild.textContent = attentionLabel();
+    }
     paintScheduleTab();
   }
 
@@ -1466,7 +1501,7 @@
 
   function ownMeta(node) {
     var label = (attr(node, "aria-label") + " " + attr(node, "title")).toLowerCase();
-    if (/meta\s*ai|meta\s*ia|ia da meta/.test(label)) return true;
+    if (/meta\s*ai|meta\s*ia|ia da meta|\bmuse\b/.test(label)) return true;
     var icon = (attr(node, "data-icon") + " " + attr(node, "data-testid")).toLowerCase();
     if (icon.indexOf("meta") !== -1) return true;
     if (tagIs(node, "button") || attr(node, "role") === "button") {
@@ -1582,6 +1617,7 @@
     nudgeOffMeta(host);
     nudgeOffMeta(fallback);
     nudgeOffMeta(replyFallback);
+    nudgeOffMeta(attentionFallback);
     nudgeOffMeta(scheduleFallback);
     if (!document.querySelectorAll) return;
     var notes = document.querySelectorAll("[data-whatrust='downloads']");
@@ -1627,8 +1663,69 @@
     dropOtherStacks(stack);
   }
 
+  function mountNativeRail(choice, buttons) {
+    var rail = choice.rail;
+    var anchor = choice.el;
+    // Some native controls have a private wrapper for their positioning or
+    // animation. Insert after that wrapper and leave its children in place.
+    while (anchor.parentElement && anchor.parentElement !== rail
+        && collectButtons(anchor.parentElement).length === 1) {
+      anchor = anchor.parentElement;
+    }
+    var stack = buttons[0].parentNode;
+    if (attr(stack, "data-wr-todo-stack") !== "native") {
+      stack = el("div");
+      stack.setAttribute("data-wr-todo-stack", "native");
+      stack.setAttribute("role", "group");
+    }
+    stack.setAttribute("aria-label", L("Atalhos do whatRust", "whatRust shortcuts"));
+    var direction = flexColumn(anchor.parentNode) ? "column" : "row";
+    if (stack.dataset.direction !== direction) {
+      stack.dataset.direction = direction;
+      stack.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:6px;box-sizing:border-box;"
+        + "width:100%;min-height:0;padding:4px 0;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin;"
+        + "flex:" + (direction === "column" ? "0 1 auto" : "0 0 100%");
+    }
+    if (anchor.nextElementSibling !== stack) anchor.parentNode.insertBefore(stack, anchor.nextSibling);
+    var index = 0;
+    for (var i = 0; i < buttons.length; i++) {
+      var button = buttons[i];
+      if (!button) continue;
+      button.style.margin = "0";
+      if (stack.children[index] !== button) stack.insertBefore(button, stack.children[index] || null);
+      index++;
+    }
+    dropOtherStacks(stack);
+
+    var box = rectOf(stack);
+    var railBox = rectOf(rail);
+    railMeta = null;
+    if (!box || !railBox) return;
+    var naturalTop = box.top - (parseFloat(stack.style.marginTop) || 0);
+    var top = naturalTop;
+    var bottom = railBox.bottom;
+    var afterAnchor = false;
+    collectButtons(rail).forEach(function (nativeButton) {
+      var hasArtwork = isMetaButton(nativeButton);
+      var art = hasArtwork ? metaVisual(nativeButton, stack) : paintedRect(nativeButton);
+      if (art && alignedTo(art, box, 36)) {
+        if (hasArtwork) railMeta = art;
+        if (afterAnchor) bottom = Math.min(bottom, art.top);
+        else top = Math.max(top, art.bottom + 8);
+      }
+      if (nativeButton === choice.el) afterAnchor = true;
+    });
+    stack.style.marginTop = Math.max(0, Math.ceil(top - naturalTop)) + "px";
+    stack.style.maxHeight = Math.max(0, Math.floor(bottom - top - 6)) + "px";
+  }
+
   function mountRail() {
     ensureFallback();
+    var attentionReady = !!root.__wrAttention;
+    if (attentionReady && !attentionFallback) {
+      attentionFallback = buildAttentionTab(true);
+      document.documentElement.appendChild(attentionFallback);
+    }
     scheduleReady = typeof root.__wrMountScheduledPage === "function";
     if (!scheduleReady && open && page === "scheduled") closePanel();
     if (!scheduleReady && scheduleButton && scheduleButton.parentNode) scheduleButton.parentNode.removeChild(scheduleButton);
@@ -1646,12 +1743,17 @@
       railMeta = null;
       if (tabButton && tabButton.parentNode) tabButton.parentNode.removeChild(tabButton);
       if (replyButton && replyButton.parentNode) replyButton.parentNode.removeChild(replyButton);
+      if (attentionButton && attentionButton.parentNode) attentionButton.parentNode.removeChild(attentionButton);
       if (scheduleButton && scheduleButton.parentNode) scheduleButton.parentNode.removeChild(scheduleButton);
       fallback.style.display = "inline-flex";
       fallback.style.bottom = scheduleReady ? "100px" : "12px";
       if (replyFallback) replyFallback.style.display = "inline-flex";
+      if (attentionFallback) {
+        attentionFallback.style.bottom = scheduleReady ? "144px" : "100px";
+        attentionFallback.style.display = attentionReady ? "inline-flex" : "none";
+      }
       scheduleFallback.style.display = scheduleReady ? "inline-flex" : "none";
-      paintScheduleTab();
+      paintBadge();
       if (!railWarned) {
         railWarned = true;
         crumb("todo: nav-rail fallback");
@@ -1661,20 +1763,28 @@
     railWarned = false;
     fallback.style.display = "none";
     if (replyFallback) replyFallback.style.display = "none";
+    if (attentionFallback) attentionFallback.style.display = "none";
     scheduleFallback.style.display = "none";
     if (!tabButton || !tabButton.isConnected) tabButton = buildTab();
     if (!replyButton || !replyButton.isConnected) replyButton = buildReplyTab();
     styleTab(tabButton, choice.mode);
     styleTab(replyButton, choice.mode);
+    if (attentionReady) {
+      if (!attentionButton || !attentionButton.isConnected) attentionButton = buildAttentionTab(false);
+      styleTab(attentionButton, choice.mode);
+    }
     if (scheduleReady) {
       if (!scheduleButton || !scheduleButton.isConnected) scheduleButton = buildScheduleTab();
       styleTab(scheduleButton, choice.mode);
     }
-    if (choice.el.id === "__whatrust_accounts" || choice.mode === "rail") stackUnder([tabButton, replyButton, scheduleReady ? scheduleButton : null], choice.el);
+    var buttons = [tabButton, replyButton, attentionReady ? attentionButton : null, scheduleReady ? scheduleButton : null];
+    if (choice.mode === "rail") mountNativeRail(choice, buttons);
+    else if (choice.el.id === "__whatrust_accounts") stackUnder(buttons, choice.el);
     else {
       insertAfter(choice.el, tabButton);
       insertAfter(tabButton, replyButton);
-      if (scheduleReady) insertAfter(replyButton, scheduleButton);
+      if (attentionReady) insertAfter(replyButton, attentionButton);
+      if (scheduleReady) insertAfter(attentionReady ? attentionButton : replyButton, scheduleButton);
     }
     nudgeRailOverlays();
     paintBadge();
@@ -1944,7 +2054,7 @@
     }
     stopMenuWatch();
     buildPanel();
-    todoWrap.hidden = page === "scheduled";
+    todoWrap.hidden = page === "scheduled" || page === "attention";
     scheduleSlot.hidden = !todoWrap.hidden;
     open = true;
     host.style.display = "block";
@@ -1953,6 +2063,24 @@
     if (page === "scheduled") {
       hideCapture();
       scheduleCleanup = root.__wrMountScheduledPage(scheduleSlot, scheduleOptions, closePanel);
+      return;
+    }
+    if (page === "attention") {
+      hideCapture();
+      scheduleCleanup = root.__wrAttention.mount(scheduleSlot, {
+        close: closePanel,
+        openMessage: function (message) { jumpTo({ message: message }); },
+        openChat: function (chat) { closePanel(); openBottom(chat); },
+        openDestination: function (id, kind) {
+          refresh().then(function () {
+            if (kind === "task") openPanel(id);
+            else openReplies(id);
+          });
+        },
+        activeChat: function () { return { id: openChatId(), name: activeChatName() }; },
+        toast: showToast,
+      });
+      paintBadge();
       return;
     }
     if (id) {
@@ -2137,7 +2265,7 @@
   }
 
   function renderList() {
-    if (!listEl || page === "scheduled") return;
+    if (!listEl || page === "scheduled" || page === "attention") return;
     renderChrome();
     if (page === "replies") {
       renderReplyList();
@@ -3242,6 +3370,7 @@
     if (action === "owe") return L("Devo uma resposta", "I owe a reply");
     if (action === "reply-open") return L("Abrir em Respostas", "Open in Replies");
     if (action === "reply-clear") return L("Marcar como resolvida", "Mark cleared");
+    if (action === "attention") return L("Marcar para atenção", "Mark as needs attention");
     return L("Concluir tarefa", "Mark done");
   }
 
@@ -3250,26 +3379,54 @@
     if (action === "remind") path = '<circle cx="12" cy="13" r="7"/><path d="M12 10v3.5l2 1.5M9 5.5a4 4 0 0 1 6 0"/>';
     else if (action === "waiting" || action === "reply-open") path = '<path d="M6 6h12a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H10l-3 3v-3H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"/>' + (action === "waiting" ? '<circle cx="9" cy="12" r=".9" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r=".9" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r=".9" fill="currentColor" stroke="none"/>' : "");
     else if (action === "owe") path = '<path d="M8 7h9a3 3 0 0 1 0 6H8"/><path d="M11 10 8 13l3 3"/>';
+    else if (action === "attention") path = '<path d="M4 5h16l2 9v5H2v-5zm-2 9h6l2 3h4l2-3h6M12 8v3m0 2h.01"/>';
     else if (action === "complete" || action === "reply-clear") path = '<circle cx="12" cy="12" r="8"/><path d="m8.5 12.2 2.4 2.4 4.6-5"/>';
     else if (action === "open") path = '<path d="M9 7h10M9 12h10M9 17h10"/><path d="m4 7 1 1 2-2M4 12l1 1 2-2M4 17l1 1 2-2"/>';
     return '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + path + "</svg>";
   }
 
-  function pendingMenuActions(extract) {
+  function matchingMenuItems(extract) {
+    var chat = normalizeChatId(extract && extract.chat_id);
+    return items.filter(function (item) {
+      return !item.done && sameMessage(item, extract)
+        && (!chat || !item.message || !item.message.chat_id || sameWatchChat(item.message.chat_id, chat, lookupChat));
+    });
+  }
+
+  function pendingMenuActions(extract, matches) {
     var mine = !!(extract && extract.from_me);
-    return menuActions(lookupExtract(extract), lookupWatch(extract), mine);
+    var tasks = matches.filter(isTask);
+    var watches = matches.filter(isWatch);
+    var actions = menuActions(tasks[0], watches[0], mine);
+    if (root.__wrAttention) actions.push("attention");
+    return actions.flatMap(function (action) {
+      var isTaskAction = action === "open" || action === "complete";
+      var isWatchAction = action === "reply-open" || action === "reply-clear";
+      if (!isTaskAction && !isWatchAction) return [{ action: action, label: menuLabel(action) }];
+      var choices = isTaskAction ? tasks : watches;
+      return choices.map(function (item) {
+        var label = menuLabel(action);
+        if (choices.length > 1) label += " · " + item.title;
+        return { action: action, label: label, item: item };
+      });
+    });
   }
 
   function runMenuAction(action, extract, existing) {
     if (action === "add") withExtract(extract, function (next) { addExtract(next, null); });
     else if (action === "remind") withExtract(extract, function (next) { addExtract(next, { remind: true }); });
     else if (action === "waiting" || action === "owe") withExtract(extract, function (next) { addWatch(next, action); });
+    else if (action === "attention" && root.__wrAttention) withExtract(extract, function (next) {
+      next.chat_id = chatForMark(next.chat_id, "") || null;
+      next.chat_name = next.chat_name || activeChatName();
+      root.__wrAttention.mark(next).then(function () {
+        showPage("attention", "");
+      }).catch(saveFailed);
+    });
     else if (action === "reply-open") {
-      var openWatch = lookupWatch(extract);
-      if (openWatch) openReplies(openWatch.id);
+      if (existing) openReplies(existing.id);
     } else if (action === "reply-clear") {
-      var clearable = lookupWatch(extract);
-      if (clearable) clearWatch(clearable, true);
+      if (existing) clearWatch(existing, true);
     } else if (action === "open" && existing) openPanel(existing.id);
     else if (action === "complete" && existing) completeItem(existing.id);
     stopMenuWatch();
@@ -3295,14 +3452,16 @@
       event.preventDefault();
       event.stopPropagation();
     }
-    runMenuAction(action, extract, lookupExtract(extract));
+    var id = node.getAttribute("data-wr-todo-item-id");
+    var existing = id ? matchingMenuItems(extract).find(function (item) { return item.id === id; }) : null;
+    runMenuAction(action, extract, existing);
   }
 
   function ensureCompanion() {
     if (companion) return;
     companion = el("div");
     companion.id = "__whatrust_todo_menu";
-    companion.style.cssText = "position:fixed;z-index:100003;display:none;box-sizing:border-box;overflow:hidden;box-shadow:0 12px 28px #0006;margin:0;border:0;padding:0";
+    companion.style.cssText = "position:fixed;z-index:100003;display:none;box-sizing:border-box;overflow:auto;box-shadow:0 12px 28px #0006;margin:0;border:0;padding:0";
     document.documentElement.appendChild(companion);
   }
 
@@ -3318,16 +3477,17 @@
     companion.style.display = "none";
   }
 
-  function fillCompanion(existing, extract) {
+  function fillCompanion(matches, extract) {
     companion.replaceChildren();
-    pendingMenuActions(extract).forEach(function (action) {
+    pendingMenuActions(extract, matches).forEach(function (entry) {
       var button = el("button");
       button.type = "button";
       button.style.cssText = "display:flex;align-items:center;gap:10px;width:100%;text-align:start;padding:10px 14px;border:0;border-top:1px solid #8696a033;background:transparent;color:inherit;font:14px system-ui;cursor:pointer";
-      button.innerHTML = menuIcon(action);
-      button.appendChild(document.createTextNode(menuLabel(action)));
+      button.innerHTML = menuIcon(entry.action);
+      button.appendChild(document.createTextNode(entry.label));
       button.setAttribute("data-wr-todo-menu", "1");
-      button.setAttribute("data-wr-todo-action", action);
+      button.setAttribute("data-wr-todo-action", entry.action);
+      if (entry.item) button.setAttribute("data-wr-todo-item-id", entry.item.id);
       companion.appendChild(button);
     });
   }
@@ -3424,17 +3584,22 @@
 
   function showCompanion(menu, extract) {
     ensureCompanion();
-    var existing = lookupExtract(extract);
-    var watch = lookupWatch(extract);
-    var key = (existing ? "task:" + existing.id : "add") + ":" + (watch ? watch.id + ":" + watch.kind : "new") + ":" + (extract.msg_token || extract.msg_id || "");
+    var matches = matchingMenuItems(extract);
+    var key = menuKey(matches, extract);
     if (companionKey !== key) {
       companionKey = key;
-      fillCompanion(existing, extract);
+      fillCompanion(matches, extract);
     }
     var rect = rectOf(menu);
     if (!rect) return;
     moveCompanion(rect);
     paintCompanion(menu);
+  }
+
+  function menuKey(matches, extract) {
+    return JSON.stringify([extract.msg_token || extract.msg_id, matches.map(function (item) {
+      return [item.id, item.kind, item.title];
+    })]);
   }
 
   function paintCompanion(menu) {
@@ -3476,16 +3641,16 @@
     if (!pending) return;
     ensureCompanion();
     var extract = pending.extract;
-    var existing = lookupExtract(extract);
-    var watch = lookupWatch(extract);
-    var key = "point:" + (existing ? existing.id : "add") + ":" + (watch ? watch.id + ":" + watch.kind : "new") + ":" + (extract.msg_token || extract.msg_id || "");
+    var matches = matchingMenuItems(extract);
+    var key = "point:" + menuKey(matches, extract);
     if (companionKey !== key) {
       companionKey = key;
-      fillCompanion(existing, extract);
+      fillCompanion(matches, extract);
     }
     var viewW = root.innerWidth || 800;
     var viewH = root.innerHeight || 800;
     companion.style.width = "240px";
+    companion.style.maxHeight = Math.max(48, viewH - 16) + "px";
     presentCompanion();
     var height = companion.offsetHeight || 88;
     companion.style.left = Math.max(8, Math.min(pending.x, viewW - 248)) + "px";
@@ -3989,6 +4154,7 @@
     if (!rail || !rail.contains(event.target)) return;
     if (tabButton && tabButton.contains(event.target)) return;
     if (replyButton && replyButton.contains(event.target)) return;
+    if (attentionButton && attentionButton.contains(event.target)) return;
     if (scheduleButton && scheduleButton.contains(event.target)) return;
     if (scheduleFallback && scheduleFallback.contains(event.target)) return;
     closePanel();
@@ -4085,6 +4251,8 @@
   setInterval(paintBadge, 60_000);
   // schedule-ui announces its API after initializing, without needing a DOM mutation.
   root.addEventListener("whatrust-schedule-ready", syncScheduleAvailability);
+  root.addEventListener("whatrust-attention-ready", schedule);
+  root.addEventListener("whatrust-attention-update", paintBadge);
   // A reply can land without a fresh event the live rule will accept. Catch-up
   // is already limited to one fetch per chat a minute.
   setInterval(runCatchup, 60_000);

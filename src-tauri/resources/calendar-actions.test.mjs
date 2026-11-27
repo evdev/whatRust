@@ -40,6 +40,14 @@ for (const text of [
 }
 assert.equal(matches("sexta-feira das 15:00 às 16:00", "pt", sent).found.length, 0);
 
+const due = page.window.__wrAttentionDate;
+const sourceTime = Date.parse("2026-11-27T05:00:00Z");
+assert.equal(due("Tomorrow at 3 PM", sourceTime, "America/Denver"), Date.parse("2026-11-27T22:00:00Z"));
+assert.equal(due("amanhã às 15:00", sourceTime, "America/Denver"), Date.parse("2026-11-27T22:00:00Z"));
+assert.equal(due("by Friday", sourceTime, "America/Denver"), null);
+assert.equal(due("2026-11-01T01:30", sourceTime, "America/Denver"), null, "repeated wall time");
+assert.equal(due("2026-03-08T02:30", sourceTime, "America/Denver"), null, "skipped wall time");
+
 let id = "true_42@g.us_FIXTURE";
 page.window.WPP = { chat: { getMessageById: async (key) => {
   assert.equal(key, id);

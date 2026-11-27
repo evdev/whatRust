@@ -9,6 +9,8 @@
 use crate::i18n::{tr, trf};
 use crate::jsonfile::Loaded;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -165,6 +167,35 @@ pub struct TodoFile {
     pub items: Vec<TodoItem>,
     #[serde(default)]
     pub stars: Vec<TodoStar>,
+    // Keep receipts after completion or deletion. A recovered transfer must
+    // find the same destination even when it is no longer in the list.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    attention_receipts: BTreeMap<String, AttentionReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AttentionReceipt {
+    pub destination_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_fingerprint: Option<[u8; 32]>,
+    pub undone: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    undo_result: Option<AttentionUndo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct AttentionDestination {
+    pub id: String,
+    pub title: String,
+    pub kind: ItemKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AttentionUndo {
+    Kept,
+    Removed,
+    AlreadyAbsent,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -541,6 +572,97 @@ pub fn todo_add(
     finish(&app, &account_id, snapshot)
 }
 
+pub(crate) fn attention_destinations(
+    app: &AppHandle,
+    account_id: &str,
+    source: &TodoMessageRef,
+    kind: ItemKind,
+) -> Result<Vec<AttentionDestination>, String> {
+    let source = sanitize_message(source.clone()).map_err(EditError::message)?;
+    let state = app.state::<TodoState>();
+    let _gate = crate::lock::guard(&state.gate);
+    crate::lock::require_unlocked(app)?;
+    let file = read_file(&account_path(app, account_id)?);
+    Ok(file
+        .items
+        .iter()
+        .filter(|item| is_attention_destination(&file, item, &source, kind))
+        .map(|item| AttentionDestination {
+            id: item.id.clone(),
+            title: item.title.clone(),
+            kind: item.kind,
+        })
+        .collect())
+}
+
+pub(crate) fn attention_transfer_receipt(
+    app: &AppHandle,
+    account_id: &str,
+    operation_id: &str,
+) -> Result<Option<AttentionReceipt>, String> {
+    Ok(attention_transfer_receipts(app, account_id)?.remove(operation_id))
+}
+
+pub(crate) fn attention_transfer_receipts(
+    app: &AppHandle,
+    account_id: &str,
+) -> Result<BTreeMap<String, AttentionReceipt>, String> {
+    let state = app.state::<TodoState>();
+    let _gate = crate::lock::guard(&state.gate);
+    crate::lock::require_unlocked(app)?;
+    Ok(read_file(&account_path(app, account_id)?).attention_receipts)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attention_transfer(
+    app: &AppHandle,
+    account_id: &str,
+    operation_id: &str,
+    source: TodoMessageRef,
+    kind: ItemKind,
+    title: String,
+    due_at: Option<u64>,
+    remind_at: Option<u64>,
+    existing_id: Option<&str>,
+) -> Result<String, String> {
+    crate::lock::require_unlocked(app)?;
+    let draft = TodoDraft {
+        title: Some(title),
+        note: None,
+        priority: None,
+        due_at,
+        remind_at,
+        repeat: None,
+        message: Some(source),
+        kind: Some(kind),
+    };
+    let auto_star = crate::settings::load(app).auto_star_todos;
+    let (id, snapshot) = with_file(app, account_id, |file| {
+        if !crate::lock::is_unlocked(app) {
+            return Err(EditError::Invalid);
+        }
+        transfer_item(file, operation_id, draft, existing_id, auto_star, now_ms())
+    })?;
+    finish(app, account_id, snapshot)?;
+    Ok(id)
+}
+
+pub(crate) fn attention_transfer_undo(
+    app: &AppHandle,
+    account_id: &str,
+    operation_id: &str,
+) -> Result<AttentionUndo, String> {
+    crate::lock::require_unlocked(app)?;
+    let (result, snapshot) = with_file(app, account_id, |file| {
+        if !crate::lock::is_unlocked(app) {
+            return Err(EditError::Invalid);
+        }
+        undo_transfer(file, operation_id)
+    })?;
+    finish(app, account_id, snapshot)?;
+    Ok(result)
+}
+
 fn enroll_star(file: &mut TodoFile) {
     let Some(item) = file.items.last() else {
         return;
@@ -892,6 +1014,15 @@ fn snapshot_of(file: &TodoFile, now: u64, offset_minutes: i32) -> TodoSnapshot {
 }
 
 fn add_item(file: &mut TodoFile, draft: TodoDraft, now: u64) -> Result<(), EditError> {
+    save_item(file, draft, now, true)
+}
+
+fn save_item(
+    file: &mut TodoFile,
+    draft: TodoDraft,
+    now: u64,
+    merge_matching: bool,
+) -> Result<(), EditError> {
     let TodoDraft {
         title,
         note,
@@ -915,12 +1046,14 @@ fn add_item(file: &mut TodoFile, draft: TodoDraft, now: u64) -> Result<(), EditE
         checked_time(due_at)?
     };
     let remind_at = checked_time(remind_at)?;
-    if let Some(msg) = &message {
-        if let Some(existing) = file
-            .items
-            .iter_mut()
-            .find(|item| !item.done && item.kind.same_class(kind) && same_message(item, msg))
-        {
+    if let Some(msg) = message.as_ref().filter(|_| merge_matching) {
+        let receipts = &file.attention_receipts;
+        if let Some(existing) = file.items.iter_mut().find(|item| {
+            !item.done
+                && item.kind.same_class(kind)
+                && same_message(item, msg)
+                && !attention_owns_destination(receipts, &item.id)
+        }) {
             // A second "add" of the same message keeps the title the user gave
             // it. Only an untitled item takes the message's first line.
             // Marking the other reply kind switches the open watch.
@@ -1006,6 +1139,125 @@ fn add_item(file: &mut TodoFile, draft: TodoDraft, now: u64) -> Result<(), EditE
         kind,
     });
     Ok(())
+}
+
+fn attention_owns_destination(
+    receipts: &BTreeMap<String, AttentionReceipt>,
+    item_id: &str,
+) -> bool {
+    receipts.values().any(|receipt| {
+        !receipt.undone
+            && receipt.created_fingerprint.is_some()
+            && receipt.destination_id == item_id
+    })
+}
+
+fn is_attention_destination(
+    file: &TodoFile,
+    item: &TodoItem,
+    source: &TodoMessageRef,
+    kind: ItemKind,
+) -> bool {
+    if item.done || !item.kind.same_class(kind) || source.chat_id.is_none() {
+        return false;
+    }
+    let Some(message) = &item.message else {
+        return false;
+    };
+    // Older records can use a bare ID. Only fall back to the token when the
+    // chat matches and either side lacks the full message identity.
+    message.chat_id == source.chat_id
+        && (message.msg_id == source.msg_id
+            || ((!message.msg_id.contains('_') || !source.msg_id.contains('_'))
+                && message.msg_token == source.msg_token))
+        && !attention_owns_destination(&file.attention_receipts, &item.id)
+}
+
+fn item_fingerprint(item: &TodoItem) -> Result<[u8; 32], EditError> {
+    let bytes = serde_json::to_vec(item).map_err(|_| EditError::Invalid)?;
+    Ok(Sha256::digest(bytes).into())
+}
+
+fn transfer_item(
+    file: &mut TodoFile,
+    operation_id: &str,
+    draft: TodoDraft,
+    existing_id: Option<&str>,
+    auto_star: bool,
+    now: u64,
+) -> Result<String, EditError> {
+    if operation_id.len() != 32 || !operation_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(EditError::Invalid);
+    }
+    if let Some(receipt) = file.attention_receipts.get(operation_id) {
+        return if receipt.undone {
+            Err(EditError::Invalid)
+        } else {
+            Ok(receipt.destination_id.clone())
+        };
+    }
+    let kind = draft.kind.unwrap_or_default();
+    let source = sanitize_message(draft.message.clone().ok_or(EditError::Invalid)?)?;
+    if source.chat_id.is_none() {
+        return Err(EditError::Invalid);
+    }
+    let (destination_id, created_fingerprint) = if let Some(id) = existing_id {
+        let item = file
+            .items
+            .iter()
+            .find(|item| item.id == id && is_attention_destination(file, item, &source, kind))
+            .ok_or(EditError::Missing)?;
+        (item.id.clone(), None)
+    } else {
+        save_item(file, draft, now, false)?;
+        if auto_star {
+            enroll_star(file);
+        }
+        let item = file.items.last().ok_or(EditError::Missing)?;
+        (item.id.clone(), Some(item_fingerprint(item)?))
+    };
+    file.attention_receipts.insert(
+        operation_id.into(),
+        AttentionReceipt {
+            destination_id: destination_id.clone(),
+            created_fingerprint,
+            undone: false,
+            undo_result: None,
+        },
+    );
+    Ok(destination_id)
+}
+
+fn undo_transfer(file: &mut TodoFile, operation_id: &str) -> Result<AttentionUndo, EditError> {
+    let receipt = file
+        .attention_receipts
+        .get_mut(operation_id)
+        .ok_or(EditError::Missing)?;
+    if let Some(result) = receipt.undo_result {
+        return Ok(result);
+    }
+    let destination = file
+        .items
+        .iter()
+        .position(|item| item.id == receipt.destination_id);
+    let result = if let Some(index) = destination {
+        if let Some(fingerprint) = receipt.created_fingerprint {
+            if item_fingerprint(&file.items[index])? == fingerprint {
+                file.items.remove(index);
+                AttentionUndo::Removed
+            } else {
+                AttentionUndo::Kept
+            }
+        } else {
+            AttentionUndo::Kept
+        }
+    } else {
+        AttentionUndo::AlreadyAbsent
+    };
+    receipt.created_fingerprint = None;
+    receipt.undone = true;
+    receipt.undo_result = Some(result);
+    Ok(result)
 }
 
 fn update_item(file: &mut TodoFile, patch: TodoPatch) -> Result<(), EditError> {
@@ -1332,6 +1584,73 @@ mod tests {
     }
 
     #[test]
+    fn attention_transfer_reuses_receipt_and_keeps_distinct_items_on_one_message() {
+        let mut file = TodoFile::default();
+        let source = "false_15551212@c.us_3EB0AAAAAAAAAAAAAAAAAA";
+        let quote = "0123456789abcdef0123456789abcdef";
+        let invoice = "1123456789abcdef0123456789abcdef";
+        let now = 1_700_000_000_000;
+        let first =
+            transfer_item(&mut file, quote, draft_message(source), None, true, now).unwrap();
+        let mut file: TodoFile =
+            serde_json::from_slice(&serde_json::to_vec(&file).unwrap()).unwrap();
+        let retry =
+            transfer_item(&mut file, quote, draft_message(source), None, true, now).unwrap();
+        assert_eq!(first, retry);
+        let second =
+            transfer_item(&mut file, invoice, draft_message(source), None, true, now).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(file.items.len(), 2);
+        assert_eq!(file.stars[0].item_ids, [first.clone(), second.clone()]);
+        add_item(&mut file, draft_message(source), now).unwrap();
+        assert_eq!(file.items.len(), 3);
+
+        assert_eq!(undo_transfer(&mut file, quote), Ok(AttentionUndo::Removed));
+        assert_eq!(undo_transfer(&mut file, quote), Ok(AttentionUndo::Removed));
+        assert!(!file.items.iter().any(|item| item.id == first));
+        assert_eq!(
+            transfer_item(&mut file, quote, draft_message(source), None, true, now),
+            Err(EditError::Invalid)
+        );
+        // A receipt also wins if the user deleted the destination in To-Do.
+        file.items.retain(|item| item.id != second);
+        let retry =
+            transfer_item(&mut file, invoice, draft_message(source), None, true, now).unwrap();
+        assert_eq!(second, retry);
+        assert_eq!(file.items.len(), 1);
+        assert_eq!(
+            undo_transfer(&mut file, invoice),
+            Ok(AttentionUndo::AlreadyAbsent)
+        );
+    }
+
+    #[test]
+    fn attention_undo_preserves_edits_and_linking_preserves_reply_direction() {
+        let mut file = TodoFile::default();
+        let source = "false_15551212@c.us_3EB0AAAAAAAAAAAAAAAAAA";
+        let operation = "0123456789abcdef0123456789abcdef";
+        let link = "1123456789abcdef0123456789abcdef";
+        let now = 1_700_000_000_000;
+        let mut waiting = draft_message(source);
+        waiting.kind = Some(ItemKind::Waiting);
+        let id = transfer_item(&mut file, operation, waiting, None, false, now).unwrap();
+        find_mut(&mut file, &id).unwrap().title = "Keep my custom title".into();
+        assert_eq!(undo_transfer(&mut file, operation), Ok(AttentionUndo::Kept));
+        let mut owe = draft_message(source);
+        owe.kind = Some(ItemKind::Owe);
+        owe.remind_at = Some(now + DAY_MS);
+        let original = file.items[0].clone();
+        assert_eq!(
+            transfer_item(&mut file, link, owe, Some(&id), true, now),
+            Ok(id)
+        );
+        assert_eq!(file.items, [original.clone()]);
+        assert!(file.stars.is_empty());
+        assert_eq!(undo_transfer(&mut file, link), Ok(AttentionUndo::Kept));
+        assert_eq!(file.items, [original]);
+    }
+
+    #[test]
     fn star_enrollment_shares_message_and_survives_round_trip() {
         let mut file = TodoFile::default();
         let id = format!("false_15551212@c.us_{}", "A".repeat(22));
@@ -1523,7 +1842,7 @@ mod tests {
             &TodoFile {
                 next_seq: 2,
                 items: vec![item],
-                stars: vec![],
+                ..Default::default()
             },
             1_700_000_100_000,
             0,

@@ -18,6 +18,7 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv6Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
@@ -29,6 +30,7 @@ const GROK_CONTEXT_CAP: usize = 16 * 1024;
 const HERMES_PORT: u16 = 8642;
 const KEY_MIN: usize = 16;
 const KEY_MAX: usize = 512;
+static WRITE_GATE: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentError {
@@ -52,6 +54,14 @@ pub struct AgentStatus {
     pub grok_host: String,
     pub grok_ready: bool,
     pub hermes_key_stored: bool,
+}
+
+#[derive(Serialize)]
+pub struct AgentSettingsStatus {
+    #[serde(flatten)]
+    status: AgentStatus,
+    hermes_key_preview: Option<String>,
+    grok_key_preview: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,7 +259,19 @@ pub fn ready(app: &AppHandle, backend: &str, hermes_url: &str) -> Result<(), Age
 }
 
 pub fn status(app: &AppHandle) -> AgentStatus {
+    status_from_secrets(&load_secrets(app))
+}
+
+pub fn settings_status(app: &AppHandle) -> AgentSettingsStatus {
     let secrets = load_secrets(app);
+    AgentSettingsStatus {
+        status: status_from_secrets(&secrets),
+        hermes_key_preview: crate::keys::masked_preview(&secrets.hermes_key),
+        grok_key_preview: crate::keys::masked_preview(&secrets.grok_bot_key),
+    }
+}
+
+fn status_from_secrets(secrets: &Secrets) -> AgentStatus {
     let grok_host = grok_webhook(&secrets.grok_bot_url, &secrets.grok_bot_key)
         .as_deref()
         .and_then(host_of)
@@ -812,8 +834,15 @@ fn read_secrets(path: &Path) -> Secrets {
 }
 
 fn edit_secrets(app: &AppHandle, edit: impl FnOnce(&mut Secrets)) -> Result<(), &'static str> {
+    let _gate = crate::lock::guard(&WRITE_GATE);
     let path = secrets_path(app)?;
-    let mut secrets = read_secrets(&path);
+    let mut secrets = match crate::jsonfile::read(&path) {
+        crate::jsonfile::Loaded::Ok(secrets) | crate::jsonfile::Loaded::Recovered(secrets) => {
+            secrets
+        }
+        crate::jsonfile::Loaded::Missing => Secrets::default(),
+        crate::jsonfile::Loaded::Corrupt => return Err("keychain"),
+    };
     edit(&mut secrets);
     crate::jsonfile::save(&path, &secrets).map_err(|_| "keychain")?;
     restrict(&path);

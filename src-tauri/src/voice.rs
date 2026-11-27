@@ -434,6 +434,7 @@ pub async fn fluidvoice_status(
 #[derive(serde::Serialize)]
 pub struct AiKeyReport {
     pub stored: bool,
+    pub key_preview: Option<String>,
     pub accepted: bool,
     pub tone: String,
     pub detail: String,
@@ -454,8 +455,12 @@ pub async fn set_ai_key(
     }
     if remove.unwrap_or(false) {
         keys::set_key(&app, &provider, "").map_err(key_store_error)?;
+        if provider == llm::GEMINI {
+            crate::attention::transcription_gemini_key_changed(&app);
+        }
         return Ok(AiKeyReport {
             stored: false,
+            key_preview: None,
             accepted: false,
             tone: "ok".into(),
             detail: tr("A chave deste provedor foi removida deste computador.").into_owned(),
@@ -466,6 +471,7 @@ pub async fn set_ai_key(
     if key.is_empty() {
         return Ok(AiKeyReport {
             stored: keys::has_key(&app, &provider),
+            key_preview: keys::preview_for(&app, &provider),
             accepted: false,
             tone: "warn".into(),
             detail: tr("Digite a chave da API.").into_owned(),
@@ -475,6 +481,7 @@ pub async fn set_ai_key(
     if key.len() > 512 || key.chars().any(char::is_control) {
         return Ok(AiKeyReport {
             stored: keys::has_key(&app, &provider),
+            key_preview: keys::preview_for(&app, &provider),
             accepted: false,
             tone: "bad".into(),
             detail: tr("A chave da API não foi aceita.").into_owned(),
@@ -497,8 +504,12 @@ pub async fn set_ai_key(
     match checked {
         Ok(inspection) => {
             keys::set_key(&app, &provider, key).map_err(key_store_error)?;
+            if provider == llm::GEMINI {
+                crate::attention::transcription_gemini_key_changed(&app);
+            }
             Ok(AiKeyReport {
                 stored: true,
+                key_preview: keys::masked_preview(key),
                 accepted: true,
                 tone: if inspection.warning.is_some() {
                     "warn".into()
@@ -511,6 +522,7 @@ pub async fn set_ai_key(
         }
         Err(error) => Ok(AiKeyReport {
             stored: keys::has_key(&app, &provider),
+            key_preview: keys::preview_for(&app, &provider),
             accepted: false,
             tone: error.tone().into(),
             detail: error.detail,
@@ -734,6 +746,7 @@ async fn ready_note(
     id: String,
     note: transcript_store::Note,
 ) -> Result<VoiceView, String> {
+    crate::attention::transcript_ready(app, account, &note.id, &note.chat);
     let (translation, notice) = match ensure_translation(app, settings, dir, account, &note).await {
         Ok(translation) => (translation, None),
         Err(code) => (None, Some(code.to_string())),

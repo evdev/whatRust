@@ -1948,7 +1948,7 @@ pub fn set_standin_secret(
     secret: String,
     url: String,
     remove: Option<bool>,
-) -> Result<crate::agents::AgentStatus, String> {
+) -> Result<crate::agents::AgentSettingsStatus, String> {
     settings_window(&window, &app)?;
     if remove.unwrap_or(false) {
         let cleared = match kind.as_str() {
@@ -1957,7 +1957,7 @@ pub fn set_standin_secret(
             _ => Err("bad_key"),
         };
         cleared.map_err(|_| tr("The key was not accepted.").to_string())?;
-        return Ok(crate::agents::status(&app));
+        return Ok(crate::agents::settings_status(&app));
     }
     match kind.as_str() {
         "grok_bot" => crate::agents::save_grok(&app, &url, &secret).map_err(|err| {
@@ -1971,16 +1971,16 @@ pub fn set_standin_secret(
             .map_err(|_| tr("The key was not accepted.").to_string())?,
         _ => return Err(tr("The key was not accepted.").into()),
     }
-    Ok(crate::agents::status(&app))
+    Ok(crate::agents::settings_status(&app))
 }
 
 #[tauri::command]
 pub fn standin_agent_status(
     window: tauri::Webview,
     app: AppHandle,
-) -> Result<crate::agents::AgentStatus, String> {
+) -> Result<crate::agents::AgentSettingsStatus, String> {
     settings_window(&window, &app)?;
-    Ok(crate::agents::status(&app))
+    Ok(crate::agents::settings_status(&app))
 }
 
 fn resolved_chat(app: &AppHandle, account: &str, chat: &str) -> Result<String, String> {

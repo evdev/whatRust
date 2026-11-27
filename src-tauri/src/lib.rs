@@ -49,6 +49,8 @@ mod sessions;
 mod settings;
 #[cfg(all(windows, debug_assertions))]
 mod smoke;
+mod attention;
+mod attention_provider;
 mod todo;
 mod transcript_store;
 mod tray;
@@ -255,6 +257,7 @@ pub fn run() {
         .manage(scheduled_messages::Scheduler::default())
         .manage(window::ScheduledAccountViews::default())
         .manage(todo::TodoState::default())
+        .manage(attention::AttentionState::default())
         .manage(autoreply::AutoreplyState::default())
         .manage(mention::Popups::default())
         .invoke_handler(tauri::generate_handler![
@@ -337,6 +340,14 @@ pub fn run() {
             voice::geniex_test,
             voice::set_ai_key,
             voice::list_ai_models,
+            attention::attention_list,
+            attention::attention_ingest,
+            attention::attention_action,
+            attention::attention_matches,
+            attention::attention_move,
+            attention::attention_settings,
+            attention::attention_configure,
+            attention::attention_set_key,
             todo::todo_list,
             todo::todo_add,
             todo::todo_star_state,
@@ -585,6 +596,7 @@ pub fn run() {
             }
             let todo_app = handle.clone();
             std::thread::spawn(move || todo::scheduler(todo_app));
+            tauri::async_runtime::spawn(attention::scheduler(app.handle().clone()));
             Ok(())
         })
         .build(context)
