@@ -262,6 +262,11 @@
       }, 1500);
     }, 1200);
   }
+  // The offline button and the tray call this. WhatsApp's own control is not
+  // always on screen after the computer has been left idle.
+  window.__whatrustRecoverConnection = function () {
+    recoverConnection();
+  };
   document.addEventListener("click", function (event) {
     var control = reconnectControl(event.target);
     if (!control) return;

@@ -703,6 +703,56 @@ const besideTight = api.placeBesideMenu(tightMenu, 280, 200, 300, 320);
 assert(!coversMenu(besideTight, tightMenu), "a narrow gap still keeps the actions off the menu");
 assert(onScreen(besideTight, 300, 320), "actions in a narrow window stay on screen");
 
+assert(api.rectsOverlap({ left: 0, right: 10, top: 0, bottom: 10 }, { left: 5, right: 15, top: 5, bottom: 15 }), "touching boxes overlap");
+assert(!api.rectsOverlap({ left: 0, right: 10, top: 0, bottom: 10 }, { left: 20, right: 30, top: 20, bottom: 30 }), "separate boxes do not overlap");
+
+const guardRail = new RailEl("header");
+guardRail.getBoundingClientRect = () => box(64, 600, 0, 0);
+const railIcon = (label, top) => {
+  const icon = new RailEl("button");
+  icon.setAttribute("aria-label", label);
+  icon.getBoundingClientRect = () => box(40, 40, 12, top);
+  return icon;
+};
+const guardMeta = railIcon("Meta AI", 100);
+const guardMedia = railIcon("Media", 504);
+guardRail.append(guardMeta, guardMedia);
+const guardStack = new RailEl("div");
+guardStack.setAttribute("data-wr-todo-stack", "native");
+guardStack.getBoundingClientRect = () => box(64, 200, 0, 80 + (parseFloat(guardStack.style.marginTop) || 0));
+railBody.appendChild(guardStack);
+api.guardRailOverlap(guardRail, guardStack);
+assert(80 + (parseFloat(guardStack.style.marginTop) || 0) >= 152, "a stack over the Meta AI flower drops below it");
+const lowStack = new RailEl("div");
+lowStack.setAttribute("data-wr-todo-stack", "native");
+lowStack.getBoundingClientRect = () => box(64, 200, 0, 400);
+railBody.appendChild(lowStack);
+api.guardRailOverlap(guardRail, lowStack);
+assert(lowStack.style.maxHeight === "80px", "a stack reaching into Media shrinks instead of covering it");
+const bigMeta = railIcon("Meta AI", 100);
+bigMeta.getBoundingClientRect = () => box(200, 200, -68, 100);
+assert(api.nativeArt(bigMeta, guardStack) !== null, "an oversized Meta AI flower still yields a box to clear");
+const bigRail = new RailEl("header");
+bigRail.getBoundingClientRect = () => box(64, 600, 0, 0);
+bigRail.append(bigMeta, railIcon("Media", 504));
+const bigStack = new RailEl("div");
+bigStack.setAttribute("data-wr-todo-stack", "native");
+bigStack.getBoundingClientRect = () => box(64, 200, 0, 80 + (parseFloat(bigStack.style.marginTop) || 0));
+railBody.appendChild(bigStack);
+api.guardRailOverlap(bigRail, bigStack);
+assert(80 + (parseFloat(bigStack.style.marginTop) || 0) >= 142, "a stack over an unmeasured Meta AI flower still drops below it");
+assert(api.hOverlap({ left: 0, right: 64 }, { left: 12, right: 52 }, 8), "the stack shares the rail column");
+assert(!api.hOverlap({ left: 70, right: 470 }, { left: 12, right: 52 }, 8), "a side-panel stack does not share the rail column");
+const tallRail = new RailEl("header");
+tallRail.getBoundingClientRect = () => box(64, 600, 0, 0);
+tallRail.append(railIcon("Meta AI", 280), railIcon("Media", 560));
+const tallStack = new RailEl("div");
+tallStack.setAttribute("data-wr-todo-stack", "1");
+tallStack.getBoundingClientRect = () => box(64, 250, 0, 270 + (parseFloat(tallStack.style.marginTop) || 0));
+railBody.appendChild(tallStack);
+api.guardRailOverlap(tallRail, tallStack);
+assert(tallStack.style.marginTop === "72px", "a tall stack still clears a flower its middle has passed");
+
 if (failures) {
   console.error(`\n${failures} failed`);
   process.exit(1);

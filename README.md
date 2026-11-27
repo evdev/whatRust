@@ -117,7 +117,7 @@ Use the saved provider API key, a signed-in Claude Code, Grok, Codex, or Antigra
 - **English by default.** Settings and the whatRust interface open in English by default. Brazilian Portuguese is available under **Settings → Appearance → Language**, and an existing choice is kept. The language for transcript translation is separate.
 - **Source device.** The icon next to a message's timestamp can suggest Apple, Android, or a computer when the message ID gives a clue. You can turn it off under **Settings → Appearance**.
 - **WhatsApp header.** On Windows and in single-window mode, use **Settings → Appearance → whatRust controls in WhatsApp's header** to choose whether the account switcher and settings button appear inside WhatsApp. You can also hide WhatsApp's desktop-app promotions in Appearance.
-- **Fewer interruptions.** Connection recovery can reload WhatsApp when **Reconnect** gets stuck. The app keeps opened accounts connected while hidden in the tray. On macOS, whatRust can import an existing WebKit key once to avoid repeated login keychain prompts.
+- **Fewer interruptions.** If WhatsApp stops syncing after the computer has been idle or asleep, a small button above the sidebar's Media icon offers **Reconnect**, and the tray says **Offline** with the same action. Connection recovery can also reload WhatsApp when its own Reconnect control gets stuck. The app keeps opened accounts connected while hidden in the tray. On macOS, whatRust can import an existing WebKit key once to avoid repeated login keychain prompts.
 
 ## What stays on your computer
 

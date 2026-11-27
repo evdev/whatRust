@@ -127,7 +127,7 @@ pub fn require_unlocked(app: &AppHandle) -> Result<(), String> {
 fn sync_scheduled_lock(app: &AppHandle, locked: bool) {
     crate::scheduled_messages::wake(app);
     let script = format!(
-        "window.__whatrustLocked={locked};window.__wrMessageActionsLockChanged?.();window.__wrScheduleDeliveryRefresh?.();window.__wrScheduleChanged?.();window.__whatrustAttentionRefresh?.()"
+        "window.__whatrustLocked={locked};window.__wrMessageActionsLockChanged?.();window.__wrScheduleDeliveryRefresh?.();window.__wrScheduleChanged?.();window.__whatrustAttentionRefresh?.();window.__wrSyncRefresh?.()"
     );
     for (label, view) in app.webviews() {
         if crate::accounts::id_from_label(&label).is_some() {
@@ -285,6 +285,7 @@ pub fn show_lock_window(app: &AppHandle) {
 
 fn show_lock_window_inner(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("lock") {
+        crate::window::ensure_webview_on_screen(app, &w);
         let _ = w.show();
         let _ = w.set_focus();
         return;
@@ -305,6 +306,8 @@ fn show_lock_window_inner(app: &AppHandle) {
         .build();
 
     if let Ok(win) = built {
+        crate::window::ensure_webview_on_screen(app, &win);
+        crate::window::recheck_on_screen_later(app.clone(), "lock".to_string());
         crate::appicon::set_taskbar_icon(&win.as_ref().window(), &crate::appicon::current(app));
         // Unlock can race a queued window creation; never leave a stale lock
         // screen on top after authentication has already succeeded.

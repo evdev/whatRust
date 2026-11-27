@@ -823,6 +823,87 @@
     };
   }
 
+  function rectsOverlap(a, b) {
+    if (!a || !b) return false;
+    return a.left < b.right - 4 && a.right > b.left + 4 && a.top < b.bottom - 4 && a.bottom > b.top + 4;
+  }
+
+  // Same-column test that also works for tall stacks, where midpoint
+  // alignment fails even though the stack covers the icon's column.
+  function hOverlap(a, b, slop) {
+    if (!a || !b) return false;
+    var aLeft = a.left == null ? 0 : a.left;
+    var aRight = a.right == null ? aLeft : a.right;
+    var bLeft = b.left == null ? 0 : b.left;
+    var bRight = b.right == null ? bLeft : b.right;
+    return aLeft - slop < bRight && aRight + slop > bLeft;
+  }
+
+  function padArt(art, pad) {
+    if (!art) return null;
+    return {
+      top: art.top - pad,
+      bottom: art.bottom + pad,
+      left: (art.left == null ? 0 : art.left) - pad,
+      right: (art.right == null ? 0 : art.right) + pad,
+    };
+  }
+
+  function nativeArt(btn, stack) {
+    if (isMetaButton(btn)) return metaVisual(btn, stack) || paintedRect(btn) || rectOf(btn);
+    return paintedRect(btn) || rectOf(btn);
+  }
+
+  // Final no-overlap guard for the rail stack: after the clearance math runs,
+  // verify against every native rail icon (Meta AI included) and either drop
+  // the stack below an icon above it or shrink it so it scrolls above an icon
+  // below it. The art is padded so animated paint (like the Meta AI flower)
+  // is cleared too, not just the button box. Never covers a native button.
+  function guardRailOverlap(rail, stack) {
+    if (!rail || !stack) return;
+    for (var pass = 0; pass < 3; pass++) {
+      var box = rectOf(stack);
+      if (!box || box.width < 8 || box.height < 8) return;
+      var push = 0;
+      var maxBottom = null;
+      var metaArt = null;
+      var natives = collectButtons(rail);
+      for (var i = 0; i < natives.length; i++) {
+        var btn = natives[i];
+        if (!btn || stack.contains(btn)) continue;
+        var meta = isMetaButton(btn);
+        var art = padArt(nativeArt(btn, stack), 10);
+        if (!art || !hOverlap(art, box, 8)) continue;
+        if (!rectsOverlap(box, art)) continue;
+        if (art.top < box.top + 24) {
+          var shift = Math.ceil(art.bottom + 8 - box.top);
+          if (shift > push) push = shift;
+          if (meta) metaArt = art;
+        } else {
+          var bottom = Math.floor(art.top - 8);
+          if (maxBottom == null || bottom < maxBottom) maxBottom = bottom;
+          if (meta && (metaArt == null || art.bottom > metaArt.bottom)) metaArt = art;
+        }
+      }
+      if (push > 0) {
+        var cur = (stack.style && parseFloat(stack.style.marginTop)) || 0;
+        if (maxBottom != null && box.top + push + 40 > maxBottom) {
+          stack.style.maxHeight = Math.max(0, Math.floor(maxBottom - box.top - 6)) + "px";
+          return;
+        }
+        stack.style.marginTop = (cur + push) + "px";
+        if (metaArt) railMeta = { top: metaArt.top, bottom: metaArt.bottom, left: metaArt.left, right: metaArt.right };
+      } else if (maxBottom != null) {
+        var curMax = (stack.style && parseFloat(stack.style.maxHeight)) || 0;
+        var want = Math.max(0, Math.floor(maxBottom - box.top - 6));
+        if (!curMax || want < curMax) stack.style.maxHeight = want + "px";
+        return;
+      } else {
+        return;
+      }
+    }
+  }
+
   // "dark", "light", or null when the color is missing or fully transparent.
   // A transparent black background has luminance 0, so it must not count as dark.
   function themeFromColor(color) {
@@ -923,6 +1004,10 @@
       lookupMapped: lookupMapped,
       clearanceFor: clearanceFor,
       pickClearance: pickClearance,
+      rectsOverlap: rectsOverlap,
+      guardRailOverlap: guardRailOverlap,
+      nativeArt: nativeArt,
+      hOverlap: hOverlap,
       isTask: isTask,
       isChevronTarget: isChevronTarget,
       menuScore: menuScore,
@@ -1571,7 +1656,7 @@
         if (stack && stack.contains && stack.contains(node)) return;
         if (attr(node, "id").indexOf("__whatrust") === 0) return;
         if (ownMeta(node)) {
-          var visual = metaVisual(node, stack);
+          var visual = metaVisual(node, stack) || paintedRect(node) || rectOf(node);
           if (visual) rects.push({ top: visual.top, bottom: visual.bottom, left: visual.left, right: visual.right, meta: true });
           return;
         }
@@ -1661,6 +1746,9 @@
     if (shift) stack.style.marginTop = shift + "px";
     else stack.style.marginTop = "";
     dropOtherStacks(stack);
+    // The switcher can live in the rail itself: run the same no-overlap
+    // guard as the native rail path so the stack never covers Meta AI there.
+    guardRailOverlap(findRail(document) || railColumn(switcher), stack);
   }
 
   function mountNativeRail(choice, buttons) {
@@ -1707,7 +1795,7 @@
     var afterAnchor = false;
     collectButtons(rail).forEach(function (nativeButton) {
       var hasArtwork = isMetaButton(nativeButton);
-      var art = hasArtwork ? metaVisual(nativeButton, stack) : paintedRect(nativeButton);
+      var art = hasArtwork ? nativeArt(nativeButton, stack) : paintedRect(nativeButton);
       if (art && alignedTo(art, box, 36)) {
         if (hasArtwork) railMeta = art;
         if (afterAnchor) bottom = Math.min(bottom, art.top);
@@ -1717,6 +1805,7 @@
     });
     stack.style.marginTop = Math.max(0, Math.ceil(top - naturalTop)) + "px";
     stack.style.maxHeight = Math.max(0, Math.floor(bottom - top - 6)) + "px";
+    guardRailOverlap(rail, stack);
   }
 
   function mountRail() {

@@ -48,6 +48,7 @@ mod scheduled_messages;
 mod scrollbars;
 mod sessions;
 mod settings;
+mod sync_status;
 #[cfg(all(windows, debug_assertions))]
 mod smoke;
 mod attention;
@@ -262,6 +263,7 @@ pub fn run() {
         .manage(attention::AttentionState::default())
         .manage(autoreply::AutoreplyState::default())
         .manage(mention::Popups::default())
+        .manage(sync_status::SyncHealth::default())
         .invoke_handler(tauri::generate_handler![
             integration::integration_state,
             integration::report_integration,
@@ -287,6 +289,7 @@ pub fn run() {
             commands::switcher_accounts,
             commands::switch_account,
             commands::reload_account_page,
+            sync_status::report_sync_offline,
             commands::zoom_step,
             clipboard::paste_clipboard,
             commands::get_settings,
@@ -551,6 +554,11 @@ pub fn run() {
             #[cfg(windows)]
             ui_health::start(handle);
             tray::setup(handle)?;
+            // A restored position can be off-screen (unplugged monitor); the
+            // plugin only checks for a rough overlap. Keep polling so a late
+            // restore or a hot-unplugged display never strands a window where
+            // it cannot be grabbed.
+            window::start_offscreen_watchdog(handle);
             // Fork: do not start the upstream self-updater. It would check
             // the original repo and can install those releases over this build.
             // update_service::start(handle);

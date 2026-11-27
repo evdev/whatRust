@@ -86,14 +86,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             match id {
                 "accounts" | "settings" => crate::window::open_settings_window(app),
                 "update" => crate::update_service::open_updates(app),
-                "reload" => {
-                    if let Some(active) = app.try_state::<crate::accounts::ActiveAccount>() {
-                        let label = crate::lock::guard(&active).clone();
-                        if let Some(w) = app.get_webview(&label) {
-                            let _ = w.eval("window.location.reload()");
-                        }
-                    }
-                }
+                "reload" => crate::sync_status::reconnect_from_tray(app),
                 "lock" => crate::lock::lock_now(app),
                 "quit" => {
                     // Restore panel geometry before window state is saved.
@@ -148,7 +141,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 }
 
 /// Rebuild the tray menu from the current accounts list: one `acct:<id>` item per
-/// account showing `name (n)`, then the static `Accounts… / Settings / Reload / [Update to X] / [Lock now] / Quit`.
+/// account showing `name (n)`, then `Accounts… / Settings / Reload / [Update to X] / [Lock now] / Quit`.
+/// While an account is offline, Reconnect is the first item instead of Reload.
 pub fn rebuild_menu(app: &AppHandle) {
     let Some(tray) = app.tray_by_id("main-tray") else {
         return;
@@ -169,7 +163,14 @@ pub fn rebuild_menu(app: &AppHandle) {
     let mut accts = f.accounts.clone();
     accts.sort_by_key(|a| a.order);
 
+    let offline = crate::sync_status::any_offline(app);
     let mut builder = MenuBuilder::new(app);
+    if offline {
+        let Ok(reconnect) = MenuItemBuilder::with_id("reload", tr("Reconectar")).build(app) else {
+            return;
+        };
+        builder = builder.item(&reconnect).separator();
+    }
     for a in &accts {
         let unread = crate::unread::visible(counts.get(&a.id).copied().unwrap_or(0));
         let label = if unread > 0 {
@@ -194,15 +195,15 @@ pub fn rebuild_menu(app: &AppHandle) {
     let Ok(reload) = MenuItemBuilder::with_id("reload", tr("Recarregar")).build(app) else {
         return;
     };
+    let show_reload = !offline;
     let Ok(quit) = MenuItemBuilder::with_id("quit", tr("Sair")).build(app) else {
         return;
     };
 
-    let mut tail = builder
-        .separator()
-        .item(&accounts_item)
-        .item(&settings)
-        .item(&reload);
+    let mut tail = builder.separator().item(&accounts_item).item(&settings);
+    if show_reload {
+        tail = tail.item(&reload);
+    }
     if let Some(version) = crate::update_service::available_version() {
         let Ok(update_item) =
             MenuItemBuilder::with_id("update", trf("Atualizar para {0}", &[&version])).build(app)
@@ -279,6 +280,30 @@ pub fn apply_visibility(app: &AppHandle, visible: bool) {
     }
 }
 
+/// Text beside the tray icon. Unread count wins; otherwise an offline session
+/// is labeled so a hidden window is not the only place that looks signed in.
+fn presence_title(offline: bool, count: u32) -> Option<String> {
+    if count > 0 {
+        Some(count.to_string())
+    } else if offline {
+        Some(tr("Offline").into_owned())
+    } else {
+        None
+    }
+}
+
+fn presence_tooltip(offline: bool, count: u32) -> String {
+    if offline && count > 0 {
+        trf("{0} conversas não lidas — WhatsApp offline", &[&count])
+    } else if offline {
+        tr("WhatsApp está offline").into_owned()
+    } else if count > 0 {
+        trf("{0} conversas não lidas — WhatsApp", &[&count])
+    } else {
+        "WhatsApp".to_string()
+    }
+}
+
 /// Update the tray to reflect the current (aggregate) unread count.
 pub fn update_badge(app: &AppHandle, count: u32) {
     let count = crate::unread::visible(count);
@@ -286,29 +311,27 @@ pub fn update_badge(app: &AppHandle, count: u32) {
     let Some(tray) = app.tray_by_id("main-tray") else {
         return;
     };
-    match badge_state(count) {
-        BadgeState::Clear => {
-            let _ = tray.set_title(None::<String>);
-            let _ = tray.set_tooltip(Some("WhatsApp"));
-            if let Ok(icon) = Image::from_bytes(ICON_NORMAL) {
-                // Set image + template flag atomically: on macOS a set_icon followed
-                // by set_icon_as_template renders the icon twice and visibly flickers.
-                let _ = tray.set_icon_with_as_template(Some(icon), ICON_IS_TEMPLATE);
-            }
-        }
-        BadgeState::Count(c) => {
-            let _ = tray.set_title(Some(c.to_string()));
-            let _ = tray.set_tooltip(Some(trf("{0} conversas não lidas — WhatsApp", &[&c])));
-            if let Ok(icon) = Image::from_bytes(ICON_UNREAD) {
-                let _ = tray.set_icon_with_as_template(Some(icon), ICON_IS_TEMPLATE);
-            }
-        }
+    let offline = crate::sync_status::any_offline(app);
+    let _ = tray.set_title(presence_title(offline, count));
+    let _ = tray.set_tooltip(Some(presence_tooltip(offline, count)));
+    let icon = match badge_state(count) {
+        BadgeState::Clear => ICON_NORMAL,
+        BadgeState::Count(_) => ICON_UNREAD,
+    };
+    if let Ok(icon) = Image::from_bytes(icon) {
+        // Set image + template flag atomically: on macOS a set_icon followed
+        // by set_icon_as_template renders the icon twice and visibly flickers.
+        let _ = tray.set_icon_with_as_template(Some(icon), ICON_IS_TEMPLATE);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_state, opens_menu_on_left_click, tray_click, BadgeState, TrayClick};
+    use super::{
+        badge_state, opens_menu_on_left_click, presence_title, presence_tooltip, tray_click,
+        BadgeState, TrayClick,
+    };
+    use crate::i18n::{current, tr_in, trf_in};
 
     #[test]
     fn zero_is_clear() {
@@ -331,6 +354,30 @@ mod tests {
     fn menu_bar_only_keeps_the_panel_toggle() {
         assert_eq!(tray_click(true, true), TrayClick::TogglePanel);
         assert!(!opens_menu_on_left_click(true, true));
+    }
+
+    #[test]
+    fn an_offline_tray_says_so_without_hiding_the_unread_count() {
+        let lang = current();
+        assert_eq!(presence_title(false, 0), None);
+        assert_eq!(
+            presence_title(true, 0).as_deref(),
+            Some(tr_in(lang, "Offline").as_ref())
+        );
+        assert_eq!(presence_title(true, 4).as_deref(), Some("4"));
+        assert_eq!(presence_tooltip(false, 0), "WhatsApp");
+        assert_eq!(
+            presence_tooltip(true, 0),
+            tr_in(lang, "WhatsApp está offline")
+        );
+        assert_eq!(
+            presence_tooltip(true, 3),
+            trf_in(lang, "{0} conversas não lidas — WhatsApp offline", &[&3])
+        );
+        assert_eq!(
+            presence_tooltip(false, 3),
+            trf_in(lang, "{0} conversas não lidas — WhatsApp", &[&3])
+        );
     }
 
     #[test]

@@ -274,6 +274,7 @@ macro_rules! account_webview {
             } else {
                 ""
             })
+            .initialization_script(include_str!("../resources/sync-status.js"))
             .initialization_script(MEDIA_JS)
             .initialization_script(include_str!("../resources/privacy.js"))
             // WA-JS (Apache-2.0) reads WhatsApp's own media loader so a voice
@@ -589,6 +590,8 @@ pub(crate) fn build_account_window(
     #[cfg(target_os = "macos")]
     crate::webcrypto::attach(account.store_uuid);
     let win = builder.build()?;
+    ensure_webview_on_screen(app, &win);
+    recheck_on_screen_later(app.clone(), label.clone());
     crate::appicon::set_taskbar_icon(&win.as_ref().window(), &icon);
     // Issue #73: covers windows created after startup too (no-op once done).
     #[cfg(target_os = "macos")]
@@ -1640,6 +1643,7 @@ fn register_focus_listener(app: &AppHandle, win: &WebviewWindow) {
         }
         tauri::WindowEvent::Destroyed => {
             crate::scheduled_messages::forget_view(&app_handle, &label);
+            crate::sync_status::forget(&app_handle, &label);
         }
         // Menu-bar mode: losing focus dismisses a presented panel; the
         // webview keeps running while hidden (see `background_throttling`).
@@ -2337,11 +2341,232 @@ pub(crate) fn separate_if_sharing_main(app: &AppHandle, label: &str) {
     }
 }
 
+/// Physical-pixel rectangle for monitor math. All Tauri monitor and window
+/// geometry used here is physical, so the two stay in the same space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// Minimum visible share (percent) for a restored window to be left alone.
+/// Below this the window is effectively lost (e.g. a position saved on a
+/// monitor that is no longer connected) and gets moved on-screen.
+const MIN_VISIBLE_PERCENT: i64 = 15;
+
+/// Width of a title-bar strip (physical px) considered grabbable. A window
+/// showing at least this much of its title bar stays put even when the rest
+/// of it is off-screen, so a window being dragged is never yanked away.
+const TITLE_GRAB_PX: i64 = 200;
+
+/// Where to move a window rect that is essentially invisible on `monitors`
+/// (primary monitor first), or `None` when enough of it is already visible
+/// to grab. `top_reserve` is the physical-pixel strip kept clear at the top
+/// of the target monitor (menu bar plus title bar); callers pass a
+/// scale-aware value so the title bar never lands under the menu bar.
+/// Picks the monitor with the largest overlap so a window straddling two
+/// screens stays where it is; ties (including no overlap anywhere) land on
+/// the primary monitor. A window larger than the monitor pins to the cleared
+/// corner instead of centering off both edges.
+/// Diagnostics for [`clamp_offscreen`]: the destination plus the visible
+/// area percent and the on-screen title-bar width the decision used.
+pub fn offscreen_debug(
+    window: IRect,
+    monitors: &[IRect],
+    top_reserve: i32,
+) -> (Option<(i32, i32)>, i64, i64) {
+    let area = window.w.max(0) as i64 * window.h.max(0) as i64;
+    if area <= 0 {
+        return (None, 100, 0);
+    }
+    let mut visible: i64 = 0;
+    let mut title: i64 = 0;
+    let mut best: i64 = 0;
+    let mut target = 0usize;
+    let strip_h = window.h.min(40);
+    for (i, m) in monitors.iter().enumerate() {
+        let iw = (window.x + window.w).min(m.x + m.w) - window.x.max(m.x);
+        let ih = (window.y + window.h).min(m.y + m.h) - window.y.max(m.y);
+        let overlap = iw.max(0) as i64 * ih.max(0) as i64;
+        if overlap > best {
+            best = overlap;
+            target = i;
+        }
+        visible += overlap;
+        let strip_ih =
+            (window.y + strip_h).min(m.y + m.h) - window.y.max(m.y);
+        if strip_ih > 0 {
+            title += iw.max(0) as i64;
+        }
+    }
+    let pct = visible * 100 / area;
+    if visible * 100 >= area * MIN_VISIBLE_PERCENT {
+        return (None, pct, title);
+    }
+    if title >= (window.w.max(0) as i64).min(TITLE_GRAB_PX) {
+        return (None, pct, title);
+    }
+    let m = match monitors.get(target) {
+        Some(m) => m,
+        None => return (None, pct, title),
+    };
+    let lo_x = m.x + 8;
+    let hi_x = (m.x + m.w - 8 - window.w).max(lo_x);
+    let lo_y = m.y + top_reserve.max(8);
+    let hi_y = (m.y + m.h - 8 - window.h).max(lo_y);
+    (
+        Some((window.x.clamp(lo_x, hi_x), window.y.clamp(lo_y, hi_y))),
+        pct,
+        title,
+    )
+}
+
+pub fn clamp_offscreen(
+    window: IRect,
+    monitors: &[IRect],
+    top_reserve: i32,
+) -> Option<(i32, i32)> {
+    offscreen_debug(window, monitors, top_reserve).0
+}
+
+/// Move `window` on-screen when a restored position left it essentially
+/// invisible (unplugged monitor, changed layout). Windows that are at least
+/// partly visible — including intentionally parked ones — are never touched,
+/// nor are minimized, maximized, or fullscreen windows.
+pub fn ensure_on_screen(app: &AppHandle, window: &tauri::Window) {
+    if window.is_minimized().unwrap_or(false) {
+        return;
+    }
+    if window.is_maximized().unwrap_or(false) {
+        return;
+    }
+    if window.is_fullscreen().unwrap_or(false) {
+        return;
+    }
+    let Ok(pos) = window.outer_position() else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let Ok(all) = app.available_monitors() else {
+        return;
+    };
+    if all.is_empty() {
+        return;
+    }
+    let mut monitors: Vec<IRect> = Vec::with_capacity(all.len());
+    if let Ok(Some(primary)) = app.primary_monitor() {
+        monitors.push(IRect {
+            x: primary.position().x,
+            y: primary.position().y,
+            w: primary.size().width as i32,
+            h: primary.size().height as i32,
+        });
+    }
+    for m in &all {
+        let rect = IRect {
+            x: m.position().x,
+            y: m.position().y,
+            w: m.size().width as i32,
+            h: m.size().height as i32,
+        };
+        if !monitors.contains(&rect) {
+            monitors.push(rect);
+        }
+    }
+    let win = IRect {
+        x: pos.x,
+        y: pos.y,
+        w: size.width as i32,
+        h: size.height as i32,
+    };
+    // macOS: keep menu bar plus title bar clear (~64pt) so the moved window
+    // stays grabbable; elsewhere a plain 8px margin is enough.
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let top_reserve = if cfg!(target_os = "macos") {
+        (64.0 * scale).round() as i32
+    } else {
+        8
+    };
+    if let Some((x, y)) = clamp_offscreen(win, &monitors, top_reserve) {
+        if (x, y) != (pos.x, pos.y) {
+            crate::dlog::log(&format!(
+                "window {} was off-screen at {},{}; moved to {},{}",
+                window.label(),
+                pos.x,
+                pos.y,
+                x,
+                y
+            ));
+            let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+        }
+    }
+}
+
+/// [`ensure_on_screen`] for account/settings windows.
+pub fn ensure_webview_on_screen(app: &AppHandle, window: &WebviewWindow) {
+    ensure_on_screen(app, &window.as_ref().window());
+}
+
+/// Re-clamp shortly after creation. The window-state plugin restores the
+/// saved position when the webview is ready, which lands after `build()` and
+/// can move the window back off-screen. Only ever moves invisible windows,
+/// so a window the user can see is never disturbed.
+/// Backstop for late restores and hot-unplugged monitors: every few seconds,
+/// move any window that is essentially invisible back on-screen. Only
+/// invisible windows ever move, so visible ones — including ones being
+/// dragged — are never disturbed.
+pub fn start_offscreen_watchdog(app: &AppHandle) {
+    let handle = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let ui = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            for (_, w) in ui.windows() {
+                ensure_on_screen(&ui, &w);
+            }
+            let mut seen = std::collections::HashSet::new();
+            for (_, view) in ui.webviews() {
+                let parent = view.window();
+                if seen.insert(parent.label().to_string()) {
+                    ensure_on_screen(&ui, &parent);
+                }
+            }
+        });
+    });
+}
+
+pub(crate) fn recheck_on_screen_later(app: AppHandle, label: String) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        let ui = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(w) = ui.get_window(&label) {
+                ensure_on_screen(&ui, &w);
+            } else if let Some(w) = ui.get_webview_window(&label) {
+                ensure_on_screen(&ui, &w.as_ref().window());
+            }
+        });
+    });
+}
+
 /// Show + unminimize + focus an account window by its `wa-<id>` label.
 /// On macOS a restyled window first gets its standard presentation back, and in
 /// menu-bar-only mode it opens as a panel. Accounts the user already opened
 /// stay open.
 pub fn show_account(app: &AppHandle, label: &str) {
+    // A restored position can be off-screen (unplugged monitor). Clamp before
+    // revealing so the window never opens invisibly.
+    if crate::sessions::enabled() {
+        if let Some(w) = app.get_window("main") {
+            ensure_on_screen(app, &w);
+        }
+    } else if let Some(w) = app.get_webview_window(label) {
+        ensure_webview_on_screen(app, &w);
+    }
     if !crate::lock::is_unlocked(app) {
         // Single-window activation remembers the account and restores it on
         // unlock. A bare lock screen would forget a notification click.
@@ -2578,6 +2803,7 @@ fn open_settings_legacy(app: &AppHandle) {
         return;
     }
     if let Some(w) = app.get_webview_window("settings") {
+        ensure_webview_on_screen(app, &w);
         let _ = w.show();
         let _ = w.set_focus();
         return;
@@ -2595,6 +2821,8 @@ fn open_settings_legacy(app: &AppHandle) {
             crate::appicon::set_taskbar_icon(&w.as_ref().window(), &crate::appicon::current(app))
         }) {
         Ok(w) if crate::lock::is_unlocked(app) => {
+            ensure_webview_on_screen(app, &w);
+            recheck_on_screen_later(app.clone(), "settings".to_string());
             let _ = w.show();
             let _ = w.set_focus();
         }
@@ -2606,11 +2834,11 @@ fn open_settings_legacy(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_encode, drop_ack_failed, drop_msg_begin, drop_msg_chunk_prefix_parts,
+        base64_encode, clamp_offscreen, drop_ack_failed, drop_msg_begin, drop_msg_chunk_prefix_parts,
         drop_msg_commit, drop_msg_end, ensure_download_destination, is_whatsapp_origin, mime_for,
         plan_drop, run_drop_queue, safari_ua, stream_chunks, summarize_skips, suspends_hidden_sync,
-        toggle_decision, DropSkips, StreamAbort, ToggleAct, CHUNKS_PER_EVAL, DROP_CHUNK_BYTES,
-        DROP_MSG_CHUNK_SUFFIX_PARTS, MAX_DROP_FILES, WEBVIEW2_SYNC_ARGS,
+        toggle_decision, DropSkips, IRect, StreamAbort, ToggleAct, CHUNKS_PER_EVAL,
+        DROP_CHUNK_BYTES, DROP_MSG_CHUNK_SUFFIX_PARTS, MAX_DROP_FILES, WEBVIEW2_SYNC_ARGS,
     };
     use crate::i18n::{tr, trf};
 
@@ -2626,6 +2854,128 @@ mod tests {
         ));
         assert!(!suspends_hidden_sync("HiddenPageCSSAnimationSuspension"));
         assert!(!suspends_hidden_sync(""));
+    }
+
+    #[test]
+    fn offscreen_window_moves_onto_the_primary_monitor() {
+        let primary = IRect { x: 0, y: 0, w: 2560, h: 1600 };
+        // The stale multi-monitor position from the bug report: fully right of
+        // the only display (physical pixels). Reserve is macOS @2x: menu plus
+        // title bar kept clear.
+        let win = IRect { x: 4328, y: -48, w: 1216, h: 1968 };
+        assert_eq!(
+            clamp_offscreen(win, &[primary], 128),
+            Some((2560 - 8 - 1216, 128))
+        );
+    }
+
+    #[test]
+    fn visible_window_is_left_alone() {
+        let primary = IRect { x: 0, y: 0, w: 2560, h: 1600 };
+        assert_eq!(
+            clamp_offscreen(IRect { x: 100, y: 100, w: 1080, h: 630 }, &[primary], 8),
+            None
+        );
+        // Mostly visible (straddling the right edge) stays put.
+        assert_eq!(
+            clamp_offscreen(IRect { x: 2000, y: 100, w: 1080, h: 630 }, &[primary], 8),
+            None
+        );
+    }
+
+    #[test]
+    fn sliver_of_window_counts_as_lost() {
+        let primary = IRect { x: 0, y: 0, w: 2560, h: 1600 };
+        // Only a 100px strip still overlaps: under the 15% threshold.
+        assert_eq!(
+            clamp_offscreen(IRect { x: 2460, y: 100, w: 1080, h: 630 }, &[primary], 8),
+            Some((2560 - 8 - 1080, 100))
+        );
+    }
+
+    #[test]
+    fn window_on_secondary_monitor_stays_there() {
+        let primary = IRect { x: 0, y: 0, w: 2560, h: 1600 };
+        let secondary = IRect { x: 2560, y: 0, w: 1920, h: 1080 };
+        assert_eq!(
+            clamp_offscreen(
+                IRect { x: 2700, y: 100, w: 1080, h: 630 },
+                &[primary, secondary],
+                8
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn lost_window_prefers_the_closest_monitor() {
+        let primary = IRect { x: 0, y: 0, w: 2560, h: 1600 };
+        let secondary = IRect { x: 2560, y: 0, w: 1920, h: 1080 };
+        // Just past the secondary's right edge: nearer to it than to primary.
+        assert_eq!(
+            clamp_offscreen(
+                IRect { x: 4460, y: 100, w: 400, h: 300 },
+                &[primary, secondary],
+                8
+            ),
+            Some((2560 + 1920 - 8 - 400, 100))
+        );
+        // Nowhere near any monitor: clamps onto the primary.
+        assert_eq!(
+            clamp_offscreen(
+                IRect { x: 9000, y: 9000, w: 400, h: 300 },
+                &[primary, secondary],
+                8
+            ),
+            Some((2560 - 8 - 400, 1600 - 8 - 300))
+        );
+    }
+
+    #[test]
+    fn oversized_window_pins_to_the_cleared_corner() {
+        let primary = IRect { x: 0, y: 0, w: 1280, h: 800 };
+        assert_eq!(
+            clamp_offscreen(IRect { x: 5000, y: 5000, w: 2144, h: 1360 }, &[primary], 8),
+            Some((8, 8))
+        );
+        // With a menu reserve the top pins below it instead of under the menu.
+        assert_eq!(
+            clamp_offscreen(
+                IRect { x: 5000, y: 5000, w: 2144, h: 1360 },
+                &[primary],
+                104
+            ),
+            Some((8, 104))
+        );
+    }
+
+    #[test]
+    fn grabbable_title_bar_is_left_alone() {
+        let primary = IRect { x: 0, y: 0, w: 2560, h: 1600 };
+        // Only the title bar peeks above the bottom edge: 4% of the area but
+        // grabbable, so it stays.
+        assert_eq!(
+            clamp_offscreen(IRect { x: 2000, y: 1550, w: 1080, h: 630 }, &[primary], 8),
+            None
+        );
+        // Title bar fully below the screen: lost, moves up.
+        assert_eq!(
+            clamp_offscreen(IRect { x: 2000, y: 1620, w: 1080, h: 630 }, &[primary], 8),
+            Some((1472, 962))
+        );
+    }
+
+    #[test]
+    fn degenerate_input_never_moves() {
+        let primary = IRect { x: 0, y: 0, w: 2560, h: 1600 };
+        assert_eq!(
+            clamp_offscreen(IRect { x: 5000, y: 5000, w: 0, h: 600 }, &[primary], 8),
+            None
+        );
+        assert_eq!(
+            clamp_offscreen(IRect { x: 5000, y: 5000, w: 600, h: 600 }, &[], 8),
+            None
+        );
     }
 
     #[test]
