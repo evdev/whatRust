@@ -222,14 +222,15 @@ pub(crate) fn scheduler_release_account(app: &AppHandle, id: &str) {
 
 // Keep navigation, injection and download hooks identical across platform builders.
 macro_rules! account_webview {
-    ($builder:expr, $app:ident, $label:ident) => {
+    ($builder:expr, $app:ident, $label:ident) => {{
         // Proxy (issue #52): every account webview gets the same proxy, so no
         // account bypasses it and WebView2 sees identical browser arguments on
         // every webview that shares an environment.
-        (match crate::proxy::webview_url(&crate::settings::load($app)) {
+        let builder = match crate::proxy::webview_url(&crate::settings::load($app)) {
             Some(url) => $builder.proxy_url(url),
             None => $builder,
-        })
+        };
+        builder
             .user_agent(&user_agent())
             // Keep WhatsApp syncing while the window is hidden, minimized, or
             // left alone. WebKit's default suspends an inactive WKWebView, and
@@ -242,10 +243,24 @@ macro_rules! account_webview {
             // so the two never stack or drift apart.
             .zoom_hotkeys_enabled(false)
             .initialization_script(crate::i18n::init_script())
-            .initialization_script(if cfg!(debug_assertions) && std::env::var("WHATRUST_ASR_SMOKE").as_deref() == Ok("1") { "window.__WHATRUST_AUDIO_SMOKE=true;" } else { "" })
-            .initialization_script(format!("window.__whatrustLocked={};", !crate::lock::is_unlocked($app)))
+            .initialization_script(
+                if cfg!(debug_assertions)
+                    && std::env::var("WHATRUST_ASR_SMOKE").as_deref() == Ok("1")
+                {
+                    "window.__WHATRUST_AUDIO_SMOKE=true;"
+                } else {
+                    ""
+                },
+            )
+            .initialization_script(format!(
+                "window.__whatrustLocked={};",
+                !crate::lock::is_unlocked($app)
+            ))
             .initialization_script(if cfg!(windows) {
-                format!("window.__WHATRUST_WINDOWS__=true;window.__whatrustNotificationEpoch={};",$app.state::<crate::notify::Recent>().epoch())
+                format!(
+                    "window.__WHATRUST_WINDOWS__=true;window.__whatrustNotificationEpoch={};",
+                    $app.state::<crate::notify::Recent>().epoch()
+                )
             } else if crate::sessions::enabled() {
                 // Linux/macOS single-window mode: header switcher instead of
                 // the legacy in-page one; notifications keep their own path.
@@ -269,11 +284,13 @@ macro_rules! account_webview {
             .initialization_script(include_str!("../resources/integration.js"))
             .initialization_script(BRIDGE_JS)
             // Opt-in: block only automatic page chimes, not native OS notifications.
-            .initialization_script(if crate::settings::load($app).suppress_web_notification_sounds {
-                include_str!("../resources/suppress-web-notification-sounds.js")
-            } else {
-                ""
-            })
+            .initialization_script(
+                if crate::settings::load($app).suppress_web_notification_sounds {
+                    include_str!("../resources/suppress-web-notification-sounds.js")
+                } else {
+                    ""
+                },
+            )
             .initialization_script(include_str!("../resources/sync-status.js"))
             .initialization_script(MEDIA_JS)
             .initialization_script(include_str!("../resources/privacy.js"))
@@ -290,8 +307,14 @@ macro_rules! account_webview {
                 crate::settings::load($app).show_message_device
             ))
             .initialization_script(include_str!("../resources/device.js"))
-            .initialization_script(format!("window.__WR_MESSAGE_ACTIONS={};", crate::settings::load($app).message_actions))
-            .initialization_script(format!("window.__wrCalendarLinks={};", cfg!(any(windows, target_os = "macos"))))
+            .initialization_script(format!(
+                "window.__WR_MESSAGE_ACTIONS={};",
+                crate::settings::load($app).message_actions
+            ))
+            .initialization_script(format!(
+                "window.__wrCalendarLinks={};",
+                cfg!(any(windows, target_os = "macos"))
+            ))
             .initialization_script(include_str!("../resources/calendar-chrono.js"))
             .initialization_script(include_str!("../resources/calendar-actions.js"))
             .initialization_script(include_str!("../resources/message-actions.js"))
@@ -437,7 +460,7 @@ macro_rules! account_webview {
                 }
                 true
             })
-    };
+    }};
 }
 
 /// Toast + system notification after a download ends. `quiet` (the user
@@ -2395,8 +2418,7 @@ pub fn offscreen_debug(
             target = i;
         }
         visible += overlap;
-        let strip_ih =
-            (window.y + strip_h).min(m.y + m.h) - window.y.max(m.y);
+        let strip_ih = (window.y + strip_h).min(m.y + m.h) - window.y.max(m.y);
         if strip_ih > 0 {
             title += iw.max(0) as i64;
         }
@@ -2423,11 +2445,7 @@ pub fn offscreen_debug(
     )
 }
 
-pub fn clamp_offscreen(
-    window: IRect,
-    monitors: &[IRect],
-    top_reserve: i32,
-) -> Option<(i32, i32)> {
+pub fn clamp_offscreen(window: IRect, monitors: &[IRect], top_reserve: i32) -> Option<(i32, i32)> {
     offscreen_debug(window, monitors, top_reserve).0
 }
 
@@ -2834,11 +2852,12 @@ fn open_settings_legacy(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_encode, clamp_offscreen, drop_ack_failed, drop_msg_begin, drop_msg_chunk_prefix_parts,
-        drop_msg_commit, drop_msg_end, ensure_download_destination, is_whatsapp_origin, mime_for,
-        plan_drop, run_drop_queue, safari_ua, stream_chunks, summarize_skips, suspends_hidden_sync,
-        toggle_decision, DropSkips, IRect, StreamAbort, ToggleAct, CHUNKS_PER_EVAL,
-        DROP_CHUNK_BYTES, DROP_MSG_CHUNK_SUFFIX_PARTS, MAX_DROP_FILES, WEBVIEW2_SYNC_ARGS,
+        base64_encode, clamp_offscreen, drop_ack_failed, drop_msg_begin,
+        drop_msg_chunk_prefix_parts, drop_msg_commit, drop_msg_end, ensure_download_destination,
+        is_whatsapp_origin, mime_for, plan_drop, run_drop_queue, safari_ua, stream_chunks,
+        summarize_skips, suspends_hidden_sync, toggle_decision, DropSkips, IRect, StreamAbort,
+        ToggleAct, CHUNKS_PER_EVAL, DROP_CHUNK_BYTES, DROP_MSG_CHUNK_SUFFIX_PARTS, MAX_DROP_FILES,
+        WEBVIEW2_SYNC_ARGS,
     };
     use crate::i18n::{tr, trf};
 
@@ -2858,11 +2877,21 @@ mod tests {
 
     #[test]
     fn offscreen_window_moves_onto_the_primary_monitor() {
-        let primary = IRect { x: 0, y: 0, w: 2560, h: 1600 };
+        let primary = IRect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1600,
+        };
         // The stale multi-monitor position from the bug report: fully right of
         // the only display (physical pixels). Reserve is macOS @2x: menu plus
         // title bar kept clear.
-        let win = IRect { x: 4328, y: -48, w: 1216, h: 1968 };
+        let win = IRect {
+            x: 4328,
+            y: -48,
+            w: 1216,
+            h: 1968,
+        };
         assert_eq!(
             clamp_offscreen(win, &[primary], 128),
             Some((2560 - 8 - 1216, 128))
@@ -2871,35 +2900,87 @@ mod tests {
 
     #[test]
     fn visible_window_is_left_alone() {
-        let primary = IRect { x: 0, y: 0, w: 2560, h: 1600 };
+        let primary = IRect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1600,
+        };
         assert_eq!(
-            clamp_offscreen(IRect { x: 100, y: 100, w: 1080, h: 630 }, &[primary], 8),
+            clamp_offscreen(
+                IRect {
+                    x: 100,
+                    y: 100,
+                    w: 1080,
+                    h: 630
+                },
+                &[primary],
+                8
+            ),
             None
         );
         // Mostly visible (straddling the right edge) stays put.
         assert_eq!(
-            clamp_offscreen(IRect { x: 2000, y: 100, w: 1080, h: 630 }, &[primary], 8),
+            clamp_offscreen(
+                IRect {
+                    x: 2000,
+                    y: 100,
+                    w: 1080,
+                    h: 630
+                },
+                &[primary],
+                8
+            ),
             None
         );
     }
 
     #[test]
     fn sliver_of_window_counts_as_lost() {
-        let primary = IRect { x: 0, y: 0, w: 2560, h: 1600 };
+        let primary = IRect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1600,
+        };
         // Only a 100px strip still overlaps: under the 15% threshold.
         assert_eq!(
-            clamp_offscreen(IRect { x: 2460, y: 100, w: 1080, h: 630 }, &[primary], 8),
+            clamp_offscreen(
+                IRect {
+                    x: 2460,
+                    y: 100,
+                    w: 1080,
+                    h: 630
+                },
+                &[primary],
+                8
+            ),
             Some((2560 - 8 - 1080, 100))
         );
     }
 
     #[test]
     fn window_on_secondary_monitor_stays_there() {
-        let primary = IRect { x: 0, y: 0, w: 2560, h: 1600 };
-        let secondary = IRect { x: 2560, y: 0, w: 1920, h: 1080 };
+        let primary = IRect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1600,
+        };
+        let secondary = IRect {
+            x: 2560,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
         assert_eq!(
             clamp_offscreen(
-                IRect { x: 2700, y: 100, w: 1080, h: 630 },
+                IRect {
+                    x: 2700,
+                    y: 100,
+                    w: 1080,
+                    h: 630
+                },
                 &[primary, secondary],
                 8
             ),
@@ -2909,12 +2990,27 @@ mod tests {
 
     #[test]
     fn lost_window_prefers_the_closest_monitor() {
-        let primary = IRect { x: 0, y: 0, w: 2560, h: 1600 };
-        let secondary = IRect { x: 2560, y: 0, w: 1920, h: 1080 };
+        let primary = IRect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1600,
+        };
+        let secondary = IRect {
+            x: 2560,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
         // Just past the secondary's right edge: nearer to it than to primary.
         assert_eq!(
             clamp_offscreen(
-                IRect { x: 4460, y: 100, w: 400, h: 300 },
+                IRect {
+                    x: 4460,
+                    y: 100,
+                    w: 400,
+                    h: 300
+                },
                 &[primary, secondary],
                 8
             ),
@@ -2923,7 +3019,12 @@ mod tests {
         // Nowhere near any monitor: clamps onto the primary.
         assert_eq!(
             clamp_offscreen(
-                IRect { x: 9000, y: 9000, w: 400, h: 300 },
+                IRect {
+                    x: 9000,
+                    y: 9000,
+                    w: 400,
+                    h: 300
+                },
                 &[primary, secondary],
                 8
             ),
@@ -2933,15 +3034,34 @@ mod tests {
 
     #[test]
     fn oversized_window_pins_to_the_cleared_corner() {
-        let primary = IRect { x: 0, y: 0, w: 1280, h: 800 };
+        let primary = IRect {
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 800,
+        };
         assert_eq!(
-            clamp_offscreen(IRect { x: 5000, y: 5000, w: 2144, h: 1360 }, &[primary], 8),
+            clamp_offscreen(
+                IRect {
+                    x: 5000,
+                    y: 5000,
+                    w: 2144,
+                    h: 1360
+                },
+                &[primary],
+                8
+            ),
             Some((8, 8))
         );
         // With a menu reserve the top pins below it instead of under the menu.
         assert_eq!(
             clamp_offscreen(
-                IRect { x: 5000, y: 5000, w: 2144, h: 1360 },
+                IRect {
+                    x: 5000,
+                    y: 5000,
+                    w: 2144,
+                    h: 1360
+                },
                 &[primary],
                 104
             ),
@@ -2951,29 +3071,75 @@ mod tests {
 
     #[test]
     fn grabbable_title_bar_is_left_alone() {
-        let primary = IRect { x: 0, y: 0, w: 2560, h: 1600 };
+        let primary = IRect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1600,
+        };
         // Only the title bar peeks above the bottom edge: 4% of the area but
         // grabbable, so it stays.
         assert_eq!(
-            clamp_offscreen(IRect { x: 2000, y: 1550, w: 1080, h: 630 }, &[primary], 8),
+            clamp_offscreen(
+                IRect {
+                    x: 2000,
+                    y: 1550,
+                    w: 1080,
+                    h: 630
+                },
+                &[primary],
+                8
+            ),
             None
         );
         // Title bar fully below the screen: lost, moves up.
         assert_eq!(
-            clamp_offscreen(IRect { x: 2000, y: 1620, w: 1080, h: 630 }, &[primary], 8),
+            clamp_offscreen(
+                IRect {
+                    x: 2000,
+                    y: 1620,
+                    w: 1080,
+                    h: 630
+                },
+                &[primary],
+                8
+            ),
             Some((1472, 962))
         );
     }
 
     #[test]
     fn degenerate_input_never_moves() {
-        let primary = IRect { x: 0, y: 0, w: 2560, h: 1600 };
+        let primary = IRect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1600,
+        };
         assert_eq!(
-            clamp_offscreen(IRect { x: 5000, y: 5000, w: 0, h: 600 }, &[primary], 8),
+            clamp_offscreen(
+                IRect {
+                    x: 5000,
+                    y: 5000,
+                    w: 0,
+                    h: 600
+                },
+                &[primary],
+                8
+            ),
             None
         );
         assert_eq!(
-            clamp_offscreen(IRect { x: 5000, y: 5000, w: 600, h: 600 }, &[], 8),
+            clamp_offscreen(
+                IRect {
+                    x: 5000,
+                    y: 5000,
+                    w: 600,
+                    h: 600
+                },
+                &[],
+                8
+            ),
             None
         );
     }

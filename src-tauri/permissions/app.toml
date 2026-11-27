@@ -5,7 +5,7 @@
 identifier = "allow-whatsapp-bridge"
 description = "Forward notifications, unread titles and diagnostics from WhatsApp account windows."
 commands.allow = [
-  "notify", "notification_icon", "set_notification_privacy", "set_unread", "dlog", "switcher_accounts", "switch_account", "reload_account_page", "report_sync_offline", "zoom_step",
+  "notify", "notification_icon", "set_notification_privacy", "set_unread", "dlog", "switcher_accounts", "switch_account", "reload_account_page", "report_sync_status", "zoom_step",
   "voice_prefs", "voice_lookup", "transcribe_voice", "transcribe_video", "summarize_voice", "voice_transcripts",
   "search_transcripts",
   "chat_summary_consent", "summarize_chat", "chat_summary_save", "chat_summaries", "chat_summary_delete",

@@ -7,6 +7,8 @@ mod appicon;
 mod applock;
 #[cfg(target_os = "macos")]
 mod appmenu;
+mod attention;
+mod attention_provider;
 mod aumid;
 mod autoreply;
 mod badge;
@@ -31,9 +33,9 @@ mod keys;
 mod links;
 mod llm;
 mod lock;
+mod memory;
 mod mention;
 mod mention_sound;
-mod memory;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod menubar;
 #[cfg_attr(all(windows, target_arch = "aarch64"), allow(dead_code))]
@@ -48,14 +50,12 @@ mod scheduled_messages;
 mod scrollbars;
 mod sessions;
 mod settings;
-mod sync_status;
 #[cfg(all(windows, debug_assertions))]
 mod smoke;
-mod attention;
-mod attention_provider;
+mod sync_status;
+mod theme;
 mod todo;
 mod transcript_store;
-mod theme;
 mod tray;
 mod ui_health;
 mod unread;
@@ -289,7 +289,7 @@ pub fn run() {
             commands::switcher_accounts,
             commands::switch_account,
             commands::reload_account_page,
-            sync_status::report_sync_offline,
+            sync_status::report_sync_status,
             commands::zoom_step,
             clipboard::paste_clipboard,
             commands::get_settings,

@@ -36,8 +36,9 @@
   function install(Orig) {
     if (typeof Orig !== "function" || Orig.__wrWrapped) return Orig;
     function ClassicWorker(url, opts) {
+      var bootstrap = isBootstrap(url);
       var next = opts;
-      if (opts && opts.type === "module" && isBootstrap(url)) {
+      if (opts && opts.type === "module" && bootstrap) {
         next = {};
         for (var k in opts) {
           if (Object.prototype.hasOwnProperty.call(opts, k)) next[k] = opts[k];
@@ -45,7 +46,11 @@
         next.type = "classic";
         note();
       }
-      return new Orig(url, next);
+      var worker = new Orig(url, next);
+      if (bootstrap && typeof window.__wrWatchSyncWorker === "function") {
+        try { window.__wrWatchSyncWorker(worker); } catch (e) {}
+      }
+      return worker;
     }
     ClassicWorker.prototype = Orig.prototype;
     ClassicWorker.__wrWrapped = true;

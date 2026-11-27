@@ -187,6 +187,7 @@ function makeHarness(options = {}) {
     createElement: (tag) => new FakeElement(tag),
     title: "WhatsApp",
     readyState: "complete",
+    visibilityState: options.visibilityState || "visible",
     addEventListener() {},
     querySelectorAll(sel) {
       if (sel === 'input[type="file"]') return menu.mounted ? [mediaInput, docInput] : [];
@@ -211,7 +212,7 @@ function makeHarness(options = {}) {
   };
   const listeners = {};
   const window = {
-    location: { origin: "https://web.whatsapp.com" },
+    location: options.location || { origin: "https://web.whatsapp.com" },
     Notification: options.nativeNotification,
     ServiceWorkerRegistration: options.serviceWorkerRegistration,
     __WHATRUST_WINDOWS__: !!options.windows,
@@ -259,11 +260,11 @@ function makeHarness(options = {}) {
     // unref'd, so bridge.js's 60s stream-GC timer cannot hold node open after the
     // last assertion. The timers still fire — the tests themselves await ref'd
     // sleeps, which keep the loop alive for as long as anything is being checked.
-    setTimeout: (fn, ms) => {
+    setTimeout: options.setTimeout || ((fn, ms) => {
       const t = setTimeout(fn, ms);
       if (t && typeof t.unref === "function") t.unref();
       return t;
-    },
+    }),
     clearTimeout,
     setInterval: options.setInterval || (() => 0),
   };
@@ -381,7 +382,8 @@ async function testFromBase64FastPath() {
   feedFile(w, 13, 0, "fast.mp4", "video/mp4", content, { chunks: 3 });
   const ack = w.__whatrustDropFeed({ op: "commit", drop: 13, files: 1 });
   assert(ack === "QUEUED:1", `fast-path stream queued (got ${ack})`);
-  await sleep(30);
+  const deadline = Date.now() + 1000;
+  while (!mediaInput.batches.length && Date.now() < deadline) await sleep(10);
   const file = mediaInput.batches[0]?.[0];
   assert(fastDecodes === 3, `fromBase64 decoded all three stanzas (got ${fastDecodes})`);
   assert(file?.bytes().equals(content), "fast-path bytes reassemble exactly");
@@ -397,12 +399,14 @@ async function testChunksDecodeBeforeCommit() {
     },
   });
   feedFile(w, 11, 0, "streaming.mp4", "video/mp4", "twelve-bytes", { chunks: 3 });
-  await sleep(30);
+  const decodeDeadline = Date.now() + 1000;
+  while (decodes < 3 && Date.now() < decodeDeadline) await sleep(10);
   assert(decodes === 3, `all three stanzas decoded before commit (got ${decodes})`);
   assert(mediaInput.batches.length === 0, "decoding alone does not inject a file");
   const ack = w.__whatrustDropFeed({ op: "commit", drop: 11, files: 1 });
   assert(ack === "QUEUED:1", `decoded stream still validates at commit (got ${ack})`);
-  await sleep(30);
+  const attachDeadline = Date.now() + 1000;
+  while (!mediaInput.batches.length && Date.now() < attachDeadline) await sleep(10);
   assert(mediaInput.batches[0]?.[0]?.name === "streaming.mp4", "decoded file injects after commit");
 }
 
@@ -1056,7 +1060,55 @@ async function testElementsOnThePageBeforeTheMenuAreNeverClicked() {
   assert(h.mediaInput.batches.length === 1, "the photo still attaches once the menu renders");
 }
 
+async function testReconnectUnregistersBeforeReload() {
+  console.log("reconnect unregisters the service worker before using the browser's reload");
+  const calls = [];
+  const location = { origin: "https://web.whatsapp.com" };
+  Object.defineProperty(location, "reload", { value: function () {
+    calls.push(this === location ? "reload" : "wrong receiver");
+  } });
+  const { window } = makeHarness({
+    location,
+    navigator: { serviceWorker: {
+      async getRegistrations() {
+        return [{ async unregister() { calls.push("unregister"); } }];
+      },
+    } },
+  });
+  window.__whatrustRecoverConnection();
+  await new Promise(setImmediate);
+  assert(calls.join(",") === "unregister,reload", "unregister finishes before the own Location method runs");
+}
+
+function testHiddenAccountCanRetryReconnect() {
+  console.log("reconnect can be retried from the tray while the account stays hidden");
+  const timers = [];
+  const { window, invocations } = makeHarness({
+    visibilityState: "hidden",
+    setTimeout(fn, ms) { timers.push({ fn, ms }); },
+  });
+  const reloads = () => invocations.filter(({ cmd }) => cmd === "reload_account_page").length;
+  function fireLastTimer(ms) {
+    const index = timers.findLastIndex((timer) => timer.ms === ms);
+    if (index >= 0) timers.splice(index, 1)[0].fn();
+  }
+  window.__whatrustLocked = true;
+  window.__whatrustRecoverConnection();
+  assert(!timers.some((timer) => timer.ms === 1200), "the app lock blocks recovery");
+  window.__whatrustLocked = false;
+  window.__whatrustRecoverConnection();
+  window.__whatrustRecoverConnection();
+  fireLastTimer(1200);
+  assert(reloads() === 1, "the first attempt falls back to native reload once");
+  fireLastTimer(1500);
+  window.__whatrustRecoverConnection();
+  fireLastTimer(1200);
+  assert(reloads() === 2, "a failed hidden-page reload allows a new attempt");
+}
+
 const tests = [
+  testReconnectUnregistersBeforeReload,
+  testHiddenAccountCanRetryReconnect,
   testMenuEntryIsClickedAsSoonAsTheMenuRenders,
   testElementsOnThePageBeforeTheMenuAreNeverClicked,
   testEmptyPasteAttachesTheClipboardImage,

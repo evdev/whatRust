@@ -174,24 +174,22 @@
   // sync is still queued, `beforeunload` returns a warning string. This
   // webview treats that as "cancel" and shows no dialog, so the click does
   // nothing and only quitting the app loads a fresh page. An intentional
-  // reload is allowed through. If the banner is still there afterwards, Rust
-  // reloads the webview — the same recovery as restarting, without the quit.
-  var nativeReload = null;
-  try { nativeReload = Location.prototype.reload; } catch (e) {}
+  // reload clears that handler. Rust reloads the webview if the page stays put.
+  // Browsers expose reload directly on the Location instance.
+  var nativeReload = window.location.reload;
   function allowReload() {
     try { window.onbeforeunload = null; } catch (e) {}
   }
   var recovery = 0;
-  function reloadFresh(self, args) {
-    // A stuck service worker keeps the dead socket across location.reload().
-    // Quitting the app kills that worker; unregistering it is the same step.
+  function reloadFresh() {
+    // Unregister a stuck service worker so a fresh worker can take over.
     allowReload();
     var done = false;
     function go() {
       if (done) return;
       done = true;
       allowReload();
-      try { nativeReload.apply(self, args); } catch (e) {}
+      try { nativeReload.call(window.location); } catch (e) {}
     }
     try {
       var sw = navigator.serviceWorker;
@@ -204,13 +202,6 @@
       }
     } catch (e) {}
     go();
-  }
-  if (typeof nativeReload === "function") {
-    try {
-      Location.prototype.reload = function () {
-        reloadFresh(this, arguments);
-      };
-    } catch (e) {}
   }
   function reconnectLabel(text) {
     if (!text || text.length > 80) return false;
@@ -248,17 +239,17 @@
     return false;
   }
   function recoverConnection() {
-    if (recovery < 0) return;
+    if (window.__whatrustLocked || recovery < 0) return;
     recovery = -1;
     allowReload();
     var hid = false;
     window.addEventListener("pagehide", function () { hid = true; }, { capture: true, once: true });
-    if (typeof nativeReload === "function") reloadFresh(window.location, []);
+    if (typeof nativeReload === "function") reloadFresh();
     setTimeout(function () {
       if (hid) return;
       invoke("reload_account_page");
       setTimeout(function () {
-        if (recovery < 0 && document.visibilityState !== "hidden") recovery = 0;
+        if (recovery < 0) recovery = 0;
       }, 1500);
     }, 1200);
   }
@@ -268,6 +259,7 @@
     recoverConnection();
   };
   document.addEventListener("click", function (event) {
+    if (recovery < 0 || window.__whatrustLocked) return;
     var control = reconnectControl(event.target);
     if (!control) return;
     var token = ++recovery;

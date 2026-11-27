@@ -15,6 +15,7 @@ pub fn badge_state(count: u32) -> BadgeState {
 
 use crate::accounts::{self, UnreadMap};
 use crate::i18n::{tr, trf};
+use crate::sync_status::SyncStatus;
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
@@ -86,7 +87,14 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             match id {
                 "accounts" | "settings" => crate::window::open_settings_window(app),
                 "update" => crate::update_service::open_updates(app),
-                "reload" => crate::sync_status::reconnect_from_tray(app),
+                "reconnect" => crate::sync_status::reconnect_from_tray(app),
+                "reload" => {
+                    let label =
+                        crate::lock::guard(&app.state::<crate::accounts::ActiveAccount>()).clone();
+                    if let Some(view) = app.get_webview(&label) {
+                        let _ = view.reload();
+                    }
+                }
                 "lock" => crate::lock::lock_now(app),
                 "quit" => {
                     // Restore panel geometry before window state is saved.
@@ -142,7 +150,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 
 /// Rebuild the tray menu from the current accounts list: one `acct:<id>` item per
 /// account showing `name (n)`, then `Accounts… / Settings / Reload / [Update to X] / [Lock now] / Quit`.
-/// While an account is offline, Reconnect is the first item instead of Reload.
+/// Reconnect is the first item when an account reports a connection problem.
 pub fn rebuild_menu(app: &AppHandle) {
     let Some(tray) = app.tray_by_id("main-tray") else {
         return;
@@ -163,10 +171,11 @@ pub fn rebuild_menu(app: &AppHandle) {
     let mut accts = f.accounts.clone();
     accts.sort_by_key(|a| a.order);
 
-    let offline = crate::sync_status::any_offline(app);
+    let needs_reconnect = crate::sync_status::status(app) != SyncStatus::Online;
     let mut builder = MenuBuilder::new(app);
-    if offline {
-        let Ok(reconnect) = MenuItemBuilder::with_id("reload", tr("Reconectar")).build(app) else {
+    if needs_reconnect {
+        let Ok(reconnect) = MenuItemBuilder::with_id("reconnect", tr("Reconectar")).build(app)
+        else {
             return;
         };
         builder = builder.item(&reconnect).separator();
@@ -192,16 +201,15 @@ pub fn rebuild_menu(app: &AppHandle) {
     else {
         return;
     };
-    let Ok(reload) = MenuItemBuilder::with_id("reload", tr("Recarregar")).build(app) else {
-        return;
-    };
-    let show_reload = !offline;
     let Ok(quit) = MenuItemBuilder::with_id("quit", tr("Sair")).build(app) else {
         return;
     };
 
     let mut tail = builder.separator().item(&accounts_item).item(&settings);
-    if show_reload {
+    if !needs_reconnect {
+        let Ok(reload) = MenuItemBuilder::with_id("reload", tr("Recarregar")).build(app) else {
+            return;
+        };
         tail = tail.item(&reload);
     }
     if let Some(version) = crate::update_service::available_version() {
@@ -280,27 +288,34 @@ pub fn apply_visibility(app: &AppHandle, visible: bool) {
     }
 }
 
-/// Text beside the tray icon. Unread count wins; otherwise an offline session
-/// is labeled so a hidden window is not the only place that looks signed in.
-fn presence_title(offline: bool, count: u32) -> Option<String> {
+/// Text beside the tray icon, with the unread count taking priority.
+fn presence_title(status: SyncStatus, count: u32) -> Option<String> {
     if count > 0 {
-        Some(count.to_string())
-    } else if offline {
-        Some(tr("Offline").into_owned())
-    } else {
-        None
+        return Some(count.to_string());
+    }
+    match status {
+        SyncStatus::Online => None,
+        SyncStatus::Stale => Some(tr("Verificar sincronização").into_owned()),
+        SyncStatus::Offline => Some(tr("Conta offline").into_owned()),
     }
 }
 
-fn presence_tooltip(offline: bool, count: u32) -> String {
-    if offline && count > 0 {
-        trf("{0} conversas não lidas — WhatsApp offline", &[&count])
-    } else if offline {
-        tr("WhatsApp está offline").into_owned()
-    } else if count > 0 {
-        trf("{0} conversas não lidas — WhatsApp", &[&count])
-    } else {
-        "WhatsApp".to_string()
+fn presence_tooltip(status: SyncStatus, count: u32) -> String {
+    match (status, count > 0) {
+        (SyncStatus::Online, false) => "WhatsApp".to_string(),
+        (SyncStatus::Online, true) => trf("{0} conversas não lidas — WhatsApp", &[&count]),
+        (SyncStatus::Stale, false) => {
+            tr("Uma conta do WhatsApp pode ter parado de sincronizar").into_owned()
+        }
+        (SyncStatus::Stale, true) => trf(
+            "{0} conversas não lidas — Uma conta do WhatsApp pode ter parado de sincronizar",
+            &[&count],
+        ),
+        (SyncStatus::Offline, false) => tr("Uma conta do WhatsApp está offline").into_owned(),
+        (SyncStatus::Offline, true) => trf(
+            "{0} conversas não lidas — Uma conta do WhatsApp está offline",
+            &[&count],
+        ),
     }
 }
 
@@ -311,9 +326,9 @@ pub fn update_badge(app: &AppHandle, count: u32) {
     let Some(tray) = app.tray_by_id("main-tray") else {
         return;
     };
-    let offline = crate::sync_status::any_offline(app);
-    let _ = tray.set_title(presence_title(offline, count));
-    let _ = tray.set_tooltip(Some(presence_tooltip(offline, count)));
+    let status = crate::sync_status::status(app);
+    let _ = tray.set_title(presence_title(status, count));
+    let _ = tray.set_tooltip(Some(presence_tooltip(status, count)));
     let icon = match badge_state(count) {
         BadgeState::Clear => ICON_NORMAL,
         BadgeState::Count(_) => ICON_UNREAD,
@@ -332,6 +347,7 @@ mod tests {
         BadgeState, TrayClick,
     };
     use crate::i18n::{current, tr_in, trf_in};
+    use crate::sync_status::SyncStatus::{Offline, Online, Stale};
 
     #[test]
     fn zero_is_clear() {
@@ -359,24 +375,50 @@ mod tests {
     #[test]
     fn an_offline_tray_says_so_without_hiding_the_unread_count() {
         let lang = current();
-        assert_eq!(presence_title(false, 0), None);
+        assert_eq!(presence_title(Online, 0), None);
         assert_eq!(
-            presence_title(true, 0).as_deref(),
-            Some(tr_in(lang, "Offline").as_ref())
+            presence_title(Offline, 0).as_deref(),
+            Some(tr_in(lang, "Conta offline").as_ref())
         );
-        assert_eq!(presence_title(true, 4).as_deref(), Some("4"));
-        assert_eq!(presence_tooltip(false, 0), "WhatsApp");
+        assert_eq!(presence_title(Offline, 4).as_deref(), Some("4"));
+        assert_eq!(presence_tooltip(Online, 0), "WhatsApp");
         assert_eq!(
-            presence_tooltip(true, 0),
-            tr_in(lang, "WhatsApp está offline")
-        );
-        assert_eq!(
-            presence_tooltip(true, 3),
-            trf_in(lang, "{0} conversas não lidas — WhatsApp offline", &[&3])
+            presence_tooltip(Offline, 0),
+            tr_in(lang, "Uma conta do WhatsApp está offline")
         );
         assert_eq!(
-            presence_tooltip(false, 3),
+            presence_tooltip(Offline, 3),
+            trf_in(
+                lang,
+                "{0} conversas não lidas — Uma conta do WhatsApp está offline",
+                &[&3]
+            )
+        );
+        assert_eq!(
+            presence_tooltip(Online, 3),
             trf_in(lang, "{0} conversas não lidas — WhatsApp", &[&3])
+        );
+    }
+
+    #[test]
+    fn a_suspected_stall_has_its_own_tray_text() {
+        let lang = current();
+        assert_eq!(
+            presence_title(Stale, 0).as_deref(),
+            Some(tr_in(lang, "Verificar sincronização").as_ref())
+        );
+        assert_eq!(presence_title(Stale, 4).as_deref(), Some("4"));
+        assert_eq!(
+            presence_tooltip(Stale, 0),
+            tr_in(lang, "Uma conta do WhatsApp pode ter parado de sincronizar")
+        );
+        assert_eq!(
+            presence_tooltip(Stale, 3),
+            trf_in(
+                lang,
+                "{0} conversas não lidas — Uma conta do WhatsApp pode ter parado de sincronizar",
+                &[&3]
+            )
         );
     }
 

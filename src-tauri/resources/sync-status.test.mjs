@@ -2,10 +2,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { setImmediate } from "node:timers/promises";
+import { MessageChannel } from "node:worker_threads";
 import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("./sync-status.js", import.meta.url), "utf8");
 const bridge = fs.readFileSync(new URL("./bridge.js", import.meta.url), "utf8");
+const classicWorker = fs.readFileSync(new URL("./classic-worker.js", import.meta.url), "utf8");
 
 function load() {
   const sandbox = {
@@ -58,6 +61,8 @@ test("a connected socket is live and a dead one is not", () => {
   reading(api.connectionReading(liveSocket({ transport: 2 })), false, false);
   reading(api.connectionReading(liveSocket({ transport: 3 })), false, true);
   reading(api.connectionReading(liveSocket({ state: 3 })), false, true);
+  reading(api.connectionReading(liveSocket({ state: 4 })), false, true);
+  reading(api.connectionReading(liveSocket({ state: "FUTURE_STATE" })), false, true);
   assert.equal(api.connectionReading(null), null);
   reading(
     api.connectionReading({ conn: { isOnline: () => true, getStreamData: () => ({ mode: "OFFLINE", info: "OFFLINE" }) } }),
@@ -80,11 +85,12 @@ test("whatsapp's own offline copy counts, a chat quoting it does not", () => {
     textContent: "WhatsApp is offline.",
     closest: (sel) => (sel.includes("__whatrust_sync_tab") ? {} : null),
   };
+  const hidden = { ...alert, getClientRects: () => [] };
   const doc = {
-    querySelectorAll: () => [alert, quoted, ours],
+    querySelectorAll: () => [alert, quoted, ours, hidden],
   };
   assert.equal(api.pageSaysOffline(doc), true);
-  doc.querySelectorAll = () => [quoted, ours];
+  doc.querySelectorAll = () => [quoted, ours, hidden];
   assert.equal(api.pageSaysOffline(doc), false);
 });
 
@@ -152,56 +158,66 @@ test("a live event or later socket traffic clears the stale warning", () => {
   assert.equal(api.assess(state, again + limits.graceMs, limits), "hidden");
 });
 
-test("a connected session that stops receiving is stale even without a clock jump", () => {
+test("a connected session can sit quiet for an hour with no warning", () => {
   const api = load();
   const limits = api.LIMITS;
   let state = api.noteLoggedIn(api.initialState(), true);
   state = api.noteReading(state, { live: true, pending: false }, 0, false);
   state = api.noteTraffic(state, 0);
-  assert.equal(api.assess(state, limits.stallMs - 1, limits), "hidden");
-  assert.equal(api.assess(state, limits.stallMs, limits), "stale");
-  state = api.noteTraffic(state, limits.stallMs);
-  assert.equal(api.assess(state, limits.stallMs, limits), "hidden");
-  assert.equal(api.assess(state, limits.stallMs * 2, limits), "stale");
-  let quiet = api.noteLoggedIn(api.initialState(), true);
-  quiet = api.noteReading(quiet, { live: true, pending: false }, 0, false);
-  assert.equal(api.assess(quiet, limits.stallMs - 1, limits), "hidden");
-  assert.equal(api.assess(quiet, limits.stallMs, limits), "stale", "a session that never receives anything goes stale too");
+  for (let now = 0; now <= 60 * 60_000; now += 60_000) {
+    state = api.noteTick(state, now, limits.stallMs);
+    assert.equal(api.assess(state, now, limits), "hidden");
+  }
 });
 
-test("incoming port messages count as sync traffic and can be removed", () => {
+test("only message ports attached to the WhatsApp worker count as sync traffic", { timeout: 2000 }, async (t) => {
   const api = load();
+  class Worker extends EventTarget {
+    messageListeners = 0;
+    addEventListener(type, listener) {
+      if (type === "message") this.messageListeners++;
+      super.addEventListener(type, listener);
+    }
+    postMessage(message, options) {
+      const ports = Array.isArray(options) ? options : options.transfer;
+      this.remotePort = structuredClone(ports[0], { transfer: ports });
+    }
+  }
+  const target = { MessageChannel, Worker };
+  vm.runInNewContext(classicWorker, { window: target });
+  // The bridge installs another Worker wrapper between these two scripts.
+  const ClassicWorker = target.Worker;
+  target.Worker = function (url, options) { return new ClassicWorker(url, options); };
   let hits = 0;
-  let stored = null;
-  const added = [];
-  const removed = [];
-  const proto = {
-    addEventListener(type, fn) { added.push([type, fn]); },
-    removeEventListener(type, fn) { removed.push([type, fn]); },
-  };
-  Object.defineProperty(proto, "onmessage", {
-    configurable: true,
-    get() { return stored; },
-    set(fn) { stored = fn; },
-  });
-  function MessagePort() {}
-  MessagePort.prototype = proto;
-  const target = { WeakMap, MessagePort, __wrSyncTraffic() { hits++; } };
-  api.watchSocketMessages(target);
-  const port = new MessagePort();
-  let ran = 0;
-  function onPort() { ran++; }
-  port.addEventListener("message", onPort);
-  added[0][1]();
+  api.watchSocketMessages(target, () => { hits++; });
+  const worker = new target.Worker("https://web.whatsapp.com/static_resources/webworker_v1/init_script/");
+  const other = new target.Worker("https://web.whatsapp.com/other.js");
+  assert.equal(worker.messageListeners, 1);
+  assert.equal(other.messageListeners, 0);
+
+  async function receive(port, remote) {
+    t.after(() => { port.close(); remote.close(); });
+    const received = new Promise((resolve) => { port.onmessage = resolve; });
+    remote.postMessage("test");
+    assert.equal((await received).data, "test");
+  }
+
+  const unrelated = new target.MessageChannel();
+  other.postMessage({}, [unrelated.port2]);
+  await receive(unrelated.port1, other.remotePort);
+  worker.dispatchEvent(new MessageEvent("message", { data: "worker_started" }));
+  assert.equal(hits, 0);
+
+  const outgoing = new target.MessageChannel();
+  worker.postMessage({}, { transfer: [outgoing.port2] });
+  await receive(outgoing.port1, worker.remotePort);
   assert.equal(hits, 1);
-  assert.equal(ran, 1);
-  port.onmessage = function () { ran++; };
-  port.onmessage();
-  assert.equal(hits, 2);
-  port.removeEventListener("message", onPort);
-  assert.equal(removed[0][1], added[0][1], "removeEventListener sees the wrapped listener");
-  api.watchSocketMessages(target);
-  assert.equal(proto.__wrSyncMsgPatch, true);
+
+  const incoming = new MessageChannel();
+  worker.dispatchEvent(new MessageEvent("message", { ports: [incoming.port1] }));
+  worker.dispatchEvent(new MessageEvent("message", { ports: [incoming.port1] }));
+  await receive(incoming.port1, incoming.port2);
+  assert.equal(hits, 2, "the same port is observed once");
 });
 
 test("hiding the window overnight is a stall; a short hide is not", () => {
@@ -213,9 +229,13 @@ test("hiding the window overnight is a stall; a short hide is not", () => {
   state = api.noteVisibility(state, true, 120_000, limits.hiddenStallMs);
   state = api.noteVisibility(state, false, 120_000 + limits.hiddenStallMs, limits.hiddenStallMs);
   assert.equal(state.wakeAt, 120_000 + limits.hiddenStallMs);
+  state = api.noteVisibility(api.initialState(), true, 0, limits.hiddenStallMs);
+  state = api.noteTraffic(state, limits.hiddenStallMs - 1);
+  state = api.noteVisibility(state, false, limits.hiddenStallMs, limits.hiddenStallMs);
+  assert.equal(state.wakeAt, null, "recent traffic proves the hidden account kept syncing");
 });
 
-test("a handshake still in progress is not called stale, and a stuck one is offline", () => {
+test("a slow handshake is normal, and a stuck one is only suspected stale", () => {
   const api = load();
   const limits = api.LIMITS;
   let state = api.noteLoggedIn(api.initialState(), true);
@@ -224,7 +244,7 @@ test("a handshake still in progress is not called stale, and a stuck one is offl
   const wake = state.wakeAt;
   state = api.noteReading(state, { live: false, pending: true }, wake, false);
   assert.equal(api.assess(state, wake + limits.graceMs, limits), "hidden");
-  assert.equal(api.assess(state, wake + limits.pendingHoldMs, limits), "offline");
+  assert.equal(api.assess(state, wake + limits.pendingHoldMs, limits), "stale");
 });
 
 test("the browser being offline and whatsapp's banner show immediately enough to act", () => {
@@ -242,10 +262,11 @@ test("the browser being offline and whatsapp's banner show immediately enough to
   assert.equal(api.assess(state, limits.browserHoldMs, limits), "hidden");
 });
 
-test("a small rail button appears after a long idle and reconnect reloads the page", () => {
+test("the rail reconnects and sends tray updates in order even if IPC is slow", async () => {
   let clock = 5_000;
   const timeouts = [];
   const calls = [];
+  const pendingReports = [];
   const ids = new Set(["pane-side"]);
   const listeners = {};
   function Node(tag) {
@@ -263,7 +284,10 @@ test("a small rail button appears after a long idle and reconnect reloads the pa
   Node.prototype.getAttribute = function (name) { return Object.hasOwn(this.attrs, name) ? this.attrs[name] : null; };
   Node.prototype.addEventListener = function (type, fn) { (this.listeners[type] ||= []).push(fn); };
   Node.prototype.appendChild = function (child) {
-    child.parent = this;
+    if (child.parentNode) {
+      child.parentNode.children = child.parentNode.children.filter((node) => node !== child);
+    }
+    child.parentNode = this;
     this.children = this.children.filter((node) => node !== child);
     this.children.push(child);
     child.isConnected = true;
@@ -276,11 +300,11 @@ test("a small rail button appears after a long idle and reconnect reloads the pa
   stack.setAttribute("data-wr-todo-stack", "native");
   documentElement.appendChild(stack);
   const doc = {
-    documentElement,
+    documentElement: null,
     visibilityState: "visible",
     createElement: (tag) => new Node(tag),
     getElementById: (id) => (ids.has(id) ? { id } : null),
-    querySelector: (sel) => (String(sel).includes("data-wr-todo-stack") ? stack : null),
+    querySelector: (sel) => (doc.documentElement && sel.includes("data-wr-todo-stack") ? stack : null),
     querySelectorAll: () => [],
     addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
   };
@@ -298,41 +322,69 @@ test("a small rail button appears after a long idle and reconnect reloads the pa
     setTimeout(fn, ms) { timeouts.push({ fn, ms }); },
     setInterval() {},
     __whatrustRecoverConnection() { calls.push("recover"); },
-    __TAURI__: { core: { invoke: async (cmd, args) => { calls.push({ cmd, args }); return null; } } },
+    __TAURI__: { core: { invoke(cmd, args) {
+      calls.push({ cmd, args });
+      if (cmd === "report_sync_status") {
+        return new Promise((resolve, reject) => pendingReports.push({ resolve, reject }));
+      }
+      return Promise.resolve();
+    } } },
   };
-  target.__WR_LANG = "en";
   target.Date = { now: () => clock };
   target.window = target;
   target.globalThis = target;
   target.__wrSyncStatus = null;
   vm.runInNewContext(source, target, { filename: "sync-status.js" });
   const api = target.__wrSyncStatus;
-  try {
-    api.mount(target);
-    const tab = stack.children.find((child) => child.id === "__whatrust_sync_tab");
-    assert.ok(tab, "the sync button joins the shortcut stack");
-    assert.equal(stack.lastChild, tab, "it sits last, right above Media");
-    assert.equal(tab.hidden, true);
-    assert.equal(tab.style.display, "none");
-    clock += api.LIMITS.stallMs + 10;
-    target.__wrSyncRefresh();
-    assert.equal(tab.hidden, true, "still inside the grace period");
-    assert.ok(timeouts.some((timer) => timer.ms >= api.LIMITS.graceMs));
-    clock += api.LIMITS.graceMs + 50;
-    timeouts.at(-1).fn();
-    assert.equal(tab.hidden, false);
-    assert.equal(tab.style.display, "flex");
-    assert.equal(tab.style.position, "relative", "no fixed banner covering the chat");
-    assert.equal(tab.getAttribute("aria-label"), "WhatsApp stopped syncing. — Reconnect");
-    assert.equal(tab.style.background, "#f0bd68");
-    tab.listeners.click.forEach((fn) => fn({ stopPropagation() {} }));
-    assert.ok(calls.includes("recover"));
-    assert.ok(calls.some((call) => call.cmd === "report_sync_offline" && call.args.offline === true));
-    tab.listeners.contextmenu.forEach((fn) => fn({ preventDefault() {}, stopPropagation() {} }));
-    assert.equal(tab.hidden, true);
-    const offlineCalls = calls.filter((call) => call.cmd === "report_sync_offline");
-    assert.equal(offlineCalls.at(-1).args.offline, false, "dismissing a suspicion clears the tray too");
-  } finally {
-    clock = 0;
-  }
+  api.mount(target);
+  assert.equal(typeof target.__wrWatchSyncWorker, "function", "the watcher starts before the DOM exists");
+  pendingReports.shift().resolve();
+  await setImmediate();
+  doc.documentElement = documentElement;
+  target.__wrSyncRefresh();
+  const tab = stack.children.find((child) => child.id === "__whatrust_sync_tab");
+  assert.ok(tab, "the sync button joins the shortcut stack");
+  assert.equal(stack.lastChild, tab, "it sits last, right above Media");
+  assert.equal(tab.hidden, true);
+  assert.equal(tab.style.display, "none");
+  clock += api.LIMITS.stallMs + 10;
+  target.__wrSyncRefresh();
+  assert.equal(tab.hidden, true, "still inside the grace period");
+  assert.ok(timeouts.some((timer) => timer.ms >= api.LIMITS.graceMs));
+  clock += api.LIMITS.graceMs + 50;
+  timeouts.at(-1).fn();
+  assert.equal(tab.hidden, false);
+  assert.equal(tab.style.display, "flex");
+  assert.equal(tab.style.position, "relative", "no fixed banner covering the chat");
+  assert.equal(tab.getAttribute("aria-label"), "WhatsApp may have stopped syncing. — Reconnect");
+  assert.equal(tab.getAttribute("role"), null, "the native button keeps its accessible role");
+  assert.equal(tab.style.background, "#f0bd68");
+  tab.listeners.click.forEach((fn) => fn({ stopPropagation() {} }));
+  assert.ok(calls.includes("recover"));
+
+  const statusCalls = () => calls.filter((call) => call.cmd === "report_sync_status").map((call) => call.args.status);
+  assert.deepEqual(statusCalls(), ["online", "stale"]);
+  tab.listeners.contextmenu.forEach((fn) => fn({ preventDefault() {}, stopPropagation() {} }));
+  assert.equal(tab.hidden, true);
+  assert.deepEqual(statusCalls(), ["online", "stale"], "wait for the pending report before clearing it");
+  pendingReports.shift().resolve();
+  await setImmediate();
+  assert.deepEqual(statusCalls(), ["online", "stale", "online"], "dismissing a suspicion clears the tray too");
+  pendingReports.shift().reject(new Error("temporary failure"));
+  await setImmediate();
+  target.__wrSyncRefresh();
+  assert.deepEqual(statusCalls(), ["online", "stale", "online", "online"], "retry a failed report on the next check");
+  pendingReports.shift().resolve();
+  await setImmediate();
+
+  target.navigator.onLine = false;
+  target.__wrSyncRefresh();
+  clock += api.LIMITS.browserHoldMs;
+  target.__wrSyncRefresh();
+  assert.equal(tab.getAttribute("aria-label"), "WhatsApp is offline. — Reconnect");
+  assert.equal(statusCalls().at(-1), "offline");
+  tab.listeners.contextmenu.forEach((fn) => fn({ preventDefault() {}, stopPropagation() {} }));
+  assert.equal(tab.hidden, true);
+  assert.equal(statusCalls().at(-1), "offline", "dismissing the button keeps a real disconnection on the tray");
+  pendingReports.shift().resolve();
 });

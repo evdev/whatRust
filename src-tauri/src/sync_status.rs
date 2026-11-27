@@ -1,45 +1,56 @@
-//! Whether an open WhatsApp account has stopped syncing.
-//!
-//! The page reports it. The tray then says so and offers Reconnect, including
-//! when the window was left hidden overnight and the chat list still looks fine.
+//! Connection status reported by each open WhatsApp account.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Manager};
 
-#[derive(Default)]
-pub struct SyncHealth(Mutex<HashSet<String>>);
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncStatus {
+    #[default]
+    Online,
+    Stale,
+    Offline,
+}
 
-/// Record one account's report. Returns whether the set actually changed.
-pub fn apply_report(offline: &mut HashSet<String>, label: &str, down: bool) -> bool {
-    let had = offline.contains(label);
-    if down {
-        offline.insert(label.to_string());
-    } else {
-        offline.remove(label);
-    }
-    had != down
+#[derive(Default)]
+pub struct SyncHealth(Mutex<HashMap<String, SyncStatus>>);
+
+fn apply_report(
+    accounts: &mut HashMap<String, SyncStatus>,
+    label: &str,
+    status: SyncStatus,
+) -> bool {
+    let previous = match status {
+        SyncStatus::Online => accounts.remove(label),
+        _ => accounts.insert(label.to_string(), status),
+    };
+    previous.unwrap_or_default() != status
 }
 
 /// Drop a closed account, or every account when the shared window goes away.
-pub fn forget_label(offline: &mut HashSet<String>, label: &str) -> bool {
+fn forget_label(accounts: &mut HashMap<String, SyncStatus>, label: &str) -> bool {
     if label == "main" {
-        let had = !offline.is_empty();
-        offline.clear();
+        let had = !accounts.is_empty();
+        accounts.clear();
         had
     } else {
-        offline.remove(label)
+        accounts.remove(label).is_some()
     }
 }
 
-pub fn any_offline(app: &AppHandle) -> bool {
+fn highest_status(accounts: &HashMap<String, SyncStatus>) -> SyncStatus {
+    accounts.values().copied().max().unwrap_or_default()
+}
+
+pub fn status(app: &AppHandle) -> SyncStatus {
     let Some(state) = app.try_state::<SyncHealth>() else {
-        return false;
+        return SyncStatus::Online;
     };
-    let mut offline = crate::lock::guard(&state.0);
-    offline.retain(|label| app.get_webview(label).is_some());
-    !offline.is_empty()
+    let mut accounts = crate::lock::guard(&state.0);
+    accounts.retain(|label, _| app.get_webview(label).is_some());
+    highest_status(&accounts)
 }
 
 pub fn forget(app: &AppHandle, label: &str) {
@@ -47,8 +58,8 @@ pub fn forget(app: &AppHandle, label: &str) {
         return;
     };
     let changed = {
-        let mut offline = crate::lock::guard(&state.0);
-        forget_label(&mut offline, label)
+        let mut accounts = crate::lock::guard(&state.0);
+        forget_label(&mut accounts, label)
     };
     if changed {
         refresh_tray(app);
@@ -56,12 +67,15 @@ pub fn forget(app: &AppHandle, label: &str) {
 }
 
 fn refresh_tray(app: &AppHandle) {
-    crate::tray::rebuild_menu(app);
-    let total = app
-        .try_state::<crate::accounts::UnreadMap>()
-        .map(|map| crate::accounts::aggregate_unread(&crate::lock::guard(&map)))
-        .unwrap_or(0);
-    crate::tray::update_badge(app, total);
+    let ui = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        crate::tray::rebuild_menu(&ui);
+        let total = ui
+            .try_state::<crate::accounts::UnreadMap>()
+            .map(|map| crate::accounts::aggregate_unread(&crate::lock::guard(&map)))
+            .unwrap_or(0);
+        crate::tray::update_badge(&ui, total);
+    });
 }
 
 /// Page-side recovery. Falls back to a plain navigation when the hook from
@@ -74,21 +88,15 @@ pub fn reconnect_view(view: &tauri::Webview) {
     }
 }
 
-/// Reconnect every account that reported itself offline. With none reported,
-/// reconnect the account the tray already treats as current.
+/// Reconnect the accounts that still report a sync problem.
 pub fn reconnect_from_tray(app: &AppHandle) {
     let labels: Vec<String> = {
         let Some(state) = app.try_state::<SyncHealth>() else {
-            reconnect_active(app);
             return;
         };
-        let offline = crate::lock::guard(&state.0);
-        offline.iter().cloned().collect()
+        let accounts = crate::lock::guard(&state.0);
+        accounts.keys().cloned().collect()
     };
-    if labels.is_empty() {
-        reconnect_active(app);
-        return;
-    }
     for label in labels {
         if let Some(view) = app.get_webview(&label) {
             reconnect_view(&view);
@@ -96,21 +104,11 @@ pub fn reconnect_from_tray(app: &AppHandle) {
     }
 }
 
-fn reconnect_active(app: &AppHandle) {
-    let Some(active) = app.try_state::<crate::accounts::ActiveAccount>() else {
-        return;
-    };
-    let label = crate::lock::guard(&active).clone();
-    if let Some(view) = app.get_webview(&label) {
-        reconnect_view(&view);
-    }
-}
-
 #[tauri::command]
-pub fn report_sync_offline(
+pub fn report_sync_status(
     window: tauri::Webview,
     app: tauri::AppHandle,
-    offline: bool,
+    status: SyncStatus,
 ) -> Result<(), String> {
     crate::integration::remote(&window)?;
     crate::lock::require_unlocked(&app)?;
@@ -120,14 +118,14 @@ pub fn report_sync_offline(
     }
     let changed = {
         let state = app.state::<SyncHealth>();
-        let mut down = crate::lock::guard(&state.0);
-        apply_report(&mut down, &label, offline)
+        let mut accounts = crate::lock::guard(&state.0);
+        apply_report(&mut accounts, &label, status)
     };
     if changed {
-        crate::dlog::log(if offline {
-            "sync: account reported offline"
-        } else {
-            "sync: account reported online"
+        crate::dlog::log(match status {
+            SyncStatus::Online => "sync: account reported online",
+            SyncStatus::Stale => "sync: account may have stopped syncing",
+            SyncStatus::Offline => "sync: account reported offline",
         });
         refresh_tray(&app);
     }
@@ -136,47 +134,49 @@ pub fn report_sync_offline(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_report, forget_label};
-    use std::collections::HashSet;
+    use super::{apply_report, forget_label, highest_status, SyncStatus::*};
+    use std::collections::HashMap;
 
     #[test]
     fn a_repeat_report_does_not_count_as_a_change() {
-        let mut offline = HashSet::new();
-        assert!(apply_report(&mut offline, "wa-default", true));
-        assert!(!apply_report(&mut offline, "wa-default", true));
-        assert!(apply_report(&mut offline, "wa-default", false));
-        assert!(!apply_report(&mut offline, "wa-default", false));
-        assert!(offline.is_empty());
+        let mut accounts = HashMap::new();
+        assert!(apply_report(&mut accounts, "wa-default", Stale));
+        assert!(!apply_report(&mut accounts, "wa-default", Stale));
+        assert!(apply_report(&mut accounts, "wa-default", Offline));
+        assert!(apply_report(&mut accounts, "wa-default", Online));
+        assert!(!apply_report(&mut accounts, "wa-default", Online));
+        assert!(accounts.is_empty());
     }
 
     #[test]
-    fn accounts_are_tracked_separately() {
-        let mut offline = HashSet::new();
-        apply_report(&mut offline, "wa-default", true);
-        apply_report(&mut offline, "wa-acct-2", true);
-        assert!(apply_report(&mut offline, "wa-default", false));
-        assert!(offline.contains("wa-acct-2"));
-        assert!(!offline.contains("wa-default"));
+    fn the_tray_is_offline_only_when_at_least_one_account_is_offline() {
+        let mut accounts = HashMap::new();
+        assert_eq!(highest_status(&accounts), Online);
+        apply_report(&mut accounts, "wa-default", Offline);
+        apply_report(&mut accounts, "wa-acct-2", Stale);
+        assert_eq!(highest_status(&accounts), Offline);
+        assert!(apply_report(&mut accounts, "wa-default", Online));
+        assert_eq!(highest_status(&accounts), Stale);
     }
 
     #[test]
     fn closing_the_shared_window_clears_every_account() {
-        let mut offline = HashSet::new();
-        apply_report(&mut offline, "wa-default", true);
-        apply_report(&mut offline, "wa-acct-2", true);
-        assert!(forget_label(&mut offline, "main"));
-        assert!(offline.is_empty());
-        assert!(!forget_label(&mut offline, "main"));
+        let mut accounts = HashMap::new();
+        apply_report(&mut accounts, "wa-default", Offline);
+        apply_report(&mut accounts, "wa-acct-2", Stale);
+        assert!(forget_label(&mut accounts, "main"));
+        assert!(accounts.is_empty());
+        assert!(!forget_label(&mut accounts, "main"));
     }
 
     #[test]
     fn closing_one_account_leaves_the_other() {
-        let mut offline = HashSet::new();
-        apply_report(&mut offline, "wa-default", true);
-        apply_report(&mut offline, "wa-acct-2", true);
-        assert!(forget_label(&mut offline, "wa-default"));
-        assert!(!forget_label(&mut offline, "wa-default"));
-        assert!(offline.contains("wa-acct-2"));
-        assert_eq!(offline.len(), 1);
+        let mut accounts = HashMap::new();
+        apply_report(&mut accounts, "wa-default", Stale);
+        apply_report(&mut accounts, "wa-acct-2", Offline);
+        assert!(forget_label(&mut accounts, "wa-default"));
+        assert!(!forget_label(&mut accounts, "wa-default"));
+        assert_eq!(accounts.get("wa-acct-2"), Some(&Offline));
+        assert_eq!(accounts.len(), 1);
     }
 }

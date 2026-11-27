@@ -19,7 +19,7 @@
     "allow-switcher-accounts",
     "allow-switch-account",
     "allow-reload-account-page",
-    "allow-report-sync-offline",
+    "allow-report-sync-status",
     "allow-zoom-step",
     "allow-paste-clipboard",
     "notification:allow-is-permission-granted",

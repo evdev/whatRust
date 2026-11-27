@@ -2333,13 +2333,19 @@ mod tests {
             "default".into(),
             prefs.clone(),
         )]));
-        assert_eq!(super::effective_prefs(&settings, &accounts, "wa-default"), prefs);
+        assert_eq!(
+            super::effective_prefs(&settings, &accounts, "wa-default"),
+            prefs
+        );
         crate::accounts::set_notifications(&mut accounts, "default", false).unwrap();
         let muted = super::effective_prefs(&settings, &accounts, "wa-default");
         assert!(muted.mentions);
         assert!(!muted.popup && !muted.sound);
         crate::accounts::set_notifications(&mut accounts, "default", true).unwrap();
-        assert_eq!(super::effective_prefs(&settings, &accounts, "wa-default"), prefs);
+        assert_eq!(
+            super::effective_prefs(&settings, &accounts, "wa-default"),
+            prefs
+        );
     }
 
     #[test]

@@ -10,9 +10,9 @@
  * The socket's own state is not enough. On a live session it stays the string
  * "CONNECTED" while the bytes move on a MessagePort, not on the Worker
  * "message" event. A reading that merely stayed connected, or a network
- * "online" event after wake, is not proof that sync resumed. Incoming port
- * messages are. A few minutes without one means the session has stopped,
- * including when timers kept running and the clock never jumped.
+ * "online" event after wake, is not proof that sync resumed. We watch the
+ * ports attached to WhatsApp's bootstrap worker so unrelated browser traffic
+ * doesn't clear the warning. A healthy connection can sit quiet indefinitely.
  */
 (function () {
   "use strict";
@@ -32,7 +32,7 @@
     trafficSettleMs: 2 * 1000,
   };
   var PENDING = { OPENING: 1, PAIRING: 1, SYNCING: 1, RESUMING: 1, CONNECTING: 1 };
-  var DEAD_TRANSPORT = { DISCONNECTED: 1, DISCONNECTING: 1, OFFLINE: 1 };
+  var DEAD_CONNECTION = { DISCONNECTED: 1, DISCONNECTING: 1, OFFLINE: 1, TIMEOUT: 1 };
   // Phrases WhatsApp shows when the linked computer is down. Kept off the
   // message list: a quoted "not connected" inside a chat is not the banner.
   var OFFLINE_TEXT = /phone not connected|computer not connected|your computer is not connected|not connected to the internet|no internet|click to reconnect|telefone desconectado|computador desconectado|computador n[aã]o est[aá] conectad|n[aã]o est[aá] conectad|sem conex[aã]o|sem internet|clique para reconectar|tel[eé]fono desconectado|sin conexi[oó]n|sin internet|haz clic para volver a conectar|nicht verbunden|keine verbindung|erneut verbinden|pas connect[eé]|aucune connexion|se reconnecter/i;
@@ -46,10 +46,8 @@
       lastTick: state.lastTick,
       wakeAt: state.wakeAt,
       stallGap: state.stallGap,
-      stallToken: state.stallToken,
       hiddenAt: state.hiddenAt,
       trafficAt: state.trafficAt,
-      liveSince: state.liveSince,
       sawLiveEvent: state.sawLiveEvent,
       reading: state.reading,
       offlineSince: state.offlineSince,
@@ -66,10 +64,8 @@
       lastTick: null,
       wakeAt: null,
       stallGap: 0,
-      stallToken: 0,
       hiddenAt: null,
       trafficAt: null,
-      liveSince: null,
       sawLiveEvent: false,
       reading: null,
       offlineSince: null,
@@ -117,30 +113,20 @@
     var stateName = enumName(wpp, sock && sock.state, "SOCKET_STATE");
     var transportName = enumName(wpp, sock && sock.stream, "SOCKET_STREAM");
     var hasSocket = !!(sock && sock.state != null);
-    if (online === false || DEAD_TRANSPORT[transportName]) return { live: false, pending: false };
+    if (online === false || DEAD_CONNECTION[stateName] === 1 || DEAD_CONNECTION[transportName] === 1) {
+      return { live: false, pending: false };
+    }
     if (hasSocket) {
       if (stateName === "CONNECTED") {
-        if (PENDING[transportName]) return { live: false, pending: true };
+        if (PENDING[transportName] === 1) return { live: false, pending: true };
         return { live: true, pending: false };
       }
-      if (!stateName || PENDING[stateName]) return { live: false, pending: true };
-      return { live: false, pending: false };
+      return { live: false, pending: true };
     }
     var mode = stream.mode || "";
     var info = stream.info || "";
-    if (mode === "QR" || PENDING[info] || mode === "SYNCING") return { live: false, pending: true };
+    if (mode === "OFFLINE" || info === "OFFLINE") return { live: false, pending: false };
     if (mode === "MAIN" && info === "NORMAL") return { live: true, pending: false };
-    if (
-      mode === "OFFLINE" ||
-      info === "OFFLINE" ||
-      mode === "CONFLICT" ||
-      mode === "PROXYBLOCK" ||
-      mode === "TOS_BLOCK" ||
-      mode === "SMB_TOS_BLOCK" ||
-      mode === "DEPRECATED_VERSION"
-    ) {
-      return { live: false, pending: false };
-    }
     return { live: false, pending: true };
   }
 
@@ -155,7 +141,8 @@
     for (var i = 0; i < nodes.length; i++) {
       var el = nodes[i];
       if (!el) continue;
-      if (el.closest && el.closest("#__whatrust_sync_tab, [data-whatrust-sync], #main, [data-id]")) continue;
+      if (el.closest && el.closest("#__whatrust_sync_tab, [data-whatrust-sync], #main, [data-id], [hidden], [aria-hidden='true']")) continue;
+      if (el.getClientRects && !el.getClientRects().length) continue;
       var text = String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
       if (text && text.length < 240 && OFFLINE_TEXT.test(text)) return true;
     }
@@ -175,7 +162,6 @@
     var next = clone(state);
     next.wakeAt = now;
     next.stallGap = gap > 0 ? gap : 0;
-    next.stallToken = (state.stallToken || 0) + 1;
     next.trafficAt = null;
     next.sawLiveEvent = false;
     return next;
@@ -195,7 +181,10 @@
       if (state.hiddenAt == null) next.hiddenAt = now;
       return next;
     }
-    if (state.hiddenAt != null && now - state.hiddenAt >= hiddenStallMs) next = armStall(next, now, now - state.hiddenAt);
+    if (state.hiddenAt != null && now - state.hiddenAt >= hiddenStallMs &&
+        (state.trafficAt == null || elapsed(state.trafficAt, now) >= LIMITS.stallMs)) {
+      next = armStall(next, now, now - state.hiddenAt);
+    }
     next.hiddenAt = null;
     return next;
   }
@@ -206,10 +195,7 @@
     return next;
   }
 
-  function noteReading(state, reading, now, fromEvent) {
-    // The event flag still forces an immediate recheck. It is not evidence:
-    // wake fires "online" while a dead socket stays CONNECTED.
-    void fromEvent;
+  function noteReading(state, reading, now) {
     var next = clone(state);
     var was = state.reading;
     next.reading = reading;
@@ -223,14 +209,9 @@
     } else {
       next.offlineSince = null;
     }
-    if (reading && reading.live) {
-      if (state.liveSince == null) next.liveSince = now;
-    } else {
-      next.liveSince = null;
-    }
     // A network "online" event while the socket never left CONNECTED is how a
     // dead session looks after wake. Only a real drop-and-return counts.
-    if (state.wakeAt && reading && reading.live && was && was.live === false) next.sawLiveEvent = true;
+    if (state.wakeAt != null && reading && reading.live && was && was.live === false) next.sawLiveEvent = true;
     return next;
   }
 
@@ -265,10 +246,9 @@
     var reading = s.reading;
     if (s.domOffline) reason = "offline";
     else if ((s.browserOfflineForMs || 0) >= s.browserHoldMs) reason = "offline";
-    else if (reading && reading.pending && (s.pendingForMs || 0) >= s.pendingHoldMs) reason = "offline";
     else if (reading && reading.live === false && !reading.pending && (s.offlineForMs || 0) >= s.holdMs) reason = "offline";
+    else if (reading && reading.pending && (s.pendingForMs || 0) >= s.pendingHoldMs) reason = "stale";
     else if (s.stalled && !(reading && reading.pending) && (s.sinceWakeMs || 0) >= s.graceMs && !s.confirmedSinceWake) reason = "stale";
-    else if (s.trafficSilent && !(s.stalled && (s.sinceWakeMs || 0) < s.graceMs)) reason = "stale";
     if (reason !== "hidden" && s.dismissedReason === reason) return "hidden";
     return reason;
   }
@@ -287,14 +267,6 @@
       (state.sawLiveEvent && live) ||
       (state.trafficAt != null && state.trafficAt >= state.wakeAt + lim.trafficSettleMs && live)
     );
-    var trafficAge = state.trafficAt == null ? null : elapsed(state.trafficAt, now);
-    var liveFor = elapsed(state.liveSince, now);
-    var trafficSilent = !!(
-      live &&
-      state.liveSince != null &&
-      liveFor >= lim.stallMs &&
-      (trafficAge == null || trafficAge >= lim.stallMs)
-    );
     return judge({
       loggedIn: state.loggedIn,
       domOffline: state.domOffline,
@@ -305,7 +277,6 @@
       stalled: stalled,
       sinceWakeMs: stalled ? elapsed(state.wakeAt, now) : 0,
       confirmedSinceWake: confirmed,
-      trafficSilent: trafficSilent,
       dismissedReason: state.dismissedReason || "",
       graceMs: graceFor(state.stallGap, lim),
       holdMs: lim.holdMs,
@@ -332,126 +303,71 @@
     return withDismiss(state, reason);
   }
 
-  // WhatsApp delivers socket traffic on a MessagePort (and sometimes a Worker
-  // onmessage). The Worker "message" event on the constructor stays quiet, so
-  // a hook there never learns that sync is alive. Wrap the listeners the page
-  // installs afterwards. removeEventListener has to see the same function the
-  // page passed in, or WhatsApp leaks a handler every time it rebinds.
-  function watchSocketMessages(target) {
-    var pairs = typeof target.WeakMap === "function" ? new target.WeakMap() : null;
-    var keys = pairs ? null : [];
-    var vals = pairs ? null : [];
-    function remember(fn, wrapped) {
-      if (pairs) pairs.set(fn, wrapped);
-      else { keys.push(fn); vals.push(wrapped); }
-    }
-    function recall(fn) {
-      if (!fn) return fn;
-      if (pairs) return pairs.has(fn) ? pairs.get(fn) : null;
-      var i = keys.indexOf(fn);
-      return i === -1 ? null : vals[i];
-    }
-    function bump() {
-      if (typeof target.__wrSyncTraffic === "function") target.__wrSyncTraffic();
-    }
-    function wrapListener(fn) {
-      if (!fn || fn.__wrSyncMsg) return fn;
-      var prev = recall(fn);
-      if (prev) return prev;
-      var wrapped;
-      if (typeof fn === "function") {
-        wrapped = function () {
-          bump();
-          return fn.apply(this, arguments);
-        };
-      } else if (typeof fn === "object" && typeof fn.handleEvent === "function") {
-        var inner = fn.handleEvent;
-        wrapped = {
-          handleEvent: function () {
-            bump();
-            return inner.apply(fn, arguments);
-          }
-        };
-      } else {
-        return fn;
-      }
-      wrapped.__wrSyncMsg = true;
-      remember(fn, wrapped);
-      return wrapped;
-    }
-    function patch(proto) {
-      if (!proto || proto.__wrSyncMsgPatch) return;
-      var add = proto.addEventListener;
-      var remove = proto.removeEventListener;
-      var desc = null;
-      try { desc = Object.getOwnPropertyDescriptor(proto, "onmessage"); } catch (e) { desc = null; }
-      if (typeof add !== "function" && !(desc && typeof desc.set === "function")) return;
-      if (typeof add === "function") {
-        proto.addEventListener = function (type, fn, opts) {
-          if (type === "message") fn = wrapListener(fn);
-          return add.call(this, type, fn, opts);
-        };
-        if (typeof remove === "function") {
-          proto.removeEventListener = function (type, fn, opts) {
-            if (type === "message") fn = recall(fn) || fn;
-            return remove.call(this, type, fn, opts);
-          };
-        }
-      }
-      if (desc && typeof desc.set === "function") {
-        try {
-          Object.defineProperty(proto, "onmessage", {
-            configurable: true,
-            enumerable: desc.enumerable,
-            get: desc.get,
-            set: function (fn) { return desc.set.call(this, wrapListener(fn)); }
-          });
-        } catch (e2) {}
-      }
-      proto.__wrSyncMsgPatch = true;
-    }
-    patch(target.MessagePort && target.MessagePort.prototype);
-    patch(target.Worker && target.Worker.prototype);
-  }
-
-  function watchWorkers(target) {
-    var current = target.Worker;
-    if (typeof current !== "function" || current.__wrSyncWatch) return;
-    function Watched(url, opts) {
-      var worker = new current(url, opts);
+  // Workers can receive either a port made in the page or one transferred
+  // back to it. Follow those ports without replacing WhatsApp's handlers or
+  // starting a port before WhatsApp does.
+  function watchSocketMessages(target, onTraffic) {
+    var peers = new WeakMap();
+    var watched = new WeakSet();
+    if (typeof target.MessageChannel === "function") {
       try {
-        worker.addEventListener("message", function () {
-          if (typeof target.__wrSyncTraffic === "function") target.__wrSyncTraffic();
+        target.MessageChannel = new Proxy(target.MessageChannel, {
+          construct: function (Channel, args, newTarget) {
+            var channel = Reflect.construct(Channel, args, newTarget);
+            peers.set(channel.port1, channel.port2);
+            peers.set(channel.port2, channel.port1);
+            return channel;
+          }
         });
       } catch (e) {}
-      return worker;
     }
-    Watched.prototype = current.prototype;
-    Watched.__wrSyncWatch = true;
-    try {
-      Object.setPrototypeOf(Watched, current);
-    } catch (e2) {}
-    try {
-      target.Worker = Watched;
-    } catch (e3) {}
+
+    function watchTransfers(endpoint) {
+      var post = endpoint.postMessage;
+      endpoint.postMessage = function (message, options) {
+        var result = post.apply(this, arguments);
+        if (this === endpoint) {
+          try {
+            var transfer = options && Object.getOwnPropertyDescriptor(options, "transfer");
+            var ports = Array.isArray(options) ? options : transfer && transfer.value;
+            if (Array.isArray(ports)) {
+              ports.forEach(function (port) { watchPort(peers.get(port)); });
+            }
+          } catch (e) {}
+        }
+        return result;
+      };
+      endpoint.addEventListener("message", function (event) {
+        if (event.ports) event.ports.forEach(watchPort);
+      });
+    }
+
+    function watchPort(port) {
+      if (!port || watched.has(port)) return;
+      watched.add(port);
+      port.addEventListener("message", onTraffic);
+      watchTransfers(port);
+    }
+
+    // classic-worker.js calls this only for the WhatsApp bootstrap worker.
+    target.__wrWatchSyncWorker = function (worker) {
+      if (watched.has(worker)) return;
+      watched.add(worker);
+      watchTransfers(worker);
+    };
   }
 
   function mount(target) {
     if (target.__wrSyncMounted) return;
-    target.__wrSyncMounted = true;
     var doc = target.document;
-    if (!doc || !doc.documentElement) {
-      target.__wrSyncMounted = false;
-      var retry = function () { mount(target); };
-      if (typeof target.setTimeout === "function") target.setTimeout(retry, 500);
-      else setTimeout(retry, 500);
-      return;
-    }
-    var state = initialState();
+    if (!doc) return;
+    target.__wrSyncMounted = true;
+    var state = noteVisibility(initialState(), doc.visibilityState === "hidden", Date.now(), LIMITS.hiddenStallMs);
     var reported = null;
-    var graceTimer = 0;
-    var eventPending = false;
-    var trafficPending = false;
+    var desiredStatus = "online";
+    var reporting = false;
+    var graceTimer = null;
+    var shown = "hidden";
     var trafficQueued = false;
     var RECONNECT_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
     // A small rail button, not a banner: it joins the whatRust shortcut stack
@@ -462,8 +378,6 @@
     tab.id = "__whatrust_sync_tab";
     try { tab.innerHTML = RECONNECT_SVG; } catch (svgErr) { tab.textContent = "↻"; }
     tab.setAttribute("data-whatrust-sync", "1");
-    tab.setAttribute("role", "status");
-    tab.setAttribute("aria-live", "polite");
     tab.hidden = true;
     tab.style.cssText = "width:40px;height:40px;margin:4px auto;padding:0;border:0;border-radius:12px;display:none;align-items:center;justify-content:center;cursor:pointer;flex:none;position:relative";
     function todoStack() {
@@ -475,6 +389,8 @@
     function placeTab() {
       var stack = todoStack();
       if (stack) {
+        var last = stack.lastElementChild !== undefined ? stack.lastElementChild : stack.lastChild;
+        if (tab.parentNode === stack && last === tab) return;
         var switcher = false;
         try { switcher = stack.getAttribute && stack.getAttribute("data-wr-todo-stack") === "1"; } catch (modeErr) {}
         tab.style.position = "relative";
@@ -487,10 +403,9 @@
         tab.style.width = switcher ? "36px" : "40px";
         tab.style.height = switcher ? "36px" : "40px";
         tab.style.borderRadius = switcher ? "50%" : "12px";
-        var last = stack.lastElementChild !== undefined ? stack.lastElementChild : stack.lastChild;
-        if (tab.parentNode !== stack || last !== tab) stack.appendChild(tab);
-      } else {
-        if (tab.parentNode !== doc.documentElement) doc.documentElement.appendChild(tab);
+        stack.appendChild(tab);
+      } else if (doc.documentElement && tab.parentNode !== doc.documentElement) {
+        doc.documentElement.appendChild(tab);
         tab.style.position = "fixed";
         tab.style.left = "12px";
         tab.style.bottom = "188px";
@@ -506,7 +421,7 @@
       if (event && event.stopPropagation) event.stopPropagation();
     }
     function paint(reason) {
-      var show = reason === "offline" || reason === "stale";
+      var show = !target.__whatrustLocked && reason !== "hidden";
       if (show) placeTab();
       else if (!tab.isConnected && doc.documentElement) placeTab();
       tab.hidden = !show;
@@ -521,69 +436,79 @@
       }
       var sentence = reason === "offline"
         ? L("O WhatsApp está offline.", "WhatsApp is offline.")
-        : L("O WhatsApp parou de sincronizar.", "WhatsApp stopped syncing.");
+        : L("O WhatsApp pode ter parado de sincronizar.", "WhatsApp may have stopped syncing.");
       var action = L("Reconectar", "Reconnect");
       var full = sentence + " — " + action;
       tab.title = full;
       tab.setAttribute("aria-label", full);
     }
-    function invoke(cmd, args) {
-      var tauri = target.__TAURI__;
-      if (!tauri || !tauri.core || typeof tauri.core.invoke !== "function") return Promise.resolve(false);
-      return Promise.resolve(tauri.core.invoke(cmd, args)).then(function () { return true; }, function () { return false; });
+    async function invoke(cmd, args) {
+      try {
+        var tauri = target.__TAURI__;
+        if (!tauri || !tauri.core || typeof tauri.core.invoke !== "function") return false;
+        await tauri.core.invoke(cmd, args);
+        return true;
+      } catch (e) {
+        return false;
+      }
     }
-    function report(offline, shown) {
+    async function report() {
       if (target.__whatrustLocked) {
         reported = null;
         return;
       }
-      if (reported === offline) return;
-      var pending = offline;
-      invoke("report_sync_offline", { offline: offline }).then(function (ok) {
-        if (ok) reported = pending;
-      });
-      if (shown) invoke("dlog", { msg: "sync: offline button shown" });
+      if (reporting || reported === desiredStatus) return;
+      reporting = true;
+      var status = desiredStatus;
+      var ok = await invoke("report_sync_status", { status: status });
+      reported = ok && !target.__whatrustLocked ? status : null;
+      reporting = false;
+      // A newer reading may have arrived before the tray acknowledged this one.
+      if (status !== desiredStatus) report();
     }
     // A suspicion can be dismissed. A session that is actually down stays on
-    // the tray, so Reconnect is still there after the bar is closed.
+    // the tray, so Reconnect is still there after the button is dismissed.
     function publish() {
       var now = Date.now();
       state = settleDismiss(state, now, LIMITS);
       var raw = assess(withDismiss(state, ""), now, LIMITS);
-      var shown = assess(state, now, LIMITS);
+      var next = assess(state, now, LIMITS);
+      if (next !== "hidden" && next !== shown && !target.__whatrustLocked) {
+        invoke("dlog", { msg: "sync: reconnect button shown (" + next + ")" });
+      }
+      shown = next;
       paint(shown);
-      report(raw === "offline" || shown !== "hidden", shown !== "hidden");
+      desiredStatus = raw === "offline" ? "offline" : shown === "stale" ? "stale" : "online";
+      report();
     }
     var wppBound = false;
     var socketBound = false;
     function bindWpp() {
       var wpp = target.WPP;
       if (!wpp) return;
-      function liveEvent() {
-        eventPending = true;
-        check();
-      }
       if (!wppBound && typeof wpp.on === "function") {
         wppBound = true;
         ["conn.online", "conn.stream_mode_changed", "conn.stream_info_changed"].forEach(function (name) {
-          try { wpp.on(name, liveEvent); } catch (e) {}
+          try { wpp.on(name, check); } catch (e) {}
         });
       }
       var sock = null;
       try { sock = wpp.whatsapp && wpp.whatsapp.Socket; } catch (e2) {}
       if (sock && !socketBound && typeof sock.on === "function") {
         socketBound = true;
-        try { sock.on("change:state", liveEvent); } catch (e3) {}
-        try { sock.on("change:stream", liveEvent); } catch (e4) {}
+        try { sock.on("change:state", check); } catch (e3) {}
+        try { sock.on("change:stream", check); } catch (e4) {}
       }
     }
     function scheduleGrace() {
-      if (graceTimer || state.wakeAt == null) return;
-      var left = graceFor(state.stallGap) - (Date.now() - state.wakeAt);
+      if (state.wakeAt == null || graceTimer === state.wakeAt) return;
+      var wake = state.wakeAt;
+      var left = graceFor(state.stallGap) - (Date.now() - wake);
       if (left < 0) return;
-      graceTimer = 1;
+      graceTimer = wake;
       var fire = function () {
-        graceTimer = 0;
+        if (graceTimer !== wake) return;
+        graceTimer = null;
         check();
       };
       // Called as a method: a bare setTimeout throws in the webview.
@@ -601,21 +526,16 @@
         if (target.navigator && target.navigator.onLine === false) online = false;
       } catch (e) {}
       state = noteBrowser(state, online, now);
-      if (trafficPending) {
-        trafficPending = false;
-        state = noteTraffic(state, now);
-      }
-      state = noteReading(state, connectionReading(target.WPP), now, eventPending);
-      eventPending = false;
+      state = noteReading(state, connectionReading(target.WPP), now);
       publish();
-      var grace = graceFor(state.stallGap || 0);
       // A message queued at the wake instant is not proof (it has to arrive
       // after the settle time). Still arm the prove timer, or the button waits
       // on the slow poll.
-      if (state.wakeAt != null && now - state.wakeAt < grace) scheduleGrace();
+      scheduleGrace();
     }
     tab.addEventListener("click", function (event) {
       stop(event);
+      if (target.__whatrustLocked) return;
       if (typeof target.__whatrustRecoverConnection === "function") target.__whatrustRecoverConnection();
       else invoke("reload_account_page");
     });
@@ -626,36 +546,33 @@
       state = noteDismiss(state, Date.now(), LIMITS);
       publish();
     });
-    target.__wrSyncTraffic = function () {
-      trafficPending = true;
-      if (trafficQueued) return;
+    watchSocketMessages(target, function () {
+      var now = Date.now();
+      state = noteTraffic(noteTick(state, now, LIMITS.stallMs), now);
+      scheduleGrace();
+      if (shown !== "stale" || trafficQueued) return;
       trafficQueued = true;
       var fire = function () {
         trafficQueued = false;
         check();
       };
-      // The sync port can deliver dozens of messages a second. One check per
-      // beat is enough to notice silence, and it keeps the chat list responsive.
+      // Refresh a visible warning once per burst.
       if (typeof target.setTimeout === "function") target.setTimeout(fire, 200);
       else setTimeout(fire, 200);
-    };
+    });
     target.__wrSyncRefresh = check;
     var previousRelang = target.__wrRelang;
     target.__wrRelang = function () {
       if (typeof previousRelang === "function") previousRelang();
       paint(assess(state, Date.now(), LIMITS));
     };
-    watchSocketMessages(target);
-    watchWorkers(target);
     // The shortcut stack is rebuilt on DOM churn; rejoin it if we were dropped.
     try {
-      if (typeof target.MutationObserver === "function" && doc.documentElement) {
+      if (typeof target.MutationObserver === "function") {
         var stackWatch = new target.MutationObserver(function () {
-          if (tab.isConnected) return;
-          var current = todoStack();
-          if (current && tab.parentNode !== current) placeTab();
+          if (!tab.hidden) placeTab();
         });
-        stackWatch.observe(doc.documentElement, { childList: true, subtree: true });
+        stackWatch.observe(doc, { childList: true, subtree: true });
       }
     } catch (watchErr) {}
     function on(type, fn) {
@@ -670,7 +587,6 @@
         var hidden = doc.visibilityState === "hidden";
         state = noteVisibility(state, hidden, Date.now(), LIMITS.hiddenStallMs);
         if (!hidden) check();
-        else scheduleGrace();
       });
     }
     if (typeof target.setInterval === "function") target.setInterval(check, 5000);
