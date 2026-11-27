@@ -324,7 +324,7 @@ fn install_menu(app: &AppHandle, w: &Window) -> tauri::Result<()> {
                         }
                     }
                 },
-                "app.reload"=> { if crate::lock::is_unlocked(&a) { if let Some(label)=selected(&a,&parent) { if let Some(v)=a.get_webview(&label) { let _=v.reload(); } } } },
+                "app.reload"=> { if crate::lock::is_unlocked(&a) { if let Some(label)=selected(&a,&parent) { if let Some(v)=a.get_webview(&label) { crate::sync_status::reconnect_view(&v); } } } },
                 "app.lock"=> { if crate::applock::load(&a).is_active() { crate::lock::lock_now(&a); } },
                 "app.quit"=>a.exit(0),
                 _=>{}
@@ -882,6 +882,7 @@ fn choose_remaining(app: &AppHandle, exclude: Option<&str>) {
 pub fn close_account_view(app: &AppHandle, id: &str) -> tauri::Result<()> {
     let label = accounts::window_label(id);
     crate::scheduled_messages::forget_view(app, &label);
+    crate::sync_status::forget(app, &label);
     let Some(v) = app.get_webview(&label) else {
         return Ok(());
     };
@@ -942,6 +943,7 @@ pub fn sleep_idle(app: &AppHandle) {
                 .lock()
                 .unwrap()
                 .remove(&label);
+            crate::sync_status::forget(app, &label);
             crate::dlog::log("sleep: idle account unloaded");
         }
     }

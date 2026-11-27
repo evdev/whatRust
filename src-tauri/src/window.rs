@@ -268,6 +268,7 @@ macro_rules! account_webview {
             .initialization_script(CLASSIC_WORKER_JS)
             .initialization_script(include_str!("../resources/integration.js"))
             .initialization_script(BRIDGE_JS)
+            .initialization_script(include_str!("../resources/sync-status.js"))
             .initialization_script(MEDIA_JS)
             .initialization_script(include_str!("../resources/privacy.js"))
             // WA-JS (Apache-2.0) reads WhatsApp's own media loader so a voice
@@ -1557,6 +1558,7 @@ fn register_focus_listener(app: &AppHandle, win: &WebviewWindow) {
         }
         tauri::WindowEvent::Destroyed => {
             crate::scheduled_messages::forget_view(&app_handle, &label);
+            crate::sync_status::forget(&app_handle, &label);
         }
         // Menu-bar mode: losing focus dismisses a presented panel; the
         // webview keeps running while hidden (see `background_throttling`).

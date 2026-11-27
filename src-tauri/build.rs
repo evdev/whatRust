@@ -30,6 +30,7 @@ fn main() {
             "switcher_accounts",
             "switch_account",
             "reload_account_page",
+            "report_sync_offline",
             "zoom_step",
             "voice_prefs",
             "voice_lookup",

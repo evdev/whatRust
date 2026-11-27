@@ -47,6 +47,7 @@ mod scheduled_messages;
 mod scrollbars;
 mod sessions;
 mod settings;
+mod sync_status;
 #[cfg(all(windows, debug_assertions))]
 mod smoke;
 mod attention;
@@ -260,6 +261,7 @@ pub fn run() {
         .manage(attention::AttentionState::default())
         .manage(autoreply::AutoreplyState::default())
         .manage(mention::Popups::default())
+        .manage(sync_status::SyncHealth::default())
         .invoke_handler(tauri::generate_handler![
             integration::integration_state,
             integration::report_integration,
@@ -283,6 +285,7 @@ pub fn run() {
             commands::switcher_accounts,
             commands::switch_account,
             commands::reload_account_page,
+            sync_status::report_sync_offline,
             commands::zoom_step,
             clipboard::paste_clipboard,
             commands::get_settings,

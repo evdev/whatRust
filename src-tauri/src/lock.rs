@@ -127,7 +127,7 @@ pub fn require_unlocked(app: &AppHandle) -> Result<(), String> {
 fn sync_scheduled_lock(app: &AppHandle, locked: bool) {
     crate::scheduled_messages::wake(app);
     let script = format!(
-        "window.__whatrustLocked={locked};window.__wrMessageActionsLockChanged?.();window.__wrScheduleDeliveryRefresh?.();window.__wrScheduleChanged?.();window.__whatrustAttentionRefresh?.()"
+        "window.__whatrustLocked={locked};window.__wrMessageActionsLockChanged?.();window.__wrScheduleDeliveryRefresh?.();window.__wrScheduleChanged?.();window.__whatrustAttentionRefresh?.();window.__wrSyncRefresh?.()"
     );
     for (label, view) in app.webviews() {
         if crate::accounts::id_from_label(&label).is_some() {
