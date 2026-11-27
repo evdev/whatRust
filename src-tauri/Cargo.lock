@@ -5173,7 +5173,7 @@ dependencies = [
 
 [[package]]
 name = "whatrust"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -5183,6 +5183,7 @@ dependencies = [
  "dispatch2",
  "getrandom 0.2.17",
  "gtk",
+ "notify-rust",
  "objc2",
  "objc2-core-foundation",
  "objc2-foundation",

@@ -39,6 +39,8 @@ pub struct Settings {
     /// from the four fields above. An empty map has been migrated and simply
     /// has no accounts yet.
     pub mention_accounts: Option<HashMap<String, MentionAccountPrefs>>,
+    /// Opt-in: suppress auto-played WhatsApp Web notification chimes.
+    pub suppress_web_notification_sounds: bool,
     /// macOS only: the app lives in the menu bar, no Dock icon and no
     /// standard window. The open account stays connected while its panel is
     /// hidden; other accounts load when opened. Off by default. Ignored
@@ -159,6 +161,9 @@ pub struct Settings {
     /// fallback buttons do nothing useful; `show` / `hide` force it.
     /// Ignored on macOS and Windows. See `decorations`.
     pub title_bar: String,
+    /// Theme: `system` (default, follows WhatsApp and the OS), `light` or
+    /// `dark`. Applies immediately. See `theme`.
+    pub theme: String,
     /// Linux: `auto` uses the GPU, except on GPUs too old for WebKit's GPU
     /// compositor; `software` always renders in software (issue #87). Read at
     /// startup, so a change applies after a restart. See `gpu`.
@@ -172,6 +177,15 @@ pub struct Settings {
     /// Read when an account page is created, so a change applies after a
     /// restart. On by default.
     pub page_overlays: bool,
+    /// Show unread counts: on the tray icon, the dock/taskbar badge, the window
+    /// title and in the app's own account lists (issue #100). Notifications are
+    /// unaffected. On by default.
+    pub show_unread_counts: bool,
+    /// With more than one account, start on the profile picker instead of
+    /// opening the startup account at once (issue #102). Single-window mode
+    /// only; read at startup. Off by default, so an update does not change
+    /// what opens first; turn it on in Settings.
+    pub show_profile_picker: bool,
     /// Unload an account page that has not been opened for this many hours
     /// (0 = never). It reloads when switched to; asleep, it gets no messages.
     pub sleep_idle_hours: u32,
@@ -207,6 +221,7 @@ impl Default for Settings {
             mention_alert_popup: true,
             mention_alert_sound_file: None,
             mention_accounts: None,
+            suppress_web_notification_sounds: false,
             menubar_only: false,
             single_window: false,
             hide_dock_icon: false,
@@ -266,9 +281,12 @@ impl Default for Settings {
             auto_update_install: true,
             chat_summary_consent: false,
             title_bar: crate::decorations::AUTO.to_string(),
+            theme: crate::theme::SYSTEM.to_string(),
             rendering: RENDERING_AUTO.to_string(),
             hide_app_banner: true,
             page_overlays: true,
+            show_unread_counts: true,
+            show_profile_picker: false,
             sleep_idle_hours: 0,
             quiet_hours: false,
             quiet_start: "22:00".to_string(),
@@ -924,6 +942,7 @@ impl Settings {
         self.standin_agent_runs_per_hour = sanitize_agent_runs(self.standin_agent_runs_per_hour);
         self.download_dir = self.download_dir.filter(|d| !d.trim().is_empty());
         self.title_bar = crate::decorations::sanitize(&self.title_bar);
+        self.theme = crate::theme::sanitize(&self.theme);
         self.rendering = sanitize_rendering(&self.rendering);
         self.sleep_idle_hours = self.sleep_idle_hours.min(24 * 7);
         if parse_hhmm(&self.quiet_start).is_none() {
@@ -1061,6 +1080,20 @@ pub fn save(app: &AppHandle, s: &Settings) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Redraw every place that shows an unread count after the setting flipped.
+fn refresh_unread_display(app: &AppHandle) {
+    let total = {
+        let state = app.state::<crate::accounts::UnreadMap>();
+        let map = crate::lock::guard(&state);
+        crate::accounts::aggregate_unread(&map)
+    };
+    crate::tray::update_badge(app, total);
+    crate::tray::rebuild_menu(app);
+    let ui = app.clone();
+    let _ = app.run_on_main_thread(move || crate::sessions::refresh_titles(&ui));
+    crate::integration::broadcast(app);
+}
+
 /// Apply side effects of settings (autostart + global shortcut + the macOS menu bar).
 /// Returns any non-fatal side-effect failures as one warning string;
 /// persisted settings and zoom changes are still applied.
@@ -1073,9 +1106,13 @@ pub fn apply(app: &AppHandle, s: &Settings) -> Option<String> {
         crate::i18n::refresh(app);
     }
     crate::window::apply_zoom_all(app, s.zoom);
+    if crate::unread::set_show(s.show_unread_counts) {
+        refresh_unread_display(app);
+    }
     crate::window::apply_notification_sound(app, s.notification_sound);
     crate::appicon::apply(app, s.custom_icon, false);
     crate::decorations::apply_all(app, &s.title_bar);
+    crate::theme::apply(app, &s.theme);
 
     // Menu-bar mode is only available where a hidden WKWebView keeps running
     // (macOS 14+); elsewhere the setting is ignored rather than dropping every
@@ -1256,6 +1293,18 @@ mod tests {
     }
 
     #[test]
+    fn unread_counts_default_on_picker_default_off_and_round_trip() {
+        let s: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        assert!(s.show_unread_counts && !s.show_profile_picker);
+        let off: Settings =
+            serde_json::from_str(r#"{"show_unread_counts":false,"show_profile_picker":false}"#)
+                .unwrap();
+        let off = off.sanitized();
+        assert!(!off.show_unread_counts);
+        assert!(!off.show_profile_picker);
+    }
+
+    #[test]
     fn page_overlays_default_on_and_round_trips() {
         let s: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
         assert!(s.page_overlays);
@@ -1270,6 +1319,7 @@ mod tests {
         assert!(!s.notifications);
         assert!(s.notification_sound);
         assert!(s.notify_when_focused && s.notify_active_chat && s.respect_muted);
+        assert!(!s.suppress_web_notification_sounds);
     }
 
     #[test]

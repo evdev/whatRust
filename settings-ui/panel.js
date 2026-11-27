@@ -6,7 +6,7 @@
   document.querySelector(".prefs").addEventListener("input",e=>{
     if(e.target.closest("#sec-attention")) {
       if(e.target.closest("#attention-settings form"))attentionDirty=true;
-    } else if(e.target.id!=="new_account_name")dirty=true;
+    } else if(e.target.id!=="new_account_name" && e.target.id!=="activity-recording")dirty=true;
   });
   window.addEventListener("whatrust-attention-settings-saved",()=>{attentionDirty=false;});
   document.getElementById("save").addEventListener("click",()=>{setTimeout(()=>{if(/^(Changes saved|Alterações salvas)/.test(document.getElementById("note").textContent))dirty=false;},400);});
@@ -24,9 +24,12 @@
       for(const a of d.accounts){const adapter=d.adapters["wa-"+a.id];routes.appendChild(row(a.name,t(d.native[a.id]?"Native capture active":"Native capture unavailable; fallback bridge")+" · "+t(adapter?.mounted?"Integrated controls":"Access from the window menu")+" · "+t(adapter?.detector?"Additional detector available when reliable signals exist":"Waiting for a compatible chat")));}
       for(const n of d.recent.slice(0,20)){const account=d.accounts.find(a=>a.id===n.account_id)?.name||"whatRust";history.appendChild(row(new Date(n.time*1000).toLocaleTimeString(I18n.locale())+" · "+account,t(names[n.status]||n.status)+(n.reason?" — "+t(reasons[n.reason]||n.reason):"")));}
       if(!d.recent.length)history.appendChild(row("No alerts recorded","Upcoming events will appear here during this run."));
+      const rec=document.getElementById("activity-recording");if(rec&&document.activeElement!==rec)rec.checked=d.recording!==false;
       document.documentElement.dataset.version=d.version;
     }catch(e){document.getElementById("diagnostic-note").textContent=String(e);}finally{diagnosticsBusy=false;}
   }
+  document.getElementById("activity-recording").addEventListener("change",async e=>{try{await invoke("set_activity_recording",{enabled:e.target.checked});}catch(err){document.getElementById("diagnostic-note").textContent=String(err);}await diagnostics();});
+  document.getElementById("clear-activity").onclick=async()=>{try{await invoke("clear_activity_log");}catch(err){document.getElementById("diagnostic-note").textContent=String(err);}await diagnostics();};
   document.getElementById("test-notification").onclick=async()=>{try{document.getElementById("diagnostic-note").textContent=await invoke("test_notification");await diagnostics();}catch(e){document.getElementById("diagnostic-note").textContent=String(e);}};
   document.getElementById("windows-notifications").onclick=()=>invoke("open_notification_settings").catch(e=>{document.getElementById("diagnostic-note").textContent=String(e);});
   if(!isWindows){document.getElementById("windows-notifications").hidden=true;}

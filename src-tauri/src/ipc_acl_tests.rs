@@ -102,6 +102,7 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "add_account",
     "remove_account",
     "rename_account",
+    "set_account_notifications",
     "open_account",
     "set_default_account",
     "get_lock_status",
@@ -131,6 +132,8 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "install_update",
     "restart_to_update",
     "open_release_page",
+    "set_activity_recording",
+    "clear_activity_log",
 ];
 /// Commands only the lock screen may use.
 const LOCK_COMMANDS: &[&str] = &[

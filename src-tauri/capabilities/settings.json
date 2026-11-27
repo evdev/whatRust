@@ -22,6 +22,7 @@
     "allow-add-account",
     "allow-remove-account",
     "allow-rename-account",
+    "allow-set-account-notifications",
     "allow-open-account",
     "allow-set-default-account",
     "allow-get-lock-status",
@@ -61,7 +62,9 @@
     "allow-list-standin-cli-models",
     "allow-standin-cli-status",
     "allow-set-standin-secret",
-    "allow-standin-agent-status"
+    "allow-standin-agent-status",
+    "allow-set-activity-recording",
+    "allow-clear-activity-log"
   ],
   "webviews": [
     "settings"

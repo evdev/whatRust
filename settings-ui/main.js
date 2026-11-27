@@ -1,6 +1,6 @@
 const invoke = window.__TAURI__.core.invoke;
 const LANGS = ["pt-BR", "en"];
-const BOOLS = ["close_to_tray", "start_minimized", "autostart", "notifications", "notification_sound", "quiet_hours", "page_overlays", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "message_actions", "auto_star_todos", "standin_enabled", "hide_app_banner"];
+const BOOLS = ["suppress_web_notification_sounds", "show_unread_counts", "show_profile_picker", "close_to_tray", "start_minimized", "autostart", "notifications", "notification_sound", "quiet_hours", "page_overlays", "hotkey_enabled", "blur_hotkey_enabled", "menu_bar_icon", "menubar_only", "hide_dock_icon", "notify_when_focused", "notify_active_chat", "respect_muted", "single_window", "auto_update_check", "auto_update_install", "voice_transcribe", "video_transcribe", "translate_enabled", "show_message_device", "message_actions", "auto_star_todos", "standin_enabled", "hide_app_banner"];
 const AI_PROVIDERS = ["openrouter", "gemini", "anthropic"];
 const TEXT_CLI_PROVIDERS = ["claude_cli", "codex_cli", "antigravity_cli"];
 const STANDIN_CLI_PROVIDERS = [...TEXT_CLI_PROVIDERS, "grok_cli"];
@@ -290,6 +290,7 @@ async function load() {
   document.getElementById("geniex_install_row").hidden = !hostGeniex;
   document.getElementById("geniex_model_row").hidden = !hostGeniex;
   // Title bar (Linux): auto hides it on tiling window managers like Hyprland.
+  document.getElementById("theme").value = ["light", "dark"].includes(s.theme) ? s.theme : "system";
   document.getElementById("title_bar_row").hidden = s.platform !== "linux";
   document.getElementById("title_bar").value = ["show", "hide"].includes(s.title_bar) ? s.title_bar : "auto";
   document.getElementById("title_bar_subtitle").textContent = s.tiling_wm
@@ -513,6 +514,7 @@ async function save() {
   s.hotkey = hk || "CmdOrCtrl+Shift+W";
   s.blur_hotkey = window.HotkeyFmt.fromDisplay(document.getElementById("blur_hotkey").value.trim()) || "CmdOrCtrl+Shift+B";
   s.zoom = parseFloat(document.getElementById("zoom").value) || ZOOM_DEFAULT;
+  s.theme = document.getElementById("theme").value || "system";
   s.title_bar = document.getElementById("title_bar").value || "auto";
   s.rendering = document.getElementById("rendering").value || "auto";
   s.language = document.getElementById("language").value;
@@ -645,6 +647,7 @@ function accountMenu(a, accounts, anchor) {
     ["Open account", () => accountAction(() => invoke("open_account", {id:a.id}))],
     ...( /Win/.test(navigator.platform || navigator.userAgent) ? [[a.detached ? "Return to the main window" : "Open in a separate window", () => accountAction(() => invoke(a.detached?"attach_account":"detach_account",{id:a.id}))]] : []),
     ["Use on startup",()=>accountAction(()=>invoke("set_default_account",{id:a.id}))],
+    [a.notifications===false?"Turn notifications on for this account":"Turn notifications off for this account",()=>accountAction(()=>invoke("set_account_notifications",{id:a.id,on:a.notifications===false}))],
     ["Change photo",()=>pickAccountPhoto(a.id)],
     ...(a.photo?[["Remove photo",()=>accountAction(()=>invoke("remove_account_photo",{id:a.id}))]]:[]),
     ["Rename",async()=>{const name=await Dlg.prompt("",{title:"Rename account",value:a.name,okLabel:"Rename",requiredMessage:"Enter a name."});if(name!==null&&name!==a.name)await accountAction(()=>invoke("rename_account",{id:a.id,name}));}],
@@ -669,7 +672,8 @@ function accountMenu(a, accounts, anchor) {
     menu.style.maxHeight=Math.max(40,Math.min(innerHeight-24,down?below:above))+"px";
     const height=menu.getBoundingClientRect().height;
     const top=down?r.bottom+gap:r.top-height-gap;
-    menu.style.left=Math.max(padding,Math.min(r.right-m.width,innerWidth-m.width-padding))+"px";
+    const edge=document.documentElement.dir==="rtl"?r.left:r.right-m.width;
+    menu.style.left=Math.max(padding,Math.min(edge,innerWidth-m.width-padding))+"px";
     menu.style.top=Math.max(padding,Math.min(top,innerHeight-height-padding))+"px";
   }
   menu.addEventListener("toggle",e=>{menu.dataset.open=String(e.newState==="open");anchor.setAttribute("aria-expanded",String(e.newState==="open"));if(e.newState==="closed")afterClose();});
@@ -729,6 +733,7 @@ function renderAccounts(accounts) {
     const info=document.createElement("span");info.className="acct-subtitle";info.textContent=a.detached?"In a separate window":a.is_default?"Account on startup":"WhatsApp";open.append(name,info);open.onclick=()=>accountAction(()=>invoke("open_account",{id:a.id}));
     row.append(avatar,open);
     if(a.unread){const badge=document.createElement("span");badge.className="acct-unread";badge.textContent=a.unread;badge.title=t("{0} unread chats",[a.unread]);row.appendChild(badge);}
+    if(a.notifications===false){const off=document.createElement("span");off.className="acct-muted";off.textContent="🔕";off.title=t("Notifications disabled for this account");off.setAttribute("role","img");off.setAttribute("aria-label",off.title);row.appendChild(off);}
     const more=document.createElement("button");more.type="button";more.className="account-more";more.textContent="⋮";more.setAttribute("aria-label",t("Options for {0}",[a.name]));more.setAttribute("aria-haspopup","menu");more.onclick=()=>accountMenu(a,accounts,more);row.appendChild(more);list.appendChild(row);
   }
 }
@@ -798,6 +803,9 @@ window.addEventListener("DOMContentLoaded", () => {
   wireLock();
   document.getElementById("save").addEventListener("click", save);
   // Fork: update switches are commented out of the settings page.
+  document.getElementById("relaunch").addEventListener("click", async () => {
+    try { await invoke("restart_app"); } catch (e) { flash(String(e), 6000); }
+  });
   // The update switches apply at once, like zoom and language.
   // for (const id of ["auto_update_check", "auto_update_install"]) {
   //   document.getElementById(id).addEventListener("change", save);
@@ -834,6 +842,7 @@ window.addEventListener("DOMContentLoaded", () => {
   // Zoom saves on change rather than on Save: picking a size you cannot see the
   // effect of is guesswork, and the webview applies it immediately.
   document.getElementById("zoom").addEventListener("change", save);
+  document.getElementById("theme").addEventListener("change", save);
   document.getElementById("title_bar").addEventListener("change", save);
   document.getElementById("rendering").addEventListener("change", save);
   document.getElementById("quiet_hours").addEventListener("change", syncQuietRow);

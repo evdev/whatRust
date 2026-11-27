@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -29,11 +29,19 @@ pub struct Notice {
     pub time: u64,
     pub status: String,
     pub reason: Option<String>,
+    /// Logged while the activity log was paused (issue #99). The delivery logic
+    /// still needs the entry (see `finish`), but it is never shown or sent to
+    /// the UI.
+    #[serde(skip)]
+    hidden: bool,
 }
 #[derive(Default)]
 pub struct Recent {
     inner: Mutex<Inner>,
     generation: AtomicU64,
+    /// Diagnosis → "Activity this session" is paused (issue #99): new events
+    /// are not recorded. Default false, so recording is on.
+    paused: AtomicBool,
     #[cfg(windows)]
     delivery_gate: Mutex<()>,
     #[cfg(windows)]
@@ -124,6 +132,18 @@ impl Recent {
             i.native.remove(label);
         }
     }
+    pub fn recording(&self) -> bool {
+        !self.paused.load(Ordering::Relaxed)
+    }
+    pub fn set_recording(&self, on: bool) {
+        self.paused.store(!on, Ordering::Relaxed);
+    }
+    pub fn clear_records(&self) {
+        // Entries the delivery logic still depends on stay, but invisible.
+        for n in crate::lock::guard(&self.inner).records.iter_mut() {
+            n.hidden = true;
+        }
+    }
     pub fn records(&self) -> Vec<Notice> {
         self.inner
             .lock()
@@ -131,10 +151,12 @@ impl Recent {
             .records
             .iter()
             .rev()
+            .filter(|n| !n.hidden)
             .cloned()
             .collect()
     }
     fn record(&self, label: &str, id: &str, source: Source, status: &str, reason: Option<&str>) {
+        let hidden = !self.recording();
         let mut i = crate::lock::guard(&self.inner);
         i.records.push_back(Notice {
             id: id.into(),
@@ -146,6 +168,7 @@ impl Recent {
                 .as_secs(),
             status: status.into(),
             reason: reason.map(str::to_string),
+            hidden,
         });
         while i.records.len() > 100 {
             i.records.pop_front();
@@ -324,14 +347,20 @@ pub fn from_event(
     let s = crate::settings::load(app);
     let id = event_id();
     let r = app.state::<Recent>();
-    if let Some(reason) = suppression(
-        &s,
-        crate::lock::is_unlocked(app),
-        focused,
-        active,
-        source,
-        muted,
-    ) {
+    // Per-account switch (issues #118, #103). Tests from Settings still show.
+    let account_off = (source != Source::Test
+        && !crate::accounts::notifications_on(&crate::accounts::load(app), label))
+    .then_some("account_notifications_disabled");
+    if let Some(reason) = account_off.or_else(|| {
+        suppression(
+            &s,
+            crate::lock::is_unlocked(app),
+            focused,
+            active,
+            source,
+            muted,
+        )
+    }) {
         r.record(label, &id, source, "suppressed", Some(reason));
         crate::dlog::log(&format!("notification: {source:?} suppressed ({reason})"));
         #[cfg(windows)]
@@ -367,12 +396,12 @@ pub fn from_event(
     );
     #[cfg(not(windows))]
     {
-        use tauri_plugin_notification::NotificationExt;
-        let mut b = app.notification().builder().title(title).body(body);
-        if let Some(p) = icon {
-            b = b.icon(p.to_string_lossy());
-        }
-        r.finish(label, &id, identity, b.show().is_ok());
+        r.finish(
+            label,
+            &id,
+            identity,
+            os_notify(app, &title, &body, icon.as_deref()),
+        );
     }
 }
 fn redact_notice<'a>(
@@ -527,13 +556,64 @@ pub fn show_with_icon(app: &AppHandle, title: &str, body: &str, icon: Option<&Pa
     );
     #[cfg(not(windows))]
     {
-        use tauri_plugin_notification::NotificationExt;
-        let mut b = app.notification().builder().title(title).body(body);
-        if let Some(p) = icon {
-            b = b.icon(p.to_string_lossy());
-        }
-        let _ = b.show();
+        let _ = os_notify(app, title, body, icon);
     }
+}
+
+/// The desktop file id GNOME and KDE match a notification to, without the
+/// `.desktop` suffix. It must be the name of the desktop file the package
+/// installed, or GNOME treats the sender as an unknown app and lists the
+/// notification without ever showing a banner (issue #119).
+/// - Flatpak: the Flatpak id.
+/// - AppImage: `whatrust`, the entry `install.sh` writes.
+/// - Otherwise (.deb/.rpm): `whatRust`, named after Tauri's productName.
+#[cfg(any(target_os = "linux", test))]
+fn desktop_entry(flatpak_id: Option<&str>, appimage: bool) -> String {
+    match (flatpak_id, appimage) {
+        (Some(id), _) => id.to_string(),
+        (None, true) => "whatrust".to_string(),
+        (None, false) => "whatRust".to_string(),
+    }
+}
+
+/// Linux: send through notify-rust directly so the notification names its
+/// desktop file (`desktop-entry`), uses normal urgency and the instant-message
+/// category. The notification plugin sends none of these.
+#[cfg(target_os = "linux")]
+fn os_notify(_app: &AppHandle, title: &str, body: &str, icon: Option<&Path>) -> bool {
+    use notify_rust::{Hint, Notification, Urgency};
+    let mut n = Notification::new();
+    n.appname("whatRust")
+        .summary(title)
+        .body(body)
+        .hint(Hint::DesktopEntry(desktop_entry(
+            crate::settings::flatpak_id().as_deref(),
+            std::env::var_os("APPIMAGE").is_some(),
+        )))
+        .hint(Hint::Urgency(Urgency::Normal))
+        .hint(Hint::Category("im.received".into()));
+    match icon {
+        Some(p) => n.icon(&p.to_string_lossy()),
+        None => n.auto_icon(),
+    };
+    match n.show() {
+        Ok(_) => true,
+        Err(e) => {
+            crate::dlog::log(&format!("notification: desktop service refused it ({e})"));
+            false
+        }
+    }
+}
+
+/// macOS: the notification plugin.
+#[cfg(target_os = "macos")]
+fn os_notify(app: &AppHandle, title: &str, body: &str, icon: Option<&Path>) -> bool {
+    use tauri_plugin_notification::NotificationExt;
+    let mut b = app.notification().builder().title(title).body(body);
+    if let Some(p) = icon {
+        b = b.icon(p.to_string_lossy());
+    }
+    b.show().is_ok()
 }
 #[derive(Clone)]
 #[cfg(windows)]
@@ -914,6 +994,15 @@ mod tests {
     }
 
     #[test]
+    fn desktop_entry_names_the_installed_desktop_file() {
+        assert_eq!(
+            desktop_entry(Some("io.github.karem505.whatRust"), false),
+            "io.github.karem505.whatRust"
+        );
+        assert_eq!(desktop_entry(None, true), "whatrust");
+        assert_eq!(desktop_entry(None, false), "whatRust");
+    }
+    #[test]
     fn notification_xml_cannot_be_broken_by_message_content() {
         assert_eq!(escape_xml("<&\"'\0"), "&lt;&amp;&quot;&apos;");
     }
@@ -936,6 +1025,22 @@ mod tests {
         r.record("wa-a", "visual", Source::Visual, "pending", None);
         r.finish("wa-a", "visual", "visual-2", true);
         assert!(!r.consume_coverage("wa-a", t));
+    }
+    #[test]
+    fn paused_log_hides_new_events_and_clear_hides_old_ones() {
+        let r = Recent::default();
+        r.record("wa-a", "one", Source::Page, "pending", None);
+        assert_eq!(r.records().len(), 1);
+        r.set_recording(false);
+        r.record("wa-a", "two", Source::Page, "pending", None);
+        assert_eq!(r.records().len(), 1, "nothing new while paused");
+        r.set_recording(true);
+        r.record("wa-a", "three", Source::Page, "pending", None);
+        assert_eq!(r.records().len(), 2);
+        r.clear_records();
+        assert!(r.records().is_empty());
+        r.record("wa-a", "four", Source::Page, "pending", None);
+        assert_eq!(r.records().len(), 1);
     }
     #[test]
     fn asynchronous_failure_removes_the_delivery_receipt() {

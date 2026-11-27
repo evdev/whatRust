@@ -910,6 +910,8 @@ pub struct AccountView {
     pub detached: bool,
     /// Profile photo as a `data:` URL, when the user picked one.
     pub photo: Option<String>,
+    /// Whether this account may raise OS notifications and play alert tones.
+    pub notifications: bool,
 }
 
 fn account_views(app: &tauri::AppHandle) -> Vec<AccountView> {
@@ -923,7 +925,7 @@ fn account_views(app: &tauri::AppHandle) -> Vec<AccountView> {
             id: a.id.clone(),
             name: a.name.clone(),
             order: a.order,
-            unread: map.get(&a.id).copied().unwrap_or(0),
+            unread: crate::unread::visible(map.get(&a.id).copied().unwrap_or(0)),
             open: app.get_webview(&accounts::window_label(&a.id)).is_some(),
             detached: cfg!(windows)
                 && app
@@ -931,6 +933,7 @@ fn account_views(app: &tauri::AppHandle) -> Vec<AccountView> {
                     .is_some_and(|v| v.window().label().starts_with("detached-")),
             is_default: accounts::startup_account(&f).is_some_and(|startup| startup.id == a.id),
             photo: crate::accountphoto::data_url(app, &a.id),
+            notifications: a.notifications,
         })
         .collect();
     views.sort_by_key(|v| v.order);
@@ -1135,6 +1138,7 @@ pub async fn add_account(
         is_default,
         detached: false,
         photo: None,
+        notifications: true,
     })
 }
 
@@ -1231,6 +1235,29 @@ pub async fn remove_account(
     };
     crate::tray::update_badge(&app, total);
     crate::tray::rebuild_menu(&app);
+    crate::integration::broadcast(&app);
+    Ok(())
+}
+
+/// Per-account notifications switch (issues #118, #103). Off: no OS
+/// notification and no WhatsApp alert tone from that account. Its unread count
+/// still shows.
+#[tauri::command]
+pub async fn set_account_notifications(
+    window: tauri::Webview,
+    app: tauri::AppHandle,
+    id: String,
+    on: bool,
+) -> Result<(), String> {
+    if is_remote(&window) {
+        return Err("forbidden".into());
+    }
+    lock::require_unlocked(&app)?;
+    let _guard = accounts::lock_mutations();
+    let mut f = accounts::load(&app);
+    accounts::set_notifications(&mut f, &id, on)?;
+    accounts::save(&app, &f).map_err(|e| e.to_string())?;
+    crate::window::apply_notification_sound(&app, crate::settings::load(&app).notification_sound);
     crate::integration::broadcast(&app);
     Ok(())
 }
