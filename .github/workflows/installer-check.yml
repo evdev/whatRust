@@ -51,6 +51,11 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "Installer exited with $($p.ExitCode)" }
           $exe = Join-Path $env:LOCALAPPDATA 'whatRust\whatrust.exe'
           if (-not (Test-Path $exe)) { throw 'Installed app was not found' }
+          $capabilities = 'HKCU:\Software\whatRust\Capabilities'
+          if ((Get-ItemProperty "$capabilities\URLAssociations").whatsapp -ne 'whatRust.WhatsApp') { throw 'Missing WhatsApp URL association' }
+          if ((Get-ItemProperty 'HKCU:\Software\RegisteredApplications').whatRust -ne 'Software\whatRust\Capabilities') { throw 'Missing Default Apps registration' }
+          $command = (Get-ItemProperty 'HKCU:\Software\Classes\whatRust.WhatsApp\shell\open\command').'(default)'
+          if ($command -ne "`"$exe`" `"%1`"") { throw "Unexpected WhatsApp handler: $command" }
           $fs = [System.IO.File]::OpenRead($exe)
           try {
             $reader = [System.IO.BinaryReader]::new($fs)
