@@ -89,7 +89,7 @@ jobs:
         if: matrix.js
         run: node src-tauri/resources/bridge.test.mjs
 
-      - name: sync status tests — offline bar after idle
+      - name: sync status tests — offline button after idle
         if: matrix.js
         run: node --test src-tauri/resources/sync-status.test.mjs
 

@@ -285,6 +285,7 @@ pub fn show_lock_window(app: &AppHandle) {
 
 fn show_lock_window_inner(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("lock") {
+        crate::window::ensure_webview_on_screen(app, &w);
         let _ = w.show();
         let _ = w.set_focus();
         return;
@@ -305,6 +306,8 @@ fn show_lock_window_inner(app: &AppHandle) {
         .build();
 
     if let Ok(win) = built {
+        crate::window::ensure_webview_on_screen(app, &win);
+        crate::window::recheck_on_screen_later(app.clone(), "lock".to_string());
         crate::appicon::set_taskbar_icon(&win.as_ref().window(), &crate::appicon::current(app));
         // Unlock can race a queued window creation; never leave a stale lock
         // screen on top after authentication has already succeeded.

@@ -542,6 +542,11 @@ pub fn run() {
             #[cfg(windows)]
             ui_health::start(handle);
             tray::setup(handle)?;
+            // A restored position can be off-screen (unplugged monitor); the
+            // plugin only checks for a rough overlap. Keep polling so a late
+            // restore or a hot-unplugged display never strands a window where
+            // it cannot be grabbed.
+            window::start_offscreen_watchdog(handle);
             // Fork: do not start the upstream self-updater. It would check
             // the original repo and can install those releases over this build.
             // update_service::start(handle);

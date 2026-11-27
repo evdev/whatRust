@@ -42,7 +42,7 @@ function liveSocket(overrides = {}) {
   };
 }
 
-test("bridge exposes the recovery hook the offline bar calls", () => {
+test("bridge exposes the recovery hook the offline button calls", () => {
   assert.match(bridge, /window\.__whatrustRecoverConnection\s*=\s*function/);
 });
 
@@ -78,7 +78,7 @@ test("whatsapp's own offline copy counts, a chat quoting it does not", () => {
   };
   const ours = {
     textContent: "WhatsApp is offline.",
-    closest: (sel) => (sel.includes("__whatrust_sync") ? {} : null),
+    closest: (sel) => (sel.includes("__whatrust_sync_tab") ? {} : null),
   };
   const doc = {
     querySelectorAll: () => [alert, quoted, ours],
@@ -112,7 +112,7 @@ test("a minute of timer clamp is not sleep, and a long freeze is", () => {
   assert.equal(state.sawLiveEvent, false);
 });
 
-test("a night away shows the reconnect bar as soon as the clock jumps", () => {
+test("a night away shows the reconnect button as soon as the clock jumps", () => {
   const api = load();
   const limits = api.LIMITS;
   let state = api.noteLoggedIn(api.initialState(), true);
@@ -120,7 +120,8 @@ test("a night away shows the reconnect bar as soon as the clock jumps", () => {
   state = api.noteTick(state, 0, limits.stallMs);
   const morning = 8 * 60 * 60 * 1000;
   state = api.noteTick(state, morning, limits.stallMs);
-  assert.equal(api.assess(state, morning, limits), "stale");
+  assert.equal(api.assess(state, morning, limits), "hidden", "a living channel still has the prove window");
+  assert.equal(api.assess(state, morning + limits.proveMs, limits), "stale");
   assert.equal(api.assess(state, morning + limits.graceMs, limits), "stale");
   state = api.noteDismiss(state, morning + limits.graceMs, limits);
   assert.equal(api.assess(state, morning + limits.graceMs, limits), "hidden");
@@ -145,7 +146,62 @@ test("a live event or later socket traffic clears the stale warning", () => {
   state = api.noteTick(state, wake + limits.graceMs + limits.stallMs, limits.stallMs);
   const again = state.wakeAt;
   state = api.noteReading(state, { live: true, pending: false }, again, true);
+  assert.equal(api.assess(state, again + limits.graceMs, limits), "stale", "staying connected is not a fresh socket");
+  state = api.noteReading(state, { live: false, pending: true }, again, false);
+  state = api.noteReading(state, { live: true, pending: false }, again, false);
   assert.equal(api.assess(state, again + limits.graceMs, limits), "hidden");
+});
+
+test("a connected session that stops receiving is stale even without a clock jump", () => {
+  const api = load();
+  const limits = api.LIMITS;
+  let state = api.noteLoggedIn(api.initialState(), true);
+  state = api.noteReading(state, { live: true, pending: false }, 0, false);
+  state = api.noteTraffic(state, 0);
+  assert.equal(api.assess(state, limits.stallMs - 1, limits), "hidden");
+  assert.equal(api.assess(state, limits.stallMs, limits), "stale");
+  state = api.noteTraffic(state, limits.stallMs);
+  assert.equal(api.assess(state, limits.stallMs, limits), "hidden");
+  assert.equal(api.assess(state, limits.stallMs * 2, limits), "stale");
+  let quiet = api.noteLoggedIn(api.initialState(), true);
+  quiet = api.noteReading(quiet, { live: true, pending: false }, 0, false);
+  assert.equal(api.assess(quiet, limits.stallMs - 1, limits), "hidden");
+  assert.equal(api.assess(quiet, limits.stallMs, limits), "stale", "a session that never receives anything goes stale too");
+});
+
+test("incoming port messages count as sync traffic and can be removed", () => {
+  const api = load();
+  let hits = 0;
+  let stored = null;
+  const added = [];
+  const removed = [];
+  const proto = {
+    addEventListener(type, fn) { added.push([type, fn]); },
+    removeEventListener(type, fn) { removed.push([type, fn]); },
+  };
+  Object.defineProperty(proto, "onmessage", {
+    configurable: true,
+    get() { return stored; },
+    set(fn) { stored = fn; },
+  });
+  function MessagePort() {}
+  MessagePort.prototype = proto;
+  const target = { WeakMap, MessagePort, __wrSyncTraffic() { hits++; } };
+  api.watchSocketMessages(target);
+  const port = new MessagePort();
+  let ran = 0;
+  function onPort() { ran++; }
+  port.addEventListener("message", onPort);
+  added[0][1]();
+  assert.equal(hits, 1);
+  assert.equal(ran, 1);
+  port.onmessage = function () { ran++; };
+  port.onmessage();
+  assert.equal(hits, 2);
+  port.removeEventListener("message", onPort);
+  assert.equal(removed[0][1], added[0][1], "removeEventListener sees the wrapped listener");
+  api.watchSocketMessages(target);
+  assert.equal(proto.__wrSyncMsgPatch, true);
 });
 
 test("hiding the window overnight is a stall; a short hide is not", () => {
@@ -186,7 +242,7 @@ test("the browser being offline and whatsapp's banner show immediately enough to
   assert.equal(api.assess(state, limits.browserHoldMs, limits), "hidden");
 });
 
-test("the bar appears after a long idle and reconnect reloads the page", () => {
+test("a small rail button appears after a long idle and reconnect reloads the page", () => {
   let clock = 5_000;
   const timeouts = [];
   const calls = [];
@@ -200,29 +256,31 @@ test("the bar appears after a long idle and reconnect reloads the page", () => {
     this.attrs = {};
     this.listeners = {};
     this.textContent = "";
+    this.title = "";
     this.isConnected = false;
   }
   Node.prototype.setAttribute = function (name, value) { this.attrs[name] = String(value); };
+  Node.prototype.getAttribute = function (name) { return Object.hasOwn(this.attrs, name) ? this.attrs[name] : null; };
   Node.prototype.addEventListener = function (type, fn) { (this.listeners[type] ||= []).push(fn); };
   Node.prototype.appendChild = function (child) {
     child.parent = this;
-    if (!this.children.includes(child)) this.children.push(child);
+    this.children = this.children.filter((node) => node !== child);
+    this.children.push(child);
     child.isConnected = true;
     return child;
   };
-  Node.prototype.attachShadow = function () {
-    const shadow = new Node("#shadow");
-    this.shadowRoot = shadow;
-    return shadow;
-  };
+  Object.defineProperty(Node.prototype, "lastChild", { get() { return this.children[this.children.length - 1] || null; } });
   const documentElement = new Node("html");
   documentElement.isConnected = true;
+  const stack = new Node("span");
+  stack.setAttribute("data-wr-todo-stack", "native");
+  documentElement.appendChild(stack);
   const doc = {
     documentElement,
     visibilityState: "visible",
     createElement: (tag) => new Node(tag),
     getElementById: (id) => (ids.has(id) ? { id } : null),
-    querySelector: () => null,
+    querySelector: (sel) => (String(sel).includes("data-wr-todo-stack") ? stack : null),
     querySelectorAll: () => [],
     addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
   };
@@ -251,27 +309,27 @@ test("the bar appears after a long idle and reconnect reloads the page", () => {
   const api = target.__wrSyncStatus;
   try {
     api.mount(target);
-    const host = documentElement.children.find((child) => child.id === "__whatrust_sync");
-    assert.ok(host, "banner is mounted");
-    assert.equal(host.hidden, true);
+    const tab = stack.children.find((child) => child.id === "__whatrust_sync_tab");
+    assert.ok(tab, "the sync button joins the shortcut stack");
+    assert.equal(stack.lastChild, tab, "it sits last, right above Media");
+    assert.equal(tab.hidden, true);
+    assert.equal(tab.style.display, "none");
     clock += api.LIMITS.stallMs + 10;
     target.__wrSyncRefresh();
-    assert.equal(host.hidden, true, "still inside the grace period");
+    assert.equal(tab.hidden, true, "still inside the grace period");
     assert.ok(timeouts.some((timer) => timer.ms >= api.LIMITS.graceMs));
     clock += api.LIMITS.graceMs + 50;
     timeouts.at(-1).fn();
-    assert.equal(host.hidden, false);
-    const bar = host.shadowRoot.children.find((child) => child.children && child.children.length);
-    const sentence = bar.children[0].textContent;
-    const reconnect = bar.children[1];
-    const dismiss = bar.children[2];
-    assert.equal(sentence, "WhatsApp stopped syncing.");
-    assert.equal(reconnect.textContent, "Reconnect");
-    reconnect.listeners.click.forEach((fn) => fn({ stopPropagation() {} }));
+    assert.equal(tab.hidden, false);
+    assert.equal(tab.style.display, "flex");
+    assert.equal(tab.style.position, "relative", "no fixed banner covering the chat");
+    assert.equal(tab.getAttribute("aria-label"), "WhatsApp stopped syncing. — Reconnect");
+    assert.equal(tab.style.background, "#f0bd68");
+    tab.listeners.click.forEach((fn) => fn({ stopPropagation() {} }));
     assert.ok(calls.includes("recover"));
     assert.ok(calls.some((call) => call.cmd === "report_sync_offline" && call.args.offline === true));
-    dismiss.listeners.click.forEach((fn) => fn({ stopPropagation() {} }));
-    assert.equal(host.hidden, true);
+    tab.listeners.contextmenu.forEach((fn) => fn({ preventDefault() {}, stopPropagation() {} }));
+    assert.equal(tab.hidden, true);
     const offlineCalls = calls.filter((call) => call.cmd === "report_sync_offline");
     assert.equal(offlineCalls.at(-1).args.offline, false, "dismissing a suspicion clears the tray too");
   } finally {

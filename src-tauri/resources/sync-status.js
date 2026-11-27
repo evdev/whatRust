@@ -4,13 +4,15 @@
  * die while the chat list still looks signed in. The page then has no banner
  * and its own reconnect control never appears, so there is nothing to click.
  * This watches the session and, when sync is gone or can no longer be trusted,
- * shows a bar with Reconnect. Reconnect uses the same recovery as a stuck
+ * shows a small rail button with Reconnect. Reconnect uses the same recovery as a stuck
  * WhatsApp reconnect button: drop the service worker, then reload the page.
  *
- * A clock jump of a few minutes is sleep (hidden-page timer clamps stay near
- * one minute). Hiding the window for half an hour is the "left in the tray
- * overnight" case, where timers may still have been running. A reading that
- * merely stayed "connected" across that gap is not proof the socket woke up.
+ * The socket's own state is not enough. On a live session it stays the string
+ * "CONNECTED" while the bytes move on a MessagePort, not on the Worker
+ * "message" event. A reading that merely stayed connected, or a network
+ * "online" event after wake, is not proof that sync resumed. Incoming port
+ * messages are. A few minutes without one means the session has stopped,
+ * including when timers kept running and the clock never jumped.
  */
 (function () {
   "use strict";
@@ -19,8 +21,10 @@
   var LIMITS = {
     stallMs: 3 * 60 * 1000,
     hiddenStallMs: 30 * 60 * 1000,
-    // A freeze this long is a night away, not a reconnect WhatsApp is about to finish.
+    // A freeze this long is a night away. Give a living channel a few seconds
+    // to deliver a message before warning; a reconnect still gets the longer grace.
     immediateMs: 10 * 60 * 1000,
+    proveMs: 5 * 1000,
     graceMs: 20 * 1000,
     holdMs: 12 * 1000,
     pendingHoldMs: 30 * 1000,
@@ -45,6 +49,7 @@
       stallToken: state.stallToken,
       hiddenAt: state.hiddenAt,
       trafficAt: state.trafficAt,
+      liveSince: state.liveSince,
       sawLiveEvent: state.sawLiveEvent,
       reading: state.reading,
       offlineSince: state.offlineSince,
@@ -64,6 +69,7 @@
       stallToken: 0,
       hiddenAt: null,
       trafficAt: null,
+      liveSince: null,
       sawLiveEvent: false,
       reading: null,
       offlineSince: null,
@@ -149,7 +155,7 @@
     for (var i = 0; i < nodes.length; i++) {
       var el = nodes[i];
       if (!el) continue;
-      if (el.closest && el.closest("#__whatrust_sync, [data-whatrust-sync], #main, [data-id]")) continue;
+      if (el.closest && el.closest("#__whatrust_sync_tab, [data-whatrust-sync], #main, [data-id]")) continue;
       var text = String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
       if (text && text.length < 240 && OFFLINE_TEXT.test(text)) return true;
     }
@@ -201,6 +207,9 @@
   }
 
   function noteReading(state, reading, now, fromEvent) {
+    // The event flag still forces an immediate recheck. It is not evidence:
+    // wake fires "online" while a dead socket stays CONNECTED.
+    void fromEvent;
     var next = clone(state);
     var was = state.reading;
     next.reading = reading;
@@ -214,7 +223,14 @@
     } else {
       next.offlineSince = null;
     }
-    if (state.wakeAt && reading && reading.live && (fromEvent || (was && was.live === false))) next.sawLiveEvent = true;
+    if (reading && reading.live) {
+      if (state.liveSince == null) next.liveSince = now;
+    } else {
+      next.liveSince = null;
+    }
+    // A network "online" event while the socket never left CONNECTED is how a
+    // dead session looks after wake. Only a real drop-and-return counts.
+    if (state.wakeAt && reading && reading.live && was && was.live === false) next.sawLiveEvent = true;
     return next;
   }
 
@@ -252,29 +268,46 @@
     else if (reading && reading.pending && (s.pendingForMs || 0) >= s.pendingHoldMs) reason = "offline";
     else if (reading && reading.live === false && !reading.pending && (s.offlineForMs || 0) >= s.holdMs) reason = "offline";
     else if (s.stalled && !(reading && reading.pending) && (s.sinceWakeMs || 0) >= s.graceMs && !s.confirmedSinceWake) reason = "stale";
+    else if (s.trafficSilent && !(s.stalled && (s.sinceWakeMs || 0) < s.graceMs)) reason = "stale";
     if (reason !== "hidden" && s.dismissedReason === reason) return "hidden";
     return reason;
+  }
+
+  function graceFor(gap, limits) {
+    var lim = limits || LIMITS;
+    return (gap || 0) >= lim.immediateMs ? lim.proveMs : lim.graceMs;
   }
 
   function assess(state, now, limits) {
     var lim = limits || LIMITS;
     var stalled = state.wakeAt != null;
+    var reading = state.reading;
+    var live = !!(reading && reading.live);
     var confirmed = !stalled || !!(
-      (state.sawLiveEvent && state.reading && state.reading.live) ||
-      (state.trafficAt != null && state.trafficAt >= state.wakeAt + lim.trafficSettleMs && state.reading && state.reading.live)
+      (state.sawLiveEvent && live) ||
+      (state.trafficAt != null && state.trafficAt >= state.wakeAt + lim.trafficSettleMs && live)
+    );
+    var trafficAge = state.trafficAt == null ? null : elapsed(state.trafficAt, now);
+    var liveFor = elapsed(state.liveSince, now);
+    var trafficSilent = !!(
+      live &&
+      state.liveSince != null &&
+      liveFor >= lim.stallMs &&
+      (trafficAge == null || trafficAge >= lim.stallMs)
     );
     return judge({
       loggedIn: state.loggedIn,
       domOffline: state.domOffline,
       browserOfflineForMs: elapsed(state.browserOfflineSince, now),
-      reading: state.reading,
+      reading: reading,
       offlineForMs: elapsed(state.offlineSince, now),
       pendingForMs: elapsed(state.pendingSince, now),
       stalled: stalled,
       sinceWakeMs: stalled ? elapsed(state.wakeAt, now) : 0,
       confirmedSinceWake: confirmed,
+      trafficSilent: trafficSilent,
       dismissedReason: state.dismissedReason || "",
-      graceMs: (state.stallGap || 0) >= lim.immediateMs ? 0 : lim.graceMs,
+      graceMs: graceFor(state.stallGap, lim),
       holdMs: lim.holdMs,
       pendingHoldMs: lim.pendingHoldMs,
       browserHoldMs: lim.browserHoldMs,
@@ -297,6 +330,88 @@
     var reason = assess(withDismiss(state, ""), now, limits);
     if (reason === "hidden") return clone(state);
     return withDismiss(state, reason);
+  }
+
+  // WhatsApp delivers socket traffic on a MessagePort (and sometimes a Worker
+  // onmessage). The Worker "message" event on the constructor stays quiet, so
+  // a hook there never learns that sync is alive. Wrap the listeners the page
+  // installs afterwards. removeEventListener has to see the same function the
+  // page passed in, or WhatsApp leaks a handler every time it rebinds.
+  function watchSocketMessages(target) {
+    var pairs = typeof target.WeakMap === "function" ? new target.WeakMap() : null;
+    var keys = pairs ? null : [];
+    var vals = pairs ? null : [];
+    function remember(fn, wrapped) {
+      if (pairs) pairs.set(fn, wrapped);
+      else { keys.push(fn); vals.push(wrapped); }
+    }
+    function recall(fn) {
+      if (!fn) return fn;
+      if (pairs) return pairs.has(fn) ? pairs.get(fn) : null;
+      var i = keys.indexOf(fn);
+      return i === -1 ? null : vals[i];
+    }
+    function bump() {
+      if (typeof target.__wrSyncTraffic === "function") target.__wrSyncTraffic();
+    }
+    function wrapListener(fn) {
+      if (!fn || fn.__wrSyncMsg) return fn;
+      var prev = recall(fn);
+      if (prev) return prev;
+      var wrapped;
+      if (typeof fn === "function") {
+        wrapped = function () {
+          bump();
+          return fn.apply(this, arguments);
+        };
+      } else if (typeof fn === "object" && typeof fn.handleEvent === "function") {
+        var inner = fn.handleEvent;
+        wrapped = {
+          handleEvent: function () {
+            bump();
+            return inner.apply(fn, arguments);
+          }
+        };
+      } else {
+        return fn;
+      }
+      wrapped.__wrSyncMsg = true;
+      remember(fn, wrapped);
+      return wrapped;
+    }
+    function patch(proto) {
+      if (!proto || proto.__wrSyncMsgPatch) return;
+      var add = proto.addEventListener;
+      var remove = proto.removeEventListener;
+      var desc = null;
+      try { desc = Object.getOwnPropertyDescriptor(proto, "onmessage"); } catch (e) { desc = null; }
+      if (typeof add !== "function" && !(desc && typeof desc.set === "function")) return;
+      if (typeof add === "function") {
+        proto.addEventListener = function (type, fn, opts) {
+          if (type === "message") fn = wrapListener(fn);
+          return add.call(this, type, fn, opts);
+        };
+        if (typeof remove === "function") {
+          proto.removeEventListener = function (type, fn, opts) {
+            if (type === "message") fn = recall(fn) || fn;
+            return remove.call(this, type, fn, opts);
+          };
+        }
+      }
+      if (desc && typeof desc.set === "function") {
+        try {
+          Object.defineProperty(proto, "onmessage", {
+            configurable: true,
+            enumerable: desc.enumerable,
+            get: desc.get,
+            set: function (fn) { return desc.set.call(this, wrapListener(fn)); }
+          });
+        } catch (e2) {}
+      }
+      proto.__wrSyncMsgPatch = true;
+    }
+    patch(target.MessagePort && target.MessagePort.prototype);
+    patch(target.Worker && target.Worker.prototype);
   }
 
   function watchWorkers(target) {
@@ -337,58 +452,87 @@
     var graceTimer = 0;
     var eventPending = false;
     var trafficPending = false;
-    var host = doc.createElement("div");
-    host.id = "__whatrust_sync";
-    host.setAttribute("data-whatrust-sync", "1");
-    host.setAttribute("role", "status");
-    host.setAttribute("aria-live", "polite");
-    host.hidden = true;
-    host.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:2147483000";
-    var shadow = host.attachShadow({ mode: "open" });
-    var style = doc.createElement("style");
-    style.textContent = ":host{all:initial}button{font:600 13px system-ui,sans-serif;cursor:pointer}button:focus-visible{outline:2px solid #111;outline-offset:2px}.bar{display:flex;align-items:center;justify-content:center;gap:12px;box-sizing:border-box;min-height:44px;padding:8px 16px;background:#fff4ce;color:#1c1c1c;font:600 14px/1.3 system-ui,sans-serif;box-shadow:0 1px 0 #0003}.reconnect{border:0;border-radius:16px;padding:6px 14px;background:#008069;color:#fff}.dismiss{border:0;background:transparent;color:#1c1c1c;text-decoration:underline;padding:6px 4px}";
-    var bar = doc.createElement("div");
-    bar.className = "bar";
-    var text = doc.createElement("span");
-    var reconnect = doc.createElement("button");
-    reconnect.type = "button";
-    reconnect.className = "reconnect";
-    var dismiss = doc.createElement("button");
-    dismiss.type = "button";
-    dismiss.className = "dismiss";
-    bar.appendChild(text);
-    bar.appendChild(reconnect);
-    bar.appendChild(dismiss);
-    shadow.appendChild(style);
-    shadow.appendChild(bar);
-    doc.documentElement.appendChild(host);
+    var trafficQueued = false;
+    var RECONNECT_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
+    // A small rail button, not a banner: it joins the whatRust shortcut stack
+    // so it sits above the Media icon and clear of Meta AI, never covering
+    // the conversation.
+    var tab = doc.createElement("button");
+    tab.type = "button";
+    tab.id = "__whatrust_sync_tab";
+    try { tab.innerHTML = RECONNECT_SVG; } catch (svgErr) { tab.textContent = "↻"; }
+    tab.setAttribute("data-whatrust-sync", "1");
+    tab.setAttribute("role", "status");
+    tab.setAttribute("aria-live", "polite");
+    tab.hidden = true;
+    tab.style.cssText = "width:40px;height:40px;margin:4px auto;padding:0;border:0;border-radius:12px;display:none;align-items:center;justify-content:center;cursor:pointer;flex:none;position:relative";
+    function todoStack() {
+      if (!doc.querySelector) return null;
+      try {
+        return doc.querySelector("[data-wr-todo-stack='native']") || doc.querySelector("[data-wr-todo-stack='1']");
+      } catch (stackErr) { return null; }
+    }
+    function placeTab() {
+      var stack = todoStack();
+      if (stack) {
+        var switcher = false;
+        try { switcher = stack.getAttribute && stack.getAttribute("data-wr-todo-stack") === "1"; } catch (modeErr) {}
+        tab.style.position = "relative";
+        tab.style.left = "";
+        tab.style.right = "";
+        tab.style.top = "";
+        tab.style.bottom = "";
+        tab.style.zIndex = "";
+        tab.style.margin = switcher ? "0" : "4px auto";
+        tab.style.width = switcher ? "36px" : "40px";
+        tab.style.height = switcher ? "36px" : "40px";
+        tab.style.borderRadius = switcher ? "50%" : "12px";
+        var last = stack.lastElementChild !== undefined ? stack.lastElementChild : stack.lastChild;
+        if (tab.parentNode !== stack || last !== tab) stack.appendChild(tab);
+      } else {
+        if (tab.parentNode !== doc.documentElement) doc.documentElement.appendChild(tab);
+        tab.style.position = "fixed";
+        tab.style.left = "12px";
+        tab.style.bottom = "188px";
+        tab.style.zIndex = "100000";
+        tab.style.margin = "0";
+        tab.style.width = "40px";
+        tab.style.height = "40px";
+        tab.style.borderRadius = "12px";
+      }
+    }
+    placeTab();
     function stop(event) {
       if (event && event.stopPropagation) event.stopPropagation();
     }
-    host.addEventListener("click", stop);
-    host.addEventListener("pointerdown", stop);
     function paint(reason) {
-      if (!host.isConnected && doc.documentElement) doc.documentElement.appendChild(host);
       var show = reason === "offline" || reason === "stale";
-      host.hidden = !show;
+      if (show) placeTab();
+      else if (!tab.isConnected && doc.documentElement) placeTab();
+      tab.hidden = !show;
+      tab.style.display = show ? "flex" : "none";
       if (!show) return;
+      if (reason === "offline") {
+        tab.style.background = "#d34545";
+        tab.style.color = "#fff";
+      } else {
+        tab.style.background = "#f0bd68";
+        tab.style.color = "#30230b";
+      }
       var sentence = reason === "offline"
         ? L("O WhatsApp está offline.", "WhatsApp is offline.")
         : L("O WhatsApp parou de sincronizar.", "WhatsApp stopped syncing.");
       var action = L("Reconectar", "Reconnect");
-      var later = L("Agora não", "Not now");
-      if (text.textContent !== sentence) text.textContent = sentence;
-      if (reconnect.textContent !== action) reconnect.textContent = action;
-      reconnect.setAttribute("aria-label", action);
-      if (dismiss.textContent !== later) dismiss.textContent = later;
-      dismiss.setAttribute("aria-label", later);
+      var full = sentence + " — " + action;
+      tab.title = full;
+      tab.setAttribute("aria-label", full);
     }
     function invoke(cmd, args) {
       var tauri = target.__TAURI__;
       if (!tauri || !tauri.core || typeof tauri.core.invoke !== "function") return Promise.resolve(false);
       return Promise.resolve(tauri.core.invoke(cmd, args)).then(function () { return true; }, function () { return false; });
     }
-    function report(offline, barShown) {
+    function report(offline, shown) {
       if (target.__whatrustLocked) {
         reported = null;
         return;
@@ -398,7 +542,7 @@
       invoke("report_sync_offline", { offline: offline }).then(function (ok) {
         if (ok) reported = pending;
       });
-      if (barShown) invoke("dlog", { msg: "sync: offline bar shown" });
+      if (shown) invoke("dlog", { msg: "sync: offline button shown" });
     }
     // A suspicion can be dismissed. A session that is actually down stays on
     // the tray, so Reconnect is still there after the bar is closed.
@@ -435,7 +579,7 @@
     }
     function scheduleGrace() {
       if (graceTimer || state.wakeAt == null) return;
-      var left = LIMITS.graceMs - (Date.now() - state.wakeAt);
+      var left = graceFor(state.stallGap) - (Date.now() - state.wakeAt);
       if (left < 0) return;
       graceTimer = 1;
       var fire = function () {
@@ -464,22 +608,36 @@
       state = noteReading(state, connectionReading(target.WPP), now, eventPending);
       eventPending = false;
       publish();
-      var grace = (state.stallGap || 0) >= LIMITS.immediateMs ? 0 : LIMITS.graceMs;
-      if (state.wakeAt != null && !state.sawLiveEvent && now - state.wakeAt < grace) scheduleGrace();
+      var grace = graceFor(state.stallGap || 0);
+      // A message queued at the wake instant is not proof (it has to arrive
+      // after the settle time). Still arm the prove timer, or the button waits
+      // on the slow poll.
+      if (state.wakeAt != null && now - state.wakeAt < grace) scheduleGrace();
     }
-    reconnect.addEventListener("click", function (event) {
+    tab.addEventListener("click", function (event) {
       stop(event);
       if (typeof target.__whatrustRecoverConnection === "function") target.__whatrustRecoverConnection();
       else invoke("reload_account_page");
     });
-    dismiss.addEventListener("click", function (event) {
+    // A small button has no room for a second control: right-click snoozes it.
+    tab.addEventListener("contextmenu", function (event) {
+      if (event && event.preventDefault) event.preventDefault();
       stop(event);
       state = noteDismiss(state, Date.now(), LIMITS);
       publish();
     });
     target.__wrSyncTraffic = function () {
       trafficPending = true;
-      check();
+      if (trafficQueued) return;
+      trafficQueued = true;
+      var fire = function () {
+        trafficQueued = false;
+        check();
+      };
+      // The sync port can deliver dozens of messages a second. One check per
+      // beat is enough to notice silence, and it keeps the chat list responsive.
+      if (typeof target.setTimeout === "function") target.setTimeout(fire, 200);
+      else setTimeout(fire, 200);
     };
     target.__wrSyncRefresh = check;
     var previousRelang = target.__wrRelang;
@@ -487,7 +645,19 @@
       if (typeof previousRelang === "function") previousRelang();
       paint(assess(state, Date.now(), LIMITS));
     };
+    watchSocketMessages(target);
     watchWorkers(target);
+    // The shortcut stack is rebuilt on DOM churn; rejoin it if we were dropped.
+    try {
+      if (typeof target.MutationObserver === "function" && doc.documentElement) {
+        var stackWatch = new target.MutationObserver(function () {
+          if (tab.isConnected) return;
+          var current = todoStack();
+          if (current && tab.parentNode !== current) placeTab();
+        });
+        stackWatch.observe(doc.documentElement, { childList: true, subtree: true });
+      }
+    } catch (watchErr) {}
     function on(type, fn) {
       if (target.addEventListener) target.addEventListener(type, fn);
     }
@@ -527,7 +697,9 @@
     noteDismiss: noteDismiss,
     settleDismiss: settleDismiss,
     judge: judge,
+    graceFor: graceFor,
     assess: assess,
+    watchSocketMessages: watchSocketMessages,
     mount: mount,
   };
   root.__wrSyncStatus = api;

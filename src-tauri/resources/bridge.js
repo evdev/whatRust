@@ -262,7 +262,7 @@
       }, 1500);
     }, 1200);
   }
-  // The offline bar and the tray call this. WhatsApp's own control is not
+  // The offline button and the tray call this. WhatsApp's own control is not
   // always on screen after the computer has been left idle.
   window.__whatrustRecoverConnection = function () {
     recoverConnection();

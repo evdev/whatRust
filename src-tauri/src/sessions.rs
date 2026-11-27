@@ -147,6 +147,8 @@ pub fn initialize(app: &AppHandle, hidden: bool) -> tauri::Result<Window> {
         .visible(!hidden)
         .build()?;
     crate::appicon::set_taskbar_icon(&w, &icon);
+    crate::window::ensure_on_screen(app, &w);
+    crate::window::recheck_on_screen_later(app.clone(), "main".to_string());
     #[cfg(windows)]
     install_menu(app, &w)?;
     let shell = WebviewBuilder::new("shell-main", WebviewUrl::App("shell.html".into()))
